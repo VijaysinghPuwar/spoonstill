@@ -31,6 +31,7 @@
 use core::fmt;
 use std::path::PathBuf;
 
+use crate::diagnostics::Severity;
 use crate::motion::{Anchor, MotionKind};
 use crate::path_safety::PathError;
 
@@ -90,7 +91,10 @@ impl SceneId {
 
 impl fmt::Display for SceneId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        // `pad`, not `write_str`: a scene ID is printed in a column of them,
+        // and `write_str` silently ignores the formatter's width. The CLI's
+        // scene list is the case that caught this.
+        f.pad(&self.0)
     }
 }
 
@@ -318,6 +322,19 @@ impl Problem {
     }
 }
 
+impl Problem {
+    /// How much attention this deserves.
+    ///
+    /// A property of the kind, not of the caller: whether an unpaired audio
+    /// file stops a render is a domain question with one answer, and letting
+    /// each call site decide is how the same condition ends up fatal in the
+    /// CLI and ignored in the shell.
+    #[must_use]
+    pub const fn severity(&self) -> Severity {
+        self.kind.severity()
+    }
+}
+
 impl fmt::Display for Problem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.scene {
@@ -396,6 +413,52 @@ pub enum ProblemKind {
     },
     /// The project resolved to no scenes at all.
     NoScenes,
+    /// A project-level setting in `project.yaml` is unusable. Produced by the
+    /// application layer.
+    UnusableSetting {
+        /// The key, as it appears in the file.
+        field: &'static str,
+        /// The value, as written.
+        value: String,
+        /// What would have been accepted.
+        expected: &'static str,
+    },
+    /// A narration or text file in the folder pairs with no image (D-050).
+    ///
+    /// A **warning**, not an error: it is far more often a leftover take than
+    /// a scene the operator lost. Reported rather than skipped silently,
+    /// because "my scene 12 never rendered" is otherwise unanswerable.
+    UnpairedFile {
+        /// The file, relative to the project root.
+        value: String,
+    },
+    /// An image in the folder appears in no manifest row (D-056).
+    ///
+    /// A **warning**. The manifest is the complete list of scenes when it
+    /// exists, so this image will not be rendered — which is fine when it is a
+    /// source asset and wrong when it is a row someone forgot to add. Only the
+    /// operator can tell those apart, so they are told.
+    UnlistedImage {
+        /// The file, relative to the project root.
+        value: String,
+    },
+}
+
+impl ProblemKind {
+    /// Whether this stops a render.
+    ///
+    /// The two warnings are the unresolved-input cases of D-050: something in
+    /// the folder was not used. Everything else is an error, because
+    /// everything else means a scene the operator asked for cannot be built —
+    /// and rendering 499 of 500 scenes without saying so is the failure this
+    /// whole validation stage exists to prevent.
+    #[must_use]
+    pub const fn severity(&self) -> Severity {
+        match self {
+            ProblemKind::UnpairedFile { .. } | ProblemKind::UnlistedImage { .. } => Severity::Warn,
+            _ => Severity::Error,
+        }
+    }
 }
 
 impl fmt::Display for ProblemKind {
@@ -440,6 +503,21 @@ impl fmt::Display for ProblemKind {
             ProblemKind::NoScenes => {
                 f.write_str("no scenes — no manifest rows and no image/narration pairs found")
             }
+            ProblemKind::UnusableSetting {
+                field,
+                value,
+                expected,
+            } => write!(f, "`{field}`: {value:?} is not {expected}"),
+            ProblemKind::UnpairedFile { value } => {
+                write!(
+                    f,
+                    "{value:?} pairs with no image, so it is not part of any scene"
+                )
+            }
+            ProblemKind::UnlistedImage { value } => write!(
+                f,
+                "{value:?} is in the folder but in no manifest row, so it will not be rendered"
+            ),
         }
     }
 }
@@ -462,10 +540,37 @@ pub struct Validation {
 }
 
 impl Validation {
-    /// No problems at all. The only condition under which a render may start.
+    /// No problems at all — not even a warning.
     #[must_use]
     pub fn is_clean(&self) -> bool {
         self.problems.is_empty()
+    }
+
+    /// Whether anything found stops a render.
+    ///
+    /// **This, not [`Self::is_clean`], is the render gate.** A warning means
+    /// something in the folder went unused (D-050); it does not mean the
+    /// scenes that did resolve are wrong, and refusing to render 500 good
+    /// scenes over one stray take would train operators to ignore the output.
+    #[must_use]
+    pub fn has_errors(&self) -> bool {
+        self.problems
+            .iter()
+            .any(|p| p.severity() >= Severity::Error)
+    }
+
+    /// Every problem that stops the render.
+    pub fn errors(&self) -> impl Iterator<Item = &Problem> {
+        self.problems
+            .iter()
+            .filter(|p| p.severity() >= Severity::Error)
+    }
+
+    /// Every problem that does not.
+    pub fn warnings(&self) -> impl Iterator<Item = &Problem> {
+        self.problems
+            .iter()
+            .filter(|p| p.severity() < Severity::Error)
     }
 }
 
@@ -697,6 +802,7 @@ pub fn validate_drafts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diagnostics::Severity;
 
     fn provider() -> ProviderId {
         ProviderId("elevenlabs".into())
@@ -899,6 +1005,14 @@ mod tests {
         assert_eq!(scene.motion.anchor, Some(Anchor::NorthWest));
     }
 
+    /// Printed in a column, so it has to honour a width. `write_str` does not.
+    #[test]
+    fn a_scene_id_pads_to_a_column_width() {
+        let id = SceneId::new("001").expect("valid");
+        assert_eq!(format!("[{id:<7}]"), "[001    ]");
+        assert_eq!(format!("[{id:>7}]"), "[    001]");
+    }
+
     #[test]
     fn a_scene_id_may_contain_spaces_and_unicode_but_not_a_path() {
         assert_eq!(
@@ -999,6 +1113,29 @@ mod tests {
             .map(|d| validate(d).expect("valid").source.kind())
             .collect();
         assert_eq!(badges, vec!["tts", "file", "silent"]);
+    }
+
+    /// The render gate is `has_errors`, not `is_clean`. A stray take in the
+    /// folder must not stop 500 good scenes (D-050) — and an operator who is
+    /// blocked by a warning learns to ignore warnings.
+    #[test]
+    fn a_warning_does_not_stop_a_render_but_an_error_does() {
+        let warning = Problem::in_project(ProblemKind::UnpairedFile {
+            value: "take-2.mp3".to_owned(),
+        });
+        let error = Problem::in_project(ProblemKind::NoScenes);
+
+        assert_eq!(warning.severity(), Severity::Warn);
+        assert_eq!(error.severity(), Severity::Error);
+
+        let validation = Validation {
+            scenes: Vec::new(),
+            problems: vec![warning],
+        };
+        assert!(!validation.is_clean(), "the warning is still reported");
+        assert!(!validation.has_errors(), "but it does not stop the render");
+        assert_eq!(validation.warnings().count(), 1);
+        assert_eq!(validation.errors().count(), 0);
     }
 
     #[test]

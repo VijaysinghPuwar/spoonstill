@@ -11,8 +11,10 @@
 #![warn(missing_docs)]
 
 pub mod diagnostics;
+pub mod import;
 pub mod render;
 
+pub use import::{ImportError, MediaCheck, Mode, ProbeCheck, Project, ResolvedScene, Role};
 pub use render::{RenderError, RenderSceneOptions, render_scene};
 
 /// The types the control surface needs, re-exported through the layer it is

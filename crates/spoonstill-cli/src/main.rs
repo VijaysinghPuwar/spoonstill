@@ -32,11 +32,32 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Check a project folder and report every problem at once.
+    Validate(ValidateArgs),
     /// Render a single scene to one segment.
     RenderScene(RenderSceneArgs),
     /// Diagnostics: logs and the bundle to send when something goes wrong.
     #[command(subcommand)]
     Diagnostics(DiagnosticsCommand),
+}
+
+#[derive(Debug, Args)]
+struct ValidateArgs {
+    /// The project folder. Defaults to the current directory.
+    #[arg(value_name = "DIR", default_value = ".")]
+    project: PathBuf,
+
+    /// List every scene, however many there are. Without this, the list is
+    /// printed only for a project small enough to read.
+    #[arg(long)]
+    list: bool,
+
+    /// Skip the ffprobe check on every referenced file.
+    ///
+    /// Faster, and weaker: extensions are a hint, not evidence (D-052), so a
+    /// truncated JPEG or a zero-byte MP3 will pass and then fail the render.
+    #[arg(long)]
+    no_probe: bool,
 }
 
 #[derive(Debug, Args)]
@@ -155,12 +176,123 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
+        Command::Validate(args) => validate(args),
         Command::RenderScene(args) => render_scene(args),
         Command::Diagnostics(DiagnosticsCommand::Export { out, project }) => {
             export_diagnostics(out, project)
         }
         Command::Diagnostics(DiagnosticsCommand::Where { project }) => show_log_location(project),
     }
+}
+
+/// How many scenes are worth listing without being asked.
+///
+/// A three-scene project wants the list — it is the review grid of D-051 in
+/// text. A 500-scene project does not, and printing it anyway is how the
+/// problem summary scrolls off the screen (D-002).
+const SCENES_WORTH_LISTING: usize = 20;
+
+/// Names every file, resolves every path, probes every file, and reports the
+/// lot. The one command an operator runs before committing to a batch.
+fn validate(args: ValidateArgs) -> Result<(), String> {
+    // D-052: extensions are a hint, not evidence. `--no-probe` is offered
+    // because a 500-file probe is not free, and it is named for what it gives
+    // up rather than for what it saves.
+    let probe = spoonstill_app::ProbeCheck::from_env();
+    let skip = SkipProbe;
+    let media: &dyn spoonstill_app::MediaCheck = if args.no_probe { &skip } else { &probe };
+
+    let project = spoonstill_app::import::load(&args.project, media).map_err(|e| e.to_string())?;
+
+    let source = match &project.mode {
+        spoonstill_app::Mode::Manifest(path) => format!(
+            "manifest {}",
+            path.file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+        ),
+        spoonstill_app::Mode::Convention => "stem-keyed pairing".to_owned(),
+    };
+    println!("{} — {}", project.root.display(), source);
+
+    let (mut tts, mut file, mut silent) = (0_usize, 0_usize, 0_usize);
+    for scene in &project.scenes {
+        match scene.spec.source.kind() {
+            "tts" => tts += 1,
+            "file" => file += 1,
+            _ => silent += 1,
+        }
+    }
+    println!(
+        "  {} scene{} — {tts} narrated, {file} supplied, {silent} silent",
+        project.scenes.len(),
+        if project.scenes.len() == 1 { "" } else { "s" }
+    );
+
+    if args.list || project.scenes.len() <= SCENES_WORTH_LISTING {
+        // Width from the longest id, so a project of `001`s and one of
+        // `opening`/`middle`/`closing` both line up.
+        let width = project
+            .scenes
+            .iter()
+            .map(|s| s.spec.id.as_str().chars().count())
+            .max()
+            .unwrap_or(0);
+        for (index, scene) in project.scenes.iter().enumerate() {
+            println!(
+                "  {index:>4}  {:<width$}  {:<6}  {}",
+                scene.spec.id,
+                scene.spec.source.kind(),
+                short(&scene.image, &project.root)
+            );
+        }
+    }
+
+    let errors = project.errors().count();
+    let warnings = project.warnings().count();
+    if project.problems.is_empty() {
+        println!("  no problems");
+        return Ok(());
+    }
+
+    println!();
+    for problem in &project.problems {
+        println!("  {:<5} {problem}", problem.severity().as_str());
+    }
+    println!();
+
+    if errors == 0 {
+        println!(
+            "  {warnings} warning{} — nothing here stops a render",
+            if warnings == 1 { "" } else { "s" }
+        );
+        return Ok(());
+    }
+
+    Err(format!(
+        "{errors} problem{} in {} ({warnings} warning{})",
+        if errors == 1 { "" } else { "s" },
+        args.project.display(),
+        if warnings == 1 { "" } else { "s" }
+    ))
+}
+
+/// `--no-probe`: believe every extension.
+struct SkipProbe;
+
+impl spoonstill_app::MediaCheck for SkipProbe {
+    fn check(&self, _path: &std::path::Path, _role: spoonstill_app::Role) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// A path relative to the project root when it is inside it, for a report that
+/// is readable at 500 rows.
+fn short(path: &std::path::Path, root: &std::path::Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
 }
 
 fn render_scene(args: RenderSceneArgs) -> Result<(), String> {

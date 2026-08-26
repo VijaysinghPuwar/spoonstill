@@ -178,6 +178,16 @@ impl OutputSpec {
     pub const fn height(&self) -> u32 {
         self.height
     }
+    /// The short edge, which is what the operator actually chose — width and
+    /// height fall out of it and the aspect (D-070).
+    #[must_use]
+    pub const fn short_edge(&self) -> u32 {
+        if self.width < self.height {
+            self.width
+        } else {
+            self.height
+        }
+    }
     /// Output frame rate in whole frames per second.
     #[must_use]
     pub const fn fps(&self) -> u32 {

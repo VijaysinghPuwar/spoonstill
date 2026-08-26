@@ -12,6 +12,15 @@ spoonstill-core  = { workspace = true }
 spoonstill-media = { workspace = true }
 spoonstill-tts   = { workspace = true }
 spoonstill-state = { workspace = true }
+# `project.yaml` and the CSV manifest (D-013, D-050). These live here rather
+# than in spoonstill-core, which depends on nothing (D-010) — the domain model
+# does not know what a file format is.
+serde         = { version = "1", features = ["derive"] }
+# D-056: serde_yaml is deprecated and archived; this is the maintained fork,
+# same API, MIT.
+serde_yaml_ng = "0.10"
+# Unlicense/MIT.
+csv           = "1"
 
 [lints]
 workspace = true

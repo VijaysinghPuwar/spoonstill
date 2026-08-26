@@ -1,7 +1,7 @@
 # decisions.md — single source of truth for `spoonstill`
 
 **Status:** active. This file wins over every other document in the repo.
-**Last updated:** 2026-08-26 (M2 slice 1: D-054 and D-055 added).
+**Last updated:** 2026-08-26 (M2 slices 1-2: D-054, D-055 and D-056 added).
 
 `plan/PROJECT_BRIEF.md` and `plan/BRIEF_RECONCILIATION.md` both carry a
 "superseded by `decisions.md`" banner. Until now that file did not exist, so
@@ -614,6 +614,60 @@ Scene IDs are validated rather than being plain strings, because an ID names
 the segment file on disk: blank, `.`/`..`, path separators and control
 characters are refused. Spaces, Unicode and emoji are **not** — D-052 says
 those are the normal case, and every command is an argument vector (D-011).
+
+### D-056 — What a project folder is, and which file wins · Accepted
+
+Decided 2026-08-26, during M2 slice 2, implemented in
+`spoonstill_app::import`.
+
+D-050 fixes the two input modes and says "the manifest wins where both exist".
+That sentence admits two readings at n=500, and they render different films, so
+it is settled here rather than in code:
+
+- **`project.yaml` holds settings, never scenes.** Rows come from the CSV
+  manifest or from the folder — never from three places. 500 rows in YAML is
+  not a file anyone hand-edits, and a third source of rows is a third set of
+  precedence rules.
+- **Everything is optional, including `project.yaml` itself.** A folder of
+  images is a valid project. This is what makes D-050's convention mode real
+  rather than a documented courtesy.
+- **A manifest, when present, is the complete list of scenes.** Not a set of
+  per-stem overrides merged onto a folder scan. The rejected reading — merge,
+  manifest wins per stem — turns a 3-row manifest in a 500-image folder into a
+  500-scene render, which is never what the operator meant by writing three
+  rows. Images the manifest does not mention produce a **warning** (D-055's
+  severity split), because only the operator knows whether an unlisted image is
+  a source asset or a row they forgot.
+- **A manifest named explicitly in `project.yaml` must exist.** Falling back to
+  convention mode after the operator named a file would render a different film
+  from the one they described, silently. The *default* manifest name being
+  absent is not an error: that is simply convention mode.
+- **Scene order is manifest order, or natural-sorted stems.** Order is the
+  film's order, the `scene_index` that seeds motion (D-035) and part of the
+  cache key (D-043) — so an unstable order re-rolls every move and misses every
+  cache entry. Natural, so `scene2` precedes `scene10`; numbers before text, so
+  `001.jpg` precedes `intro.jpg`.
+- **The scene ID is the image's file stem in both modes**, so a project can move
+  between modes without every scene changing identity.
+- **An unpaired image holds for `defaults.duration`, four seconds by default.**
+  D-050 says "default duration" without fixing a number; this is the number.
+
+Strictness, following D-055: unknown keys in `project.yaml` and unknown columns
+in the CSV are **errors**, not ignored. `apsect: 9:16` would otherwise render
+500 scenes at 16:9 with nothing on screen to say why, and `zoom_ancor` would
+give every scene the seeded anchor instead of the specified one.
+
+Dependencies, per the licence gate in plan.md: `serde_yaml_ng` 0.10 (MIT) —
+`serde_yaml` itself is deprecated and archived, and this is the maintained fork
+with the same API; `csv` 1 (Unlicense/MIT). Both sit in `spoonstill-app`, never
+in `spoonstill-core`, which still depends on nothing (D-010): the domain model
+does not know what a file format is.
+
+Two things abort a load rather than joining the problem list — a `project.yaml`
+that will not parse, and a manifest that will not parse — because after either
+there is nothing left to validate against. Everything else, from every stage,
+lands in one list, ordered project-first and then scene by scene in render
+order, so an operator fixes a project row by row rather than stage by stage.
 
 ---
 

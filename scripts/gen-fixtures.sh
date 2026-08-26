@@ -73,6 +73,54 @@ $FF -f lavfi -i "sine=frequency=440:duration=5.3" -c:a libmp3lame -q:a 9 \
 : > "$OUT/zero_byte.mp3"
 say "zero_byte.mp3" "0 bytes"
 
+# --- project folders (D-050) ------------------------------------------------
+# The M2 gate renders a project "an operator could have produced by hand", so
+# these are built out of the stills and audio above rather than described in
+# prose. Both modes, because D-050 has two and the manifest wins.
+PROJECTS="fixtures/projects"
+
+echo
+echo "  projects:"
+
+# Convention mode: stem-keyed pairing, one scene per source (D-050).
+#   001 image + text  -> TTS
+#   002 image + audio -> supplied
+#   003 image alone   -> silent, default duration
+MIXED="$PROJECTS/mixed"
+rm -rf "$MIXED"; mkdir -p "$MIXED"
+cp "$OUT/land.jpg"   "$MIXED/001.jpg"
+printf 'A still photograph, held for as long as this line takes to say.\n' \
+     > "$MIXED/001.txt"
+cp "$OUT/port.jpg"   "$MIXED/002.jpg"
+cp "$OUT/n.wav"      "$MIXED/002.wav"
+cp "$OUT/square.jpg" "$MIXED/003.jpg"
+say "$MIXED" "3 scenes, convention mode"
+
+# Manifest mode: the same three scenes, spelled out, plus the per-scene motion
+# overrides that only a manifest can express.
+CSV="$PROJECTS/manifest"
+rm -rf "$CSV"; mkdir -p "$CSV/img" "$CSV/audio"
+cp "$OUT/land.jpg"   "$CSV/img/opening.jpg"
+cp "$OUT/port.jpg"   "$CSV/img/middle.jpg"
+cp "$OUT/square.jpg" "$CSV/img/closing.jpg"
+cp "$OUT/n.wav"      "$CSV/audio/middle.wav"
+cat > "$CSV/project.yaml" <<'YAML'
+# An input. spoonstill never writes to this file (D-013).
+output: film.mp4
+aspect: 16:9
+short_edge: 1080
+fps: 30
+defaults:
+  duration: 3.0
+YAML
+cat > "$CSV/scenes.csv" <<'CSV_ROWS'
+image,text,audio_file,voice,duration,zoom_direction,zoom_anchor
+img/opening.jpg,A line to be spoken over the opening still.,,,,zoom-in,center
+img/middle.jpg,,audio/middle.wav,,,pan-right,north
+img/closing.jpg,,,,4.5,zoom-out,south-east
+CSV_ROWS
+say "$CSV" "3 scenes, manifest mode"
+
 # --- fixtures ffmpeg cannot synthesize --------------------------------------
 # CMYK JPEG and EXIF-rotated JPEG need an encoder that writes those tags.
 # They are listed in plan.md as commit-only fixtures; recorded here so the gap
