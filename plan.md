@@ -424,12 +424,19 @@ partial failure, and restart — three things that do not compose by accident.
 - Hard cuts are the default: concat demuxer plus stream copy, after every
   segment has passed the profile assertion (D-041). This is what makes n=500
   affordable.
-- **Crossfades between stills are a separate, explicitly slower mode**, because
-  `xfade` forces a composed filter graph and a re-encode whose cost grows with
-  clip count. Measure that curve before designing the UI for it —
-  `ffmpeg-findings.md` §8 lists it as asserted and unmeasured, and the
-  transition overlap has to be modelled in the duration maths (D-022), not
-  bolted on after.
+- **Transitions are a setting: `cut`, `fade`, `dissolve` (D-057).** Project
+  level in `project.yaml`, with the same two names as optional per-scene
+  manifest columns, matching how `zoom_direction` already works.
+- **Measure the `xfade` cost curve before changing the default.**
+  `ffmpeg-findings.md` §8 lists it as asserted and unmeasured; D-057 keeps the
+  default at `cut` until there is a number, because anything else re-encodes
+  both sides of every join and n=500 is the design point.
+- **The overlap comes out of the pads, never the narration (D-057).** A
+  transition of length `d` overlaps the outgoing tail pad and the incoming head
+  pad; where they are too short they are extended, not trimmed — the same rule
+  as D-022, applied at the join. The film's duration is the sum of the scenes
+  minus `d` per join, computed and asserted rather than left to `xfade` to
+  imply.
 
 **Cache (D-043)**
 

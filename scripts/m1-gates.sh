@@ -69,13 +69,47 @@ gate_four() {
 check "still render-scene with a Unicode, spaced path" gate_four
 
 # --- gate 5: cancellation is clean ------------------------------------------
+# Interrupt the render *once it is demonstrably running*, rather than after a
+# fixed sleep.
+#
+# The fixed sleep was a race: this render takes ~1.24 s and the gate waited
+# 1.0 s, so a quiet machine finished the file before the signal arrived and the
+# gate failed for a reason that had nothing to do with cancellation. A flaky
+# exit gate is worse than a slow one — `make gates` is what this project trusts
+# to say where it stands.
+#
+# So: wait for the renderer's own first progress line, then signal. If the
+# render finishes before ever reporting progress, the gate says so instead of
+# guessing, because at that point it is not testing cancellation at all.
 gate_five() {
+  local progress="$WORK/c.progress"
+  : > "$progress"
   "$STILL" render-scene --image fixtures/generated/land.jpg \
-    --audio fixtures/generated/vbr_lying_header.mp3 --out "$WORK/c.mp4" >/dev/null 2>&1 &
+    --audio fixtures/generated/vbr_lying_header.mp3 --out "$WORK/c.mp4" \
+    >/dev/null 2>"$progress" &
   local pid=$!
-  sleep 1
+
+  # Up to 10 s in 20 ms steps. Reached only if the render is pathologically
+  # slow to start, which is itself worth failing on.
+  local waited=0
+  while [ "$waited" -lt 500 ]; do
+    grep -q 'rendering: frame' "$progress" 2>/dev/null && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.02
+    waited=$((waited+1))
+  done
+
+  if ! grep -q 'rendering: frame' "$progress" 2>/dev/null; then
+    wait "$pid" 2>/dev/null
+    echo "the render never reported progress, so cancellation was not exercised"
+    echo "(use a longer narration fixture rather than relaxing this gate)"
+    return 1
+  fi
+
   kill -INT "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null
+  # D-045: interrupted is a failure, not a quiet success.
+  [ $? -ne 0 ] || { echo "an interrupted render reported success"; return 1; }
   # plan.md: "absent, or present and marked partial — never a valid-looking stub".
   [ ! -f "$WORK/c.mp4" ] || { echo "the destination was written"; return 1; }
   # And nothing partial left littering the directory either.

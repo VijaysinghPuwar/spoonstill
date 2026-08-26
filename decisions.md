@@ -1,7 +1,7 @@
 # decisions.md — single source of truth for `spoonstill`
 
 **Status:** active. This file wins over every other document in the repo.
-**Last updated:** 2026-08-26 (M2 slices 1-2: D-054, D-055 and D-056 added).
+**Last updated:** 2026-08-26 (M2 slices 1-2: D-054, D-055, D-056; D-057 on transitions).
 
 `plan/PROJECT_BRIEF.md` and `plan/BRIEF_RECONCILIATION.md` both carry a
 "superseded by `decisions.md`" banner. Until now that file did not exist, so
@@ -668,6 +668,58 @@ that will not parse, and a manifest that will not parse — because after either
 there is nothing left to validate against. Everything else, from every stage,
 lands in one list, ordered project-first and then scene by scene in render
 order, so an operator fixes a project row by row rather than stage by stage.
+
+### D-057 — The transition is a setting, and it overlaps silence only · Accepted
+
+Requested by the author 2026-08-26: *"there should be an option to change the
+transition effect — the hard cut might not be good, or distracting for the
+eye"*, left to this session to decide the shape. D-040 already allowed a
+crossfade mode; this decides how an operator reaches it and what it costs.
+
+**One project-level setting, plus a per-scene override.** `transition` and
+`transition_duration` in `project.yaml`, and the same two as optional manifest
+columns — exactly how `zoom_direction` and `zoom_anchor` already work (D-050),
+so there is one pattern to learn rather than two. The per-scene form describes
+the join *into* that scene.
+
+**A small closed set**, not a menu: `cut`, `fade` (through black), `dissolve`
+(a straight crossfade). `xfade` offers dozens; shipping dozens is the editor
+D-001 exists to refuse, and a wipe-hexagonal is a worse default than a good
+dissolve. The set can grow when someone names a film that needed one.
+
+**The default stays `cut` until the cost is measured.** Not taste — arithmetic.
+A cut is the concat demuxer plus a stream copy; anything else forces a composed
+filter graph and a **re-encode of both sides of every join**, and
+`ffmpeg-findings.md` §8 lists that curve as asserted and unmeasured. At n=500
+(D-002) an unmeasured multiplier is not a default. M3 measures it; if a
+0.4 s dissolve costs little, the default is revisited then, with numbers. The
+author's point stands either way: a cut is not always the right look, and the
+setting is what makes that the operator's call rather than ours.
+
+**The transition overlaps silence, never narration.** This is the part that has
+to be decided before any of it is built, because it is the one that quietly
+produces a broken film:
+
+- A transition of length `d` between scenes overlaps their video by `d`. If the
+  audio overlapped too, two narrations would talk over each other at every
+  join — 500 times.
+- So the overlap is taken from the **tail pad** of the outgoing scene and the
+  **head pad** of the incoming one (D-022's padding, which is silence by
+  construction).
+- Where the pads are shorter than `d`, they are **extended** rather than the
+  narration being cut into. D-022 already says narration is padded up and never
+  trimmed; this is the same rule at the join. The scene holds a little longer,
+  the film stays frame-exact, and nobody's last syllable is crossfaded away.
+
+Consequence for the duration maths: a scene's frame count is still derived from
+its own measured narration (D-021), and the film's total is the sum of the
+scenes minus `d` per join — computed, asserted, and not left to `xfade` to
+imply. The transition never changes what a scene *says*, only how long it is
+held.
+
+Not decided here: whether `dissolve` re-encodes the whole timeline or only the
+segments either side of each join. That is an M3 implementation question with a
+measurement attached, and it does not change anything an operator sees.
 
 ---
 
