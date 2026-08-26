@@ -6,12 +6,13 @@ narration boundaries. It is **not a video editor** — no timeline, no scrubber.
 
 ## Ground truth, in 30 seconds
 
-- **M0 and M1 are complete; M2 has not started.** There *is* rendering code
-  now: the filter graph, the FFmpeg process boundary, the segment profile and
-  its assertion, and `still render-scene` end to end. There is still **no
-  project model, no state database, no TTS, and no queue** — if a document
-  describes those as existing, it is describing an intended system.
-  Run `make gates` to see exactly where things stand.
+- **M0 and M1 are complete; M2 is half done.** There *is* rendering code now:
+  the filter graph, the FFmpeg process boundary, the segment profile and its
+  assertion, and `still render-scene` end to end. There is now also a project
+  model and `still validate`. There is still **no audio resolution, no TTS, no
+  state database and no queue**, and no `still render` over a whole project —
+  if a document describes those as existing, it is describing an intended
+  system. Run `make gates` to see exactly where things stand.
 - **Rust 1.94.0 is installed**, pinned by `rust-toolchain.toml`. Homebrew's
   rustup keeps its shims in `/opt/homebrew/opt/rustup/bin`, **not**
   `~/.cargo/bin` — that path is on `PATH` via `~/.zshrc` and is re-exported by
@@ -69,7 +70,9 @@ in the same commit as the code.
 Only **D-072** (captions) is still Open, and it records a default to use if you
 must proceed — say explicitly that you used it. D-070 and D-071 were Open and
 are now Accepted; they live under "Resolved from the Open list" so the answer is
-as easy to find as the question was.
+as easy to find as the question was. D-054 through D-057 were added during M2:
+read **D-056** before touching the import path and **D-057** before touching
+concat or transitions.
 
 **4. Do not invent requirements from the `kenburns-batch` master brief.**
 Several documents call it authoritative. It has never been in this workspace
@@ -126,7 +129,12 @@ immediately. If not, fix that first — something regressed.
 Then see one render for yourself, which is faster than reading about it:
 
 ```bash
+make fixtures                     # generates the two project fixtures too
 cargo build --release -p spoonstill-cli
+
+./target/release/still validate fixtures/projects/mixed/
+./target/release/still validate fixtures/projects/manifest/
+
 ./target/release/still render-scene \
   --image fixtures/generated/land.jpg \
   --audio fixtures/generated/n.wav \
@@ -136,42 +144,59 @@ cargo build --release -p spoonstill-cli
 
 ### State as of 2026-08-26
 
-**M0 and M1 are complete. M2 has not started.** `make gates` is 8/8 for M0 and
-8/8 for M1.
+**M0 and M1 are complete. M2 is half done — slices 1 and 2 of 4.** `make gates`
+is 8/8 for M0 and 8/8 for M1. There are no M2 gates in `make gates` yet; M2's
+own exit gates are in `plan.md` §M2 and two of the four already pass.
 
 M1 delivered the whole product in miniature: `still render-scene --image X
 --audio Y --out seg.mp4` measures the narration, derives an exact frame count,
 builds the filter chain, renders through an argument-vector process boundary,
 asserts the full segment profile against `ffprobe`, and only then moves the file
-into place. Detail, including what M1 changed in the docs: `plan.md` §M1.
+into place.
+
+M2 so far turns a folder into a project. `still validate DIR` reads
+`project.yaml` and either a CSV manifest or the folder itself (D-050), checks
+every rule that needs no disk, resolves every path inside the project root
+(D-054), probes every file, and prints **every problem at once** — project-level
+first, then scene by scene in render order. Detail and the four-slice table:
+`plan.md` §M2.
 
 What exists now, by crate:
 
 - `spoonstill-core` — `motion::build_filter` (pure), `geometry`, `timing`,
-  `hash`, `diagnostics` (records + redaction). Still zero dependencies.
+  `hash`, `diagnostics`, `path_safety` (containment behind a `RealPath` trait),
+  `project` (the scene model and every pure validation rule). Still zero
+  dependencies.
 - `spoonstill-media` — `command` (the only place a process is spawned),
   `probe` (timed, typed), `profile` (`SegmentProfile` + `assert_matches_profile`),
   `scene` (render → validate → atomic move).
 - `spoonstill-state` — `logs`: the JSON Lines sink and the bundle export.
-  **Still no SQLite** — that is M2/M3.
-- `spoonstill-app` — `render`, `diagnostics`, and `surface` (the re-exports the
-  CLI is allowed to see).
-- `spoonstill-cli` — `still render-scene`, `still diagnostics export|where`.
+  **Still no SQLite** — that is M3.
+- `spoonstill-app` — `import` (`settings`, `rows`, and the resolution stage),
+  `render`, `diagnostics`, and `surface`. Owns `serde_yaml_ng` and `csv`;
+  the domain model does not know what a file format is.
+- `spoonstill-cli` — `still validate`, `still render-scene`,
+  `still diagnostics export|where`.
 
-**Next task is M2** — the project model and the three audio sources. Read
-`plan.md` §M2 before starting. In rough order:
+**Next task is M2 slice 3** — the three audio sources. Read `plan.md` §M2
+first. In rough order:
 
-1. `project.yaml` parsing and validation (D-013, D-020, D-050). It is an
-   **input**; the renderer never writes to it.
-2. The three audio sources — supplied file, TTS, explicit duration — behind one
-   resolution path that always ends in a measured duration (D-021).
-3. `.spoonstill/state.db` (D-013, D-042): one transaction per state transition.
-4. Cache keys (D-043), which already have their content hash in
-   `spoonstill_core::hash`.
+1. `AudioSource::resolve()` → `(normalized_path, Duration)`. One path for all
+   three sources; the renderer must never branch on which one it was (D-020).
+2. Ingest normalization to 48 kHz stereo into the cache. **The operator's
+   original is never touched** (D-021), and the duration is measured by
+   `ffprobe` on the normalized copy, never on the original's header.
+3. `Silent { seconds }` generates a real silent track rather than becoming a
+   special case in the renderer.
+4. Then `still render DIR` over a whole project, which is what closes M2's
+   remaining two exit gates.
+
+Slice 4 is TTS behind a trait (ElevenLabs, BYOK, against a recorded fixture).
+`.spoonstill/state.db` and the cache are **M3**, not M2.
 
 **Open decisions:** only D-072 (captions) remains, and it does not block M2.
-D-070 and D-071 were answered by the author on 2026-08-26 and are now Accepted;
-they sit under "Resolved from the Open list" in `decisions.md`.
+D-054 through D-057 were added during M2 and are Accepted — read D-056 before
+touching the import path and D-057 before touching concat.
 
 **Do not re-derive these** — they cost measurement time and are already settled
 in code with tests: the exact filter string, the 90 kHz time base, the H.264
