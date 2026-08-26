@@ -90,6 +90,14 @@ pub struct Stream {
     pub duration: Option<f64>,
     /// Frames actually decoded — present only when counted.
     pub nb_read_frames: Option<u64>,
+    /// Frames the container *declares*, without decoding.
+    ///
+    /// Metadata rather than evidence, so it never stands in for a counted
+    /// frame check on a segment (D-041). It earns its place on a joined film,
+    /// where decoding a 500-scene MP4 to count frames would cost minutes and
+    /// the MP4 sample table is a faithful record of what the stream copy put
+    /// there.
+    pub nb_frames: Option<u64>,
 }
 
 /// What kind of stream this is.
@@ -293,6 +301,7 @@ impl Stream {
             channel_layout: raw.channel_layout,
             duration: raw.duration.as_deref().and_then(parse_f64),
             nb_read_frames: raw.nb_read_frames.as_deref().and_then(|s| s.parse().ok()),
+            nb_frames: raw.nb_frames.as_deref().and_then(|s| s.parse().ok()),
         }
     }
 }
@@ -355,6 +364,7 @@ struct RawStream {
     channel_layout: Option<String>,
     duration: Option<String>,
     nb_read_frames: Option<String>,
+    nb_frames: Option<String>,
 }
 
 #[cfg(test)]

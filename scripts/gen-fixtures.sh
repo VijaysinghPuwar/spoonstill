@@ -121,6 +121,44 @@ img/closing.jpg,,,,4.5,zoom-out,south-east
 CSV_ROWS
 say "$CSV" "3 scenes, manifest mode"
 
+# A project that renders end to end *today*: no TTS scene, because TTS is M2
+# slice 4 and a gate that cannot pass is not a gate. Six scenes so the render
+# pool has something to be parallel about, at 540p so the gates stay quick, and
+# deliberately including the two hazards that have to survive the whole
+# pipeline rather than just the unit tests:
+#
+#   odd.jpg                  1999x1001 -> the D-033 SAR trap, end to end
+#   ünïcode spaced 名前.jpg  D-052 -> and the concat list stays ASCII, because
+#                            segment names are content-addressed rather than
+#                            built from the operator's spelling
+RENDERABLE="$PROJECTS/renderable"
+rm -rf "$RENDERABLE"; mkdir -p "$RENDERABLE/img" "$RENDERABLE/audio"
+cp "$OUT/land.jpg"                    "$RENDERABLE/img/001.jpg"
+cp "$OUT/port.jpg"                    "$RENDERABLE/img/002.jpg"
+cp "$OUT/square.jpg"                  "$RENDERABLE/img/003.jpg"
+cp "$OUT/odd.jpg"                     "$RENDERABLE/img/004.jpg"
+cp "$OUT/ünïcode spaced 名前.jpg"     "$RENDERABLE/img/ünïcode spaced 名前.jpg"
+cp "$OUT/land.jpg"                    "$RENDERABLE/img/006.jpg"
+cp "$OUT/n.wav"                       "$RENDERABLE/audio/001.wav"
+[ -f "$OUT/vbr_lying_header.mp3" ] && cp "$OUT/vbr_lying_header.mp3" "$RENDERABLE/audio/002.mp3"
+cat > "$RENDERABLE/project.yaml" <<'YAML'
+# An input. spoonstill never writes to this file (D-013).
+output: film.mp4
+aspect: 16:9
+short_edge: 540
+fps: 30
+YAML
+cat > "$RENDERABLE/scenes.csv" <<'CSV_ROWS'
+image,audio_file,duration,zoom_direction,zoom_anchor
+img/001.jpg,audio/001.wav,,zoom-in,center
+img/002.jpg,audio/002.mp3,,pan-right,north
+img/003.jpg,,2.0,zoom-out,south-east
+img/004.jpg,,2.5,pan-up,center
+img/ünïcode spaced 名前.jpg,,3.0,,
+img/006.jpg,,1.5,zoom-in,north-west
+CSV_ROWS
+say "$RENDERABLE" "6 scenes, no TTS — the M2 render gate"
+
 # --- fixtures ffmpeg cannot synthesize --------------------------------------
 # CMYK JPEG and EXIF-rotated JPEG need an encoder that writes those tags.
 # They are listed in plan.md as commit-only fixtures; recorded here so the gap

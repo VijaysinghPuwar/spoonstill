@@ -1,7 +1,8 @@
 # ffmpeg-findings.md — measured, not assumed
 
-Every number here was produced on this machine on **2026-08-24**. Each section
-gives the command, so any session can re-run it and disagree with data.
+Every number in §1–§9 was produced on this machine on **2026-08-24**; §10 was
+added on **2026-08-26** when rendering became parallel. Each section gives the
+command, so any session can re-run it and disagree with data.
 
 **Why this file exists.** The Ken Burns filter is the single largest technical
 risk in `spoonstill`, and every planning document so far handled it with warnings
@@ -527,3 +528,122 @@ case and checks it against the measured answer.
 A measurement that only ever ran once, by hand, on one machine, is a fact with a
 short shelf life. Move each of these into a test as soon as there is somewhere
 to put it.
+
+
+## 10. Parallel rendering — measured 2026-08-26 (M2 slice 3)
+
+Everything above was measured on 2026-08-24 against single renders. This
+section is the M2 slice 3 addition: what happens when several scenes render at
+once. Same machine, same FFmpeg build (§0), **10 cores / 24 GB**.
+
+The benchmark project: twelve 1080p scenes, each a `testsrc2` still paired with
+the 3.717 s narration from §7, rendered with `still render --jobs N` from a
+cold project (`.spoonstill/` removed before every run) so nothing is reused.
+
+```bash
+B=/tmp/bench; rm -rf $B; mkdir -p $B/img $B/audio
+for i in $(seq -w 1 12); do cp fixtures/generated/land.jpg $B/img/$i.jpg; done
+cp fixtures/generated/n.wav $B/audio/n.wav
+printf 'output: film.mp4\naspect: 16:9\nshort_edge: 1080\nfps: 30\n' > $B/project.yaml
+{ echo "image,audio_file,duration";
+  for i in $(seq -w 1 12); do echo "img/$i.jpg,audio/n.wav,"; done; } > $B/scenes.csv
+
+for j in 1 2 3 4 6 8; do
+  rm -rf $B/.spoonstill
+  /usr/bin/time -l ./target/release/still render $B --out /tmp/bench-$j.mp4 --jobs $j
+done
+```
+
+### 10a. The speedup curve flattens at three
+
+| `--jobs` | wall clock | speedup | user CPU |
+|---|---|---|---|
+| 1 | 13.23 s | 1.00x | 35.68 s |
+| 2 | 8.56 s | 1.55x | 40.91 s |
+| 3 | 7.24 s | 1.83x | 42.71 s |
+| 4 | 7.17 s | 1.85x | 44.53 s |
+| 6 | 6.54 s | 2.02x | 45.67 s |
+| 8 | 6.90 s | 1.92x | 46.69 s |
+
+Run-to-run noise is roughly ±0.4 s, which is why 6 and 8 are not distinguished
+by this data and why the honest reading of the tail is "flat", not "6 is best".
+
+**Why it flattens so early:** look at the user CPU column. At `--jobs 1` the
+render spent 35.68 s of CPU in 13.23 s of wall clock — x264 at `medium` was
+already using 2.7 cores by itself. So on ten cores the machine is near
+saturation at three or four workers, and further workers mostly contend with
+the threads of the ones already running. The 6 s floor is the point where
+twelve scenes' worth of encoding fills the machine.
+
+This is the measurement behind **D-076**: the default is
+`available_parallelism() / 2` clamped to `[1, 4]`, and `--jobs` is uncapped for
+an operator who knows their machine.
+
+A smaller run at 540p (the six-scene `renderable` fixture) shows the same
+shape: 2.99 s at `--jobs 1`, 1.31 s at `--jobs 6` — 2.3x, and 0.40 s on a
+warm re-run where every narration and segment is reused.
+
+### 10b. Memory is ~780 MB per concurrent segment, and it does not flatten
+
+`/usr/bin/time -l` reported `maximum resident set size = 786432000` (750 MiB,
+780 MB) for **every** `--jobs` value, which is the measurement's own caveat:
+macOS `rusage` reports the maximum RSS of any single waited-for child, not the
+sum across children. So this is a **per-worker** figure, and the aggregate at
+`--jobs N` is inferred as `N × 780 MB` rather than measured directly.
+
+That inference is the conservative direction, and it is enough for the
+decision: four workers is about 3.1 GB, eight is about 6.2 GB, and the 4%
+of wall clock between them (10a) does not buy that.
+
+The 780 MB itself is the prescale (D-032): a 3× output-height canvas at 1080p
+is 5760×3240 held in the zoompan pipeline, plus x264's lookahead buffers.
+
+> D-044 budgeted "~1.5 GB per concurrent segment worker until measured
+> otherwise on the target machine". This is that measurement, and it is
+> comfortably under. The number to carry forward is 780 MB at 1080p —
+> **on macOS arm64 only**, per D-071. Windows is unmeasured.
+
+### 10c. The join adds one AAC frame to the container, not one per segment
+
+Six segments joined with the concat demuxer and `-c copy`:
+
+```
+$ ffprobe -v error -show_entries stream=codec_type,duration,nb_frames,start_time \
+    -show_entries format=duration -of default=nw=1 /tmp/film.mp4
+video  start_time=0.021000  duration=18.033333  nb_frames=541
+audio  start_time=0.000000  duration=18.054667
+format duration=18.054667
+```
+
+The video stream is exactly `541 / 30 = 18.033333` — frame-perfect, and equal
+to the sum of the six segments' asserted frame counts. The container reports
+the audio track's `18.054667`, which is **1024 samples longer**: exactly one
+AAC frame of encoder priming, appearing once for the whole film rather than
+once per join. Two- and four-segment joins showed the same single offset.
+
+Consequences, both recorded as **D-078**:
+
+- the frame-exactness gate is asserted against the **video stream**, and
+  against the video stream's declared `nb_frames`, which for MP4 comes from the
+  sample table the stream copy just wrote;
+- the container's duration is still checked, with one frame *plus one AAC
+  frame* of tolerance — loose enough for the priming, far tighter than the
+  seconds a dropped scene would move it by.
+
+Unmeasured, and worth knowing: whether the offset stays at one AAC frame at
+n=500. It did not accumulate across 2, 4 and 6 segments. If it ever does, the
+container check fails first and says so, which is the right place for that
+surprise to surface.
+
+### 10d. The determinism claim, checked rather than asserted
+
+```bash
+shasum -a 256 /tmp/bench-1.mp4 /tmp/bench-2.mp4 /tmp/bench-4.mp4 /tmp/bench-8.mp4
+# 81e991b592cbba84110dd9a590567ecda3065d54822d44c0db1ae6e5e1f56fdf  (all four)
+```
+
+One worker, two, four and eight produce **byte-identical films**, and so does a
+run that reuses every cached artifact. That is D-077, and it is gate 3 of
+`scripts/m2-gates.sh` rather than a claim in a comment — motion is seeded
+before the pool starts, each worker writes its own content-addressed path, and
+results are collected by input index.

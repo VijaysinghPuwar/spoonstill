@@ -10,10 +10,15 @@
 
 #![warn(missing_docs)]
 
+pub mod audio;
 pub mod diagnostics;
+pub mod film;
 pub mod import;
+pub mod pool;
 pub mod render;
 
+pub use audio::{AudioCache, AudioError, ResolvedAudio};
+pub use film::{FilmError, FilmEvent, RenderProjectOptions, RenderedFilm, render_project};
 pub use import::{ImportError, MediaCheck, Mode, ProbeCheck, Project, ResolvedScene, Role};
 pub use render::{RenderError, RenderSceneOptions, render_scene};
 

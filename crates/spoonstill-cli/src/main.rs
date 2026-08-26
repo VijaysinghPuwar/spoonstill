@@ -11,6 +11,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use spoonstill_app::diagnostics;
+use spoonstill_app::film::{FilmEvent, SerialEvents};
 use spoonstill_app::render::RenderSceneOptions;
 use spoonstill_app::surface::{Cancel, EncodeSettings};
 use spoonstill_core::{Anchor, Aspect, MotionKind, MotionSpec};
@@ -34,6 +35,8 @@ struct Cli {
 enum Command {
     /// Check a project folder and report every problem at once.
     Validate(ValidateArgs),
+    /// Render a whole project folder to one film.
+    Render(RenderArgs),
     /// Render a single scene to one segment.
     RenderScene(RenderSceneArgs),
     /// Diagnostics: logs and the bundle to send when something goes wrong.
@@ -58,6 +61,40 @@ struct ValidateArgs {
     /// truncated JPEG or a zero-byte MP3 will pass and then fail the render.
     #[arg(long)]
     no_probe: bool,
+}
+
+#[derive(Debug, Args)]
+struct RenderArgs {
+    /// The project folder. Defaults to the current directory.
+    #[arg(value_name = "DIR", default_value = ".")]
+    project: PathBuf,
+
+    /// Where to write the film. Defaults to the project's `output` setting.
+    #[arg(long, value_name = "PATH")]
+    out: Option<PathBuf>,
+
+    /// How many scenes to render at once (D-044).
+    ///
+    /// Defaults to one per two cores, capped at 4 — measured, not guessed:
+    /// the curve flattens at three because x264 already threads internally,
+    /// while memory keeps climbing at about 780 MB per concurrent segment.
+    /// Higher values are allowed; they are a decision about memory.
+    #[arg(long, short = 'j', value_name = "N")]
+    jobs: Option<usize>,
+
+    /// How many narrations to resolve at once (D-044).
+    ///
+    /// A separate pool because ingest is I/O-bound and rendering is not — and
+    /// because at slice 4 this becomes the TTS provider's rate limit.
+    #[arg(long, value_name = "N")]
+    audio_jobs: Option<usize>,
+
+    /// Render even though another run appears to hold this project.
+    ///
+    /// For the lock a crashed run left behind. Two renders of one project at
+    /// the same time would interleave segments into one film.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -177,6 +214,7 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
         Command::Validate(args) => validate(args),
+        Command::Render(args) => render_project(args),
         Command::RenderScene(args) => render_scene(args),
         Command::Diagnostics(DiagnosticsCommand::Export { out, project }) => {
             export_diagnostics(out, project)
@@ -293,6 +331,105 @@ fn short(path: &std::path::Path, root: &std::path::Path) -> String {
         .unwrap_or(path)
         .display()
         .to_string()
+}
+
+/// Render a whole project, several scenes at a time.
+///
+/// The one thing this function owns that the library does not: what a parallel
+/// render *looks like* in a terminal. Eight workers finishing in whatever order
+/// they finish would produce interleaved half-lines, so every event goes
+/// through one mutex and every line is written whole, tagged with the scene it
+/// belongs to and a completed-so-far counter rather than a percentage that
+/// jumps around.
+fn render_project(args: RenderArgs) -> Result<(), String> {
+    let defaults = spoonstill_app::RenderProjectOptions::for_project(&args.project);
+    let options = spoonstill_app::RenderProjectOptions {
+        out: args.out,
+        jobs: args.jobs.unwrap_or(defaults.jobs).max(1),
+        audio_jobs: args.audio_jobs.unwrap_or(defaults.audio_jobs).max(1),
+        force: args.force,
+        ..defaults
+    };
+
+    // D-045, same ladder as the single scene: the flag stops the pool
+    // admitting work, and each running FFmpeg gets asked, then forced.
+    let cancel = Cancel::new();
+    let handler = cancel.clone();
+    if let Err(error) = ctrlc::set_handler(move || handler.request()) {
+        eprintln!("still: warning: Ctrl-C will not be graceful ({error})");
+    }
+
+    let total = std::cell::Cell::new(0_usize);
+    let done = std::cell::Cell::new(0_usize);
+    let events = SerialEvents::new(move |event| match event {
+        FilmEvent::Planned {
+            scenes,
+            jobs,
+            audio_jobs,
+        } => {
+            total.set(scenes);
+            done.set(0);
+            println!(
+                "  {scenes} scene{}, {jobs} at a time ({audio_jobs} for audio)",
+                if scenes == 1 { "" } else { "s" }
+            );
+        }
+        FilmEvent::Audio {
+            id,
+            kind,
+            duration,
+            reused,
+            ..
+        } => {
+            println!(
+                "  audio  {id:<12} {kind:<6} {duration:>8.3}s{}",
+                if reused { "  (cached)" } else { "" }
+            );
+        }
+        FilmEvent::Segment {
+            id,
+            frames,
+            duration,
+            reused,
+            ..
+        } => {
+            done.set(done.get() + 1);
+            println!(
+                "  [{:>3}/{}] {id:<12} {frames:>6} frames {duration:>8.3}s{}",
+                done.get(),
+                total.get(),
+                if reused { "  (reused)" } else { "" }
+            );
+        }
+        FilmEvent::Failed { id, detail, .. } => {
+            eprintln!("  FAILED {id}: {detail}");
+        }
+        FilmEvent::Joining { segments } => {
+            println!("  joining {segments} segments (stream copy, D-040)");
+        }
+    });
+
+    let film = spoonstill_app::render_project(&options, &cancel, &|event| events.emit(event))
+        .map_err(|error| error.to_string())?;
+
+    println!("{}", film.path.display());
+    println!(
+        "  {} scene{}, {} frames, {:.3}s (expected {:.3}s)",
+        film.scenes,
+        if film.scenes == 1 { "" } else { "s" },
+        film.frames,
+        film.duration,
+        film.expected_duration
+    );
+    println!(
+        "  {} narration{} from cache, {} segment{} reused — segments in {}",
+        film.reused_audio,
+        if film.reused_audio == 1 { "" } else { "s" },
+        film.reused_segments,
+        if film.reused_segments == 1 { "" } else { "s" },
+        film.segments_dir.display()
+    );
+    Ok(())
 }
 
 fn render_scene(args: RenderSceneArgs) -> Result<(), String> {

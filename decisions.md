@@ -1,7 +1,8 @@
 # decisions.md — single source of truth for `spoonstill`
 
 **Status:** active. This file wins over every other document in the repo.
-**Last updated:** 2026-08-26 (M2 slices 1-2: D-054, D-055, D-056; D-057 on transitions).
+**Last updated:** 2026-08-26 (M2 slice 3: D-075 audio cache, D-076 render pool,
+D-077 determinism and the project lock, D-078 what the film is asserted on).
 
 `plan/PROJECT_BRIEF.md` and `plan/BRIEF_RECONCILIATION.md` both carry a
 "superseded by `decisions.md`" banner. Until now that file did not exist, so
@@ -487,6 +488,14 @@ not from core count alone. Per D-032 the encoder, not the motion filter,
 dominates: budget ~1.5 GB per concurrent segment worker until measured
 otherwise on the target machine.
 
+> **Amended by D-076 (M2 slice 3).** The per-worker budget is now measured
+> rather than guessed — 780 MB, not 1.5 GB — and the shipped default is derived
+> from core count after all, because the speedup curve flattens long before
+> memory becomes the binding constraint. RAM-derived capacity remains this
+> decision's requirement and lands at M3, where n=500 is the milestone's
+> subject. The rest of D-044 stands unchanged: two pools, independent caps,
+> nothing unbounded.
+
 ### D-045 — Cancellation is graceful, then forced, then clean · Accepted
 
 Stop admitting new work → ask each active FFmpeg child to quit gracefully →
@@ -495,6 +504,142 @@ resumable state. Supervise only children owned by the current job.
 
 Explicitly rejected: `Automated-Video-Generator`'s `wave-scheduler.ts`
 Windows process enumeration that kills unrelated "RAM-hogging" processes.
+
+---
+
+## Execution — added at M2 slice 3
+
+### D-075 — Normalized audio is 48 kHz stereo PCM in a content-named directory · Accepted
+
+D-021 requires ingest normalization to "a known profile (48 kHz stereo)" and a
+duration measured on the normalized copy. This fixes the rest of it.
+
+**The artifact is `pcm_s16le` in a WAV container**, not compressed. The segment
+encodes AAC anyway, so a compressed intermediate would put two lossy
+generations between the operator's recording and the film. The cost is disk:
+192 KB/s, so a 500-scene project averaging 30 s a scene holds about 2.9 GB of
+normalized audio. That is acceptable because the cache is disposable and
+rebuildable, and because the alternative degrades the product for every
+operator to save space for some of them.
+
+**The cache is a directory of content-named files, with no index**, under
+`.spoonstill/cache/audio/`. `<kind>-<16 hex>.wav`, keyed per D-043 on the
+source bytes plus the profile string — never on a path. The profile string is
+versioned (`pcm_s16le/48000/2/v1`), so changing the profile misses the cache
+rather than reusing artifacts made under the old one.
+
+No database: `.spoonstill/state.db` is M3's deliverable, and a cache that needs
+one to be readable cannot be inspected with `ls` when something goes wrong. The
+directory is enough for M2's guarantee, which is that a re-run of an unchanged
+project re-encodes nothing.
+
+**A hit is measured, not trusted.** Every run probes the artifact and asserts
+the normalization profile before using it, so a truncated or hand-edited entry
+is regenerated instead of silently producing a scene of the wrong length. That
+is D-021 applied to the cache rather than only to the ingest.
+
+**Silence is generated, not simulated.** `AudioSource::Silent` writes a real
+PCM track of an exact sample count (`atrim=end_sample=`, never `-t seconds`),
+so a title card takes the same path through the renderer as a narrated scene.
+D-020's test — "adding a fourth source must not touch the renderer" — is the
+reason.
+
+### D-076 — The render pool defaults to one worker per two cores, capped at four · Accepted
+
+Requested by the author 2026-08-26: *"make it like that i can make multiple
+render at the same time"*, left to this session to size. Measured before
+deciding, on this machine (10 cores, 24 GB), twelve 1080p scenes:
+
+| `--jobs` | wall clock | speedup | memory |
+|---|---|---|---|
+| 1 | 13.23 s | 1.00x | ~780 MB |
+| 2 | 8.56 s | 1.55x | ~1.6 GB |
+| 3 | 7.24 s | 1.83x | ~2.3 GB |
+| 4 | 7.17 s | 1.85x | ~3.1 GB |
+| 8 | 6.90 s | 1.92x | ~6.2 GB |
+
+Reproduction and caveats: `ffmpeg-findings.md` §10.
+
+**The curve flattens at three, and memory does not.** x264 at `medium` already
+threads internally — at `--jobs 1` the encoder was using 2.7 cores on its own —
+so additional workers mostly compete with the threads of the ones already
+running. Going from four to eight buys 4% of wall clock for about 3 GB of
+resident memory, on a machine the operator is also using.
+
+So: **`available_parallelism() / 2`, clamped to `[1, 4]`**, and `--jobs` is not
+capped in either direction — an operator who knows their machine can ask for
+sixteen, and it is then a decision about memory rather than about cores.
+
+**Two pools, per D-044.** The audio pool defaults to twice the render pool
+because ingest is short and I/O-bound. At slice 4 that number stops being about
+this machine at all and becomes the TTS provider's concurrency limit (D-023),
+which is the reason the two were never one number.
+
+Not decided here: RAM-derived capacity. It stays D-044's requirement and lands
+at M3 with n=500 behind it. What M2 ships is a measured default and a flag.
+
+### D-077 — Concurrency changes the timing and nothing else; one render per project · Accepted
+
+Two guarantees that a parallel renderer has to make explicitly, because both
+are easy to lose and neither fails loudly.
+
+**A render is deterministic under any `--jobs`.** Measured: `--jobs 1` and
+`--jobs 4` produce byte-identical films, and so does a third run that reuses
+every cached artifact. It holds by construction, not by luck:
+
+- every scene's move is seeded from stable identity **before** the pool starts
+  (D-035), so no worker's choice depends on which worker it is;
+- each worker writes to its own content-addressed segment path, so two workers
+  can never target one file;
+- results are collected **by input index**, so the concat list is in scene
+  order however the workers finished.
+
+This is an exit gate, not a comment. If a future change makes a worker's output
+depend on scheduling, the gate fails.
+
+**One render per project at a time**, enforced by `.spoonstill/render.lock`.
+Every individual write is already safe — temporary file, then rename — but the
+*film* is not: two runs with different settings would interleave segments from
+both into one output. The lock names the process holding it, and `--force`
+exists because a machine that lost power leaves one behind and an operator
+should not have to know where it lives.
+
+Deliberately **not** locked: two renders of *different* projects at the same
+time. Nothing is shared between them — separate caches, separate segment
+directories, separate outputs — so the only cost is memory, and that is what
+`--jobs` is for.
+
+### D-078 — The film is asserted on its video stream, not its container duration · Accepted
+
+plan.md §M2's gate is "the film's duration equals the sum of the resolved scene
+durations, within one frame". Measured while building it, that gate as stated
+is against the wrong number.
+
+An MP4's container duration is its longest track's, and an AAC track carries
+priming samples the video does not. A six-scene film measured 18.054667 s in
+the container and **18.033333 s in the video stream** — the video figure being
+exactly `541 / 30`, frame-perfect, and the difference being exactly 1024
+samples, one AAC frame (`ffmpeg-findings.md` §10c).
+
+So the assertion after the join is, in order:
+
+1. the segment profile, because a stream copy can still write a header that
+   disagrees with its input (D-041);
+2. the video stream's **declared** frame count against the sum of the segments'
+   asserted counts — for MP4 this comes from the sample table the copy just
+   wrote, and it is off by a whole segment the moment one is dropped;
+3. the video stream's duration, within one frame;
+4. the container's duration, within one frame **plus one AAC frame**.
+
+Frames are not re-counted by decoding here, unlike a segment (D-030). Decoding
+a 500-scene film to re-derive a number every segment already asserted
+individually would cost minutes per run, and the failure it would catch —
+a segment that is internally wrong — is caught at the segment.
+
+The offset was constant across two, four and six segments rather than
+accumulating per join. That is measured at small n only; if it ever
+accumulates, check 4 fails first and loudly, which is the right place for that
+surprise to appear.
 
 ---
 

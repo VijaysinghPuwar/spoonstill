@@ -23,6 +23,7 @@ use std::time::Duration;
 use spoonstill_core::diagnostics::{Diagnostics, Event};
 use spoonstill_core::{MotionSpec, OutputSpec, SAMPLE_RATE, build_filter, timing};
 
+use crate::atomic::{ensure_parent, move_into_place, partial_path};
 use crate::command::{FfmpegCommand, Progress};
 use crate::error::MediaError;
 use crate::probe::{self, DEFAULT_PROBE_TIMEOUT, ProbeResult};
@@ -243,14 +244,8 @@ fn render_scene_inner(
     // 3. Render to a temporary path beside the destination — same directory, so
     //    the move at the end is a rename within one filesystem and therefore
     //    atomic. A temp file in the system temp directory would make it a copy.
-    let temporary = temporary_path(&request.out);
-    if let Some(parent) = temporary.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent).map_err(|source| MediaError::Io {
-            doing: "creating the output directory",
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
+    let temporary = partial_path(&request.out);
+    ensure_parent(&temporary)?;
 
     let result = run_ffmpeg(
         tools,
@@ -455,43 +450,6 @@ fn validate(
     Ok(probe)
 }
 
-/// Move the validated segment into its real path.
-///
-/// `fs::rename` replaces the destination silently on Unix but fails on Windows
-/// when it already exists, so the destination is removed first. D-071 puts
-/// Windows in scope from M1, and this is the kind of difference that otherwise
-/// surfaces as "works on my machine" three milestones later.
-fn move_into_place(from: &Path, to: &Path) -> Result<(), MediaError> {
-    if to.exists() {
-        std::fs::remove_file(to).map_err(|source| MediaError::Io {
-            doing: "replacing the existing segment at",
-            path: to.to_path_buf(),
-            source,
-        })?;
-    }
-    std::fs::rename(from, to).map_err(|source| MediaError::Io {
-        doing: "moving the finished segment to",
-        path: to.to_path_buf(),
-        source,
-    })
-}
-
-/// A temporary path beside the destination.
-///
-/// Beside, not in the system temp directory, so the final move is a rename
-/// within one filesystem. The `.mp4` suffix is kept because FFmpeg picks its
-/// muxer from the extension. The process id keeps two runs targeting different
-/// outputs in one directory from colliding.
-fn temporary_path(out: &Path) -> PathBuf {
-    let stem = out
-        .file_name()
-        .map_or_else(|| "segment".into(), std::ffi::OsString::from);
-    let mut name = std::ffi::OsString::from(".");
-    name.push(&stem);
-    name.push(format!(".partial-{}.mp4", std::process::id()));
-    out.parent().unwrap_or(Path::new("")).join(name)
-}
-
 /// Stable content hash of a file, for the motion seed and the cache key.
 ///
 /// Content, never the path (D-043): moving a file must not re-roll its motion,
@@ -510,34 +468,6 @@ fn hash_file(path: &Path) -> Result<String, MediaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_temporary_path_sits_beside_the_destination() {
-        let temp = temporary_path(Path::new("/renders/proj/seg-007.mp4"));
-        assert_eq!(temp.parent().unwrap(), Path::new("/renders/proj"));
-        assert!(temp.extension().unwrap() == "mp4", "{}", temp.display());
-        assert_ne!(temp, PathBuf::from("/renders/proj/seg-007.mp4"));
-    }
-
-    /// A bare filename has no parent, and must not produce an absolute path or
-    /// a panic.
-    #[test]
-    fn a_bare_output_name_still_gets_a_temporary() {
-        let temp = temporary_path(Path::new("seg.mp4"));
-        assert!(temp.is_relative(), "{}", temp.display());
-        assert!(temp.to_string_lossy().contains("seg.mp4"));
-    }
-
-    /// The temporary must not look like a finished segment to a later run.
-    #[test]
-    fn the_temporary_is_visibly_partial() {
-        let temp = temporary_path(Path::new("seg.mp4"));
-        assert!(
-            temp.to_string_lossy().contains("partial"),
-            "{}",
-            temp.display()
-        );
-    }
 
     /// D-036 defaults, pinned. Changing these invalidates every cached segment
     /// and belongs in decisions.md.

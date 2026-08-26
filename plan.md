@@ -13,14 +13,14 @@ were underway.
 
 | | |
 |---|---|
-| Application code written | M0 skeleton (see below) |
+| Application code written | M0, M1, and M2 slices 1-3 — run `make gates` |
 | Rust toolchain on this machine | **installed** — rustc/cargo 1.94.0, clippy, rustfmt (2026-08-26) |
 | Version control | **initialised** 2026-08-26; planning docs committed before code |
 | `plan/` contents | 10 read-only reference checkouts (~1.7 GB) + 3 retired planning docs |
 | FFmpeg | 8.0.1 present, Homebrew GPL build — dev only, not shippable (D-062) |
 | Node | v26.6.0 |
 | Design questions settled | product, architecture, audio model, motion filter |
-| Design questions open | D-070, D-071 (D-072 deferred to V1.1; D-073/D-074 now Accepted) |
+| Design questions open | D-072 only (captions, V1.1) — D-070/D-071 are Accepted |
 
 The motion pipeline — historically the riskiest unknown — is now measured and
 decided (`ffmpeg-findings.md`). The remaining risk is concentrated in state,
@@ -280,11 +280,15 @@ ls /tmp/s.mp4        # absent, or present and marked partial — never a valid-l
 
 ---
 
-## M2 — Project model and the three audio sources · IN PROGRESS
+## M2 — Project model and the three audio sources · IN PROGRESS (3 of 4 slices)
 
 **Goal.** `still render ./project/` renders a three-scene project — one TTS
 scene, one supplied-audio scene, one silent-duration scene — from a folder an
 operator could have produced by hand.
+
+**Where it stands:** the command exists and renders supplied-audio and silent
+scenes, several at a time. The TTS scene is slice 4, and it is the only thing
+between here and the goal as stated.
 
 ### Progress
 
@@ -295,8 +299,8 @@ own decisions. Where a slice is done, the exit gate it satisfies is named.
 |---|---|---|
 | **1. The pure domain** | `spoonstill_core::path_safety` + `spoonstill_core::project`: containment, the scene model, and every validation rule that needs no disk. D-054, D-055. | ✅ 2026-08-26 — satisfies `cargo test -p spoonstill-core path_safety` |
 | **2. Import and `still validate`** | `project.yaml` and the CSV manifest, convention-mode stem pairing, path resolution and media probing merged into one problem list, `still validate` printing it. D-056. | ✅ 2026-08-26 — satisfies `still validate fixtures/projects/mixed/` |
-| **3. The three audio sources** | `AudioSource::resolve()` → `(normalized_path, Duration)`: ingest normalization to 48 kHz stereo, `ffprobe` on the normalized artifact, generated silence. Then `still render` over a whole project. | next |
-| **4. TTS behind a trait** | Provider trait, typed settings and errors, ElevenLabs BYOK against a recorded fixture. | |
+| **3. The three audio sources, and `still render`** | `AudioSource::resolve()` → `(normalized_path, Duration)`: ingest normalization to 48 kHz stereo, `ffprobe` on the normalized artifact, generated silence. Then `still render DIR` over a whole project — **parallel**, with two bounded pools. D-075, D-076, D-077, D-078. | ✅ 2026-08-26 — `make gates-m2` is 9/9 |
+| **4. TTS behind a trait** | Provider trait, typed settings and errors, ElevenLabs BYOK against a recorded fixture. **This is what closes M2.** | next |
 
 Slice 1 notes, for whoever picks this up:
 
@@ -326,8 +330,37 @@ Slice 2 notes:
 - The `ffprobe` media check sits behind the `MediaCheck` trait, so every test
   around it runs with no FFmpeg — and M3's queue can swap in a cached
   implementation when it is probing 500 files rather than 6.
-- Still **not** done in M2: no audio is resolved or normalized yet, and
+- Still **not** done after slice 2: no audio is resolved or normalized yet, and
   `still render` over a project does not exist. That is slice 3.
+
+Slice 3 notes:
+
+- **`still render DIR` is real, and it renders several scenes at once.**
+  Requested by the author: *"make it like that i can make multiple render at
+  the same time"*. Two bounded pools (D-044): the audio pool resolves every
+  narration, then the render pool encodes every segment, then the join. The
+  default is `available_parallelism() / 2` capped at 4 — **measured**, not
+  chosen: `ffmpeg-findings.md` §10a, D-076. `--jobs` and `--audio-jobs`
+  override it and are uncapped.
+- **Concurrency changes the timing and nothing else** (D-077). `--jobs 1` and
+  `--jobs 4` produce byte-identical films, and gate 3 asserts it. Motion is
+  seeded before the pool starts, each worker writes its own content-addressed
+  segment path, and results are collected by input index.
+- **A re-run re-encodes nothing.** Normalized audio is content-keyed in
+  `.spoonstill/cache/audio/` (D-075) and segments are content-named in
+  `.spoonstill/segments/`, each one only getting its final name after passing
+  the profile assertion (D-042). The 6-scene fixture renders in 2.99 s cold at
+  `--jobs 1`, 1.31 s cold at `--jobs 6`, and 0.40 s warm. A cache hit is still
+  *probed* every run — trusting it would be D-021 with the "measured" removed.
+- **One render per project at a time**, via `.spoonstill/render.lock`, because
+  two runs would interleave segments into one film. Two runs against
+  *different* projects share nothing and are not locked.
+- **The film is asserted on its video stream, not the container** (D-078). An
+  MP4's container duration is its longest track's, and AAC priming puts the
+  audio one 1024-sample frame beyond the video. Measured: `ffmpeg-findings.md`
+  §10c.
+- TTS is refused with a typed, named error rather than being silently replaced
+  by silence — gate 7. A line somebody wrote must never become a silent scene.
 
 ### Deliverables
 
@@ -369,20 +402,51 @@ Slice 2 notes:
 
 ### Exit gates
 
+`make gates-m2` runs all of these. **9/9 pass as of 2026-08-26**, with slice 4
+still to come.
+
 ```bash
 still validate fixtures/projects/mixed/     # 3 scenes, 3 sources, 0 warnings
-still render   fixtures/projects/mixed/ --out /tmp/out.mp4
+still render   fixtures/projects/renderable/ --out /tmp/out.mp4 --jobs 4
 
-ffprobe -v error -show_entries format=duration -of csv=p=0 /tmp/out.mp4
-# == sum of the three resolved scene durations, within one frame
+ffprobe -v error -select_streams v:0 -show_entries stream=duration -of csv=p=0 /tmp/out.mp4
+# == sum of the resolved scene durations, within one frame
+# The *container* duration is one AAC frame longer; assert the video stream
+# (D-078, ffmpeg-findings.md §10c).
 
 cargo test -p spoonstill-app validation      # both-sources and no-sources rejected
 cargo test -p spoonstill-core path_safety    # ../ traversal rejected; no existence leak
 ```
 
+Two amendments this milestone made to its own gates, both recorded rather than
+quietly applied:
+
+- **The render gate runs against `fixtures/projects/renderable/`, not
+  `mixed/`.** `mixed` contains a TTS scene and TTS is slice 4, so until it
+  lands, a gate against `mixed` could not pass. `renderable` is the same shape
+  without a spoken line; gate 7 asserts that `mixed` fails for exactly one
+  reason and names it. **When slice 4 lands, gate 7 becomes the `mixed`
+  render** and this note goes away.
+- **The duration gate is asserted on the video stream** (D-078).
+
+Four gates that slice 3 added, because parallel rendering makes four new
+promises:
+
+```bash
+# 3. concurrency changes the timing and nothing else (D-077)
+still render P --out a.mp4 --jobs 1 && still render P --out b.mp4 --jobs 4
+shasum -a 256 a.mp4 b.mp4          # identical
+
+# 4. a second run reuses every narration and every segment (D-043, D-075)
+# 5. a second render of one project is refused, and says --force (D-077)
+# 6. odd dimensions and a Unicode filename survive the join (D-033, D-052)
+# 7. a TTS scene is refused by name rather than silently muted (D-020)
+```
+
 Secrets check — grep the run output, the manifest, the state DB, the cache
 keys, and the logged command lines for the API key. Zero hits, and a test that
-keeps it that way.
+keeps it that way. **Belongs to slice 4**: there is no key in the product
+until the TTS provider lands.
 
 ### Risks
 

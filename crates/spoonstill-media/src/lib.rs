@@ -14,17 +14,27 @@
 //! with separate `quit()`/`kill()`/`wait()`, [`probe`] is timed `ffprobe` JSON,
 //! [`profile`] is `SEGMENT_PROFILE` and its assertion, and [`scene`] wires them
 //! into one segment.
+//!
+//! M2 added the rest of the pipeline around that segment: [`audio`] normalizes
+//! every source to one profile and measures it (D-021), [`concat`] joins
+//! validated segments with a stream copy (D-040), and [`atomic`] is the
+//! write-beside-then-rename rule all three share (D-042).
 
 #![warn(missing_docs)]
 
+pub mod atomic;
+pub mod audio;
 pub mod command;
+pub mod concat;
 pub mod error;
 pub mod probe;
 pub mod profile;
 pub mod scene;
 pub mod tools;
 
+pub use audio::{Normalized, measure, normalize, silence};
 pub use command::{FfmpegChild, FfmpegCommand, Finished, Progress};
+pub use concat::{Film, concat};
 pub use error::MediaError;
 pub use probe::{ProbeResult, Stream, StreamKind, probe, probe_counting_frames};
 pub use profile::{Mismatch, SegmentProfile, assert_matches_profile};
