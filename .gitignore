@@ -1,0 +1,22 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Machine-owned state (D-013). Disposable, rebuildable from manifest + cache.
+.spoonstill/
+
+# Reference checkouts (D-061, plan.md M0). ~1.7 GB, ~70% Remotion.
+# Pinned commits are recorded in refergit.md §2 — restore with a depth-1 clone.
+/plan/
+
+# Render output and scratch fixtures
+*.mp4
+*.mkv
+*.mov
+/fixtures/generated/
+/fixtures/projects/n500/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

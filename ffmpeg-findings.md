@@ -1,0 +1,379 @@
+# ffmpeg-findings.md — measured, not assumed
+
+Every number here was produced on this machine on **2026-08-24**. Each section
+gives the command, so any session can re-run it and disagree with data.
+
+**Why this file exists.** The Ken Burns filter is the single largest technical
+risk in `spoonstill`, and every planning document so far handled it with warnings
+and speculation — "known-bad", "memory trap", "worth benchmarking", "do not
+trust any copied filter string". That was correct advice and it left the
+decision unmade for three documents running. This closes it.
+
+The evidence here **outranks every claim in the reference repos and in the
+retired planning docs**, and it feeds decisions D-030 through D-034 and D-041 in
+`decisions.md`. It does not outrank `decisions.md` itself: if a measurement and
+a decision disagree, the measurement is a reason to change the decision, not a
+licence to ignore it.
+
+## 0. Test environment
+
+| | |
+|---|---|
+| OS | macOS 26.6.2 (build 25G83), arm64 |
+| FFmpeg | 8.0.1, Homebrew `8.0.1_4` |
+| Build flags | `--enable-gpl --enable-version3 --enable-libx264 --enable-videotoolbox --enable-neon` |
+| Encoders present | `libx264`, `h264_videotoolbox`, `hevc_videotoolbox`, `aac`, `aac_at` |
+| Node | v26.6.0 |
+| Rust | **not installed** — `rustc` and `cargo` are absent. See `plan.md` M0. |
+
+> The GPL build is fine for development and **not shippable**. See D-062.
+
+Fixtures:
+
+```bash
+ffmpeg -y -f lavfi -i "testsrc2=size=4000x3000:duration=1:rate=1" -frames:v 1 land.png
+ffmpeg -y -f lavfi -i "gradients=size=3000x4000:duration=1:rate=1:c0=0x203040:c1=0x9090a0" -frames:v 1 port.png
+ffmpeg -y -f lavfi -i "testsrc2=size=1999x1001:d=1:r=1" -frames:v 1 odd.png   # odd dimensions
+```
+
+`testsrc2` is deliberately high-frequency: it exposes stepping and resampling
+loss that a smooth photograph would hide. `odd.png` has odd width *and* height,
+which is what triggers §4.
+
+---
+
+## 1. The prescale question — settled
+
+**Claim under test.** `plan/PROJECT_BRIEF.md` §8 proposes
+`scale=8000:-1:flags=lanczos` before `zoompan`, and warns it is "not free".
+Reconciliation §4.3 calls it "a memory trap": *"At 8000×4500 an RGB frame
+buffer is ~108 MB, before ffmpeg's internal copies, times N parallel workers."*
+
+**Method.** Worst case for `zoompan`'s per-frame zoom quantization: a 10 %
+zoom spread over 10 s at 1080p30. If the quantizer rounds two consecutive
+frames to the same zoom factor, those frames are byte-identical, and
+`mpdecimate` will drop one. Unique frames out of 300 is therefore a direct,
+objective measure of visible stepping.
+
+```bash
+ffmpeg -y -i land.png \
+  -vf "scale=-2:${PRESCALE_H}:flags=lanczos,\
+zoompan=z='min(1+0.10*on/300,1.10)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=300:s=1920x1080:fps=30,\
+setsar=1" \
+  -frames:v 300 -c:v ffv1 out.mkv
+
+ffmpeg -i out.mkv -vf mpdecimate=hi=1:lo=1:frac=0.0001 -f null -   # count survivors
+```
+
+**Result.**
+
+| Prescale height | × output | Unique / 300 | Duplicate frames | Peak RSS | Wall (300 f) |
+|---|---:|---:|---:|---:|---:|
+| 1080 | 1× | 188 | **37 %** | 744 MB | 1.22 s |
+| 2160 | 2× | 280 | 7 % | 749 MB | — |
+| **3240** | **3×** | **300** | **0 %** | **761 MB** | **1.96 s** |
+| 4320 | 4× | 300 | 0 % | 772 MB | — |
+| 6480 | 6× | 300 | 0 % | 805 MB | 4.73 s |
+
+**Conclusions.**
+
+1. **3× output height is both the floor and the ceiling.** Below it motion
+   visibly steps; above it nothing improves and the encode gets slower.
+2. **The memory-trap claim did not reproduce.** Across a 6× prescale range peak
+   RSS moved 61 MB — 8 %. Wall time moved 288 %. Prescale is a CPU cost.
+   `zoompan` fed a single non-looped still holds one input frame, not `d` of
+   them, so the 108 MB × N arithmetic does not apply to this form.
+3. **A fixed pixel number is the wrong shape of answer.** `8000` is 7.4× for
+   1080p and 4.2× for 1080×1920 — the same constant meaning different things per
+   aspect ratio. Derive it: `3 * output_height`.
+
+**Control.** A plain static encode of the same still, no `zoompan` at all:
+
+```bash
+ffmpeg -y -loop 1 -framerate 30 -t 10 -i land.png \
+  -vf "scale=1920:1080:flags=lanczos,setsar=1,format=yuv420p" \
+  -c:v libx264 -preset medium -crf 18 base.mp4
+```
+
+Peak RSS **1,418 MB** — nearly double every `zoompan` variant above. The
+encoder dominates memory, not the motion filter. Size the render pool
+accordingly (D-044).
+
+→ **D-032.**
+
+---
+
+## 2. `zoompan`'s `d` parameter — the four forms
+
+**Claim under test.** Reconciliation §4.4 calls `d` "the classic footgun";
+`Automated-Video-Generator/src/agentic/orchestrator/render.ts:920` records a
+five-hour encode from it; `refergit.md` §4.5 warns of "an apparent infinite
+render". None of the documents says which form is correct.
+
+`d` is **output frames emitted per input frame.**
+
+| # | Input form | `d` | Bound by | Measured result |
+|---|---|---|---|---|
+| 1 | still, no `-loop` | `N` | `-frames:v N` | ✅ exactly N frames, exact duration |
+| 2 | `-loop 1` | `N` | `-t <dur>` | ✅ 120 frames / 4.000 s — correct |
+| 3 | `-loop 1` | `N` | **nothing** | ❌ **unbounded** |
+| 4 | still, no `-loop` | `1` | `-frames:v` | ❌ 1 frame / 0.033 s |
+
+Form 3, the actual hang:
+
+```bash
+timeout 25 ffmpeg -y -loop 1 -i land.png \
+  -vf "scale=-2:2160,zoompan=z='min(zoom+0.0015,1.2)':d=120:s=1920x1080:fps=30" \
+  -c:v libx264 -preset ultrafast -crf 30 f2.mp4
+# killed at 25 s: 8,400 frames, 311,857,828 bytes, still accelerating
+```
+
+`-loop 1` feeds infinite input frames; `d=120` multiplies each into 120 output
+frames; nothing terminates it. That is the five-hour "hang" — it was never
+hung, it was succeeding forever.
+
+**`ffmpeg-ai` is form 2, and it works.** `refergit.md` §4.5 flags
+`src/ffmpeg_ai/video/composer.py:146-154` as an untrustworthy experiment for
+using `-loop 1` with `d=<total_frames>`. Measured: it produces a correct
+4.000 s / 120-frame clip, because line 150 passes `-t str(duration)`. The
+pattern is not wrong; it is one missing flag away from form 3.
+
+> `ffmpeg-ai` has a **different** real defect at the same site, not previously
+> recorded: `composer.py:67` sets the prescale to
+> `w, h = int(spec.width / 1.5), int(spec.height / 1.5)` — *below* output
+> resolution — and line 145 then ends the chain with
+> `scale={spec.width}:{spec.height}`, upsampling back. It renders motion at 2/3
+> resolution and stretches the result. That is the opposite of §1's finding.
+
+**Adopt form 1.** It cannot hang, because the frame count is structural rather
+than a flag someone can forget.
+
+→ **D-030.**
+
+---
+
+## 3. `zoompan` vs time-based `scale`+`crop`
+
+**Claim under test.** Reconciliation §4.4: *"Also worth benchmarking:
+`scale`+`crop` with `t`-based expressions, which are evaluated in float and may
+beat `zoompan`'s quantization outright."* `refergit.md` §4.5 asks for the same
+comparison. `Automated-Video-Generator` shipped `scale`+`crop` on its production
+path.
+
+**Method.** Same still, same output, same encoder settings, 4 s at 1080p30,
+3× prescale on both sides.
+
+```bash
+# A — zoompan
+ffmpeg -y -i land.png -vf "scale=-2:3240:flags=lanczos,\
+zoompan=z='min(1+0.12*on/120,1.12)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=120:s=1920x1080:fps=30,\
+setsar=1,format=yuv420p" -frames:v 120 -c:v libx264 -preset medium -crf 18 A.mp4
+
+# B — time-based scale+crop
+ffmpeg -y -loop 1 -framerate 30 -t 4 -i land.png -vf "scale=-2:3240:flags=lanczos,\
+scale=w='iw/(1+0.12*t/4)':h='ih/(1+0.12*t/4)':eval=frame,\
+crop=w='min(iw,ih*1920/1080)':h='min(ih,iw*1080/1920)',\
+scale=1920:1080:flags=lanczos,setsar=1,format=yuv420p" \
+  -c:v libx264 -preset medium -crf 18 B.mp4
+```
+
+**Result.** Both: 120 frames, 4.000000 s, 1920×1080, SAR 1:1.
+
+| | Wall | Peak RSS | Bytes |
+|---|---:|---:|---:|
+| A `zoompan` | **1.08 s** | **757 MB** | 1,712,262 |
+| B `scale`+`crop` | 8.32 s | 1,501 MB | 1,827,977 |
+
+**`zoompan` wins by 7.7× on time and 2× on memory.** The hypothesis was
+backwards. `scale` with `eval=frame` re-runs a lanczos resample over the entire
+3240px-tall prescaled image once per frame; `zoompan` resamples only the crop
+window it actually emits.
+
+And per §1, `zoompan`'s quantization — the thing `scale`+`crop` was supposed to
+fix — is already fully resolved by 3× prescale, at 1.96 s per 300 frames.
+
+**Why `Automated-Video-Generator` still uses `scale`+`crop`.** Its own comment
+at `render.ts:920-924` says it: *"replaced zoompan with a streaming scale+crop
+pan. zoompan buffered all `d` frames … and with d=1 on a still image it looped
+forever (5h encode)."* They were escaping form 3/4 of §2, not losing a
+benchmark. Their workaround also caps motion at 4 % (`zp = max(1.04, 1+0.04)`)
+and applies it *after* already downscaling to output size, so it upsamples —
+same defect as `ffmpeg-ai`.
+
+Keep `scale`+`crop` documented as the fallback if a future FFmpeg regresses
+`zoompan`. Re-run this benchmark before switching.
+
+→ **D-031.**
+
+---
+
+## 4. The SAR trap — reproduced
+
+**Claim under test.** `Automated-Video-Generator/src/agentic/orchestrator/render.ts:1049`:
+*"motion FX filters (scale/crop/zoompan) reset the sample aspect ratio after the
+early setsar=1 in the base chain, which produced SAR 12160:12159 and broke
+downstream concat."*
+
+```bash
+# odd.png is 1999x1001 — odd width and height
+ffmpeg -y -i odd.png \
+  -vf "scale=3240:-2:flags=lanczos,zoompan=z='min(1+0.1*on/60,1.1)':d=60:s=1920x1080:fps=30,format=yuv420p" \
+  -frames:v 60 -c:v libx264 -crf 20 sar_odd.mp4
+
+ffprobe -v error -select_streams v:0 \
+  -show_entries stream=sample_aspect_ratio,display_aspect_ratio -of csv=p=0 sar_odd.mp4
+```
+
+| Chain | SAR | DAR |
+|---|---|---|
+| `setsar=1` **before** `zoompan`, even-dimension source | 1:1 | 16:9 |
+| `setsar=1` **after** `zoompan`, even-dimension source | 1:1 | 16:9 |
+| **no trailing `setsar`, odd-dimension source** | **30007:30000** | **30007:16875** |
+
+Reproduced, same class as the reported bug. `scale` computes a corrective SAR
+when the rescale is not an exact ratio, and `zoompan` carries it through. A
+`setsar=1` earlier in the chain does not survive.
+
+Odd dimensions are not exotic — cropped photos and phone exports hit this
+constantly.
+
+**Rule: `setsar=1` is the last filter before `format=yuv420p`, always, with no
+condition attached.**
+
+→ **D-033.**
+
+---
+
+## 5. Concat accepts a mismatched segment silently
+
+**Claim under test.** Reconciliation §4.6: *"One mismatched scene corrupts the
+join silently."* Stated everywhere, demonstrated nowhere.
+
+```bash
+printf "file 'sar_yes.mp4'\nfile 'sar_odd.mp4'\nfile 'sar_yes.mp4'\n" > list_bad.txt
+ffmpeg -y -f concat -safe 0 -i list_bad.txt -c copy bad.mp4
+echo "exit=$?"
+ffprobe -v error -select_streams v:0 -show_entries stream=sample_aspect_ratio,nb_frames -of csv=p=0 bad.mp4
+```
+
+Two SAR 1:1 segments with a SAR 30007:30000 segment between them:
+
+```
+exit=0
+(no error, no warning, no stderr output at all)
+result: 1:1,180   duration 6.000000
+```
+
+**Exit 0. Silence.** The output declares SAR 1:1 for all 180 frames; the middle
+60 will display with the wrong geometry, and nothing in the pipeline says so.
+
+This is the strongest argument in this document for D-040's pinned segment
+profile. **FFmpeg is not a validator.** Every segment gets `ffprobe`-checked
+against the pinned profile before it is written into the concat list, and the
+absence of an FFmpeg error is not evidence of a valid join.
+
+→ **D-041.**
+
+---
+
+## 6. Aspect fit into the prescale canvas — no black edges
+
+**Claim under test.** `plan/PROJECT_BRIEF.md` §8: *"a landscape source in a 9:16
+frame needs cover-crop plus clamped pan so the window never leaves the image …
+this is where these pipelines produce black edges."*
+
+Worst case: landscape 4000×3000 → portrait 1080×1920.
+
+```bash
+ffmpeg -y -i land.png -vf "\
+scale=3240:5760:force_original_aspect_ratio=increase,crop=3240:5760,\
+zoompan=z='min(1+0.10*on/150,1.10)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=150:s=1080x1920:fps=30,\
+setsar=1,format=yuv420p" -frames:v 150 -c:v libx264 -preset medium -crf 18 v916.mp4
+```
+
+Output: 1080×1920, SAR 1:1, 150 frames, 5.000000 s.
+
+Black-edge probe — minimum luma across the top 4-pixel border of the first,
+middle, and last frame (a black edge would read 0):
+
+| Frame | min luma | max luma |
+|---|---:|---:|
+| 0 | 24 | 225 |
+| 74 | 17 | 229 |
+| 149 | 22 | 229 |
+
+No black edge at any point.
+
+**Why it holds structurally.** Cover-fitting into the prescale canvas *before*
+`zoompan` means the canvas is already ≥ the output aspect in both axes, and
+`zoompan`'s centred `x`/`y` expressions with `zoom ≥ 1` can only ever address a
+sub-rectangle of it. The failure mode is removed rather than clamped, which is
+why this ordering is mandatory rather than a suggestion.
+
+→ **D-034.**
+
+---
+
+## 7. Audio-driven segment duration
+
+**Claim under test.** D-021/D-022: audio duration is authoritative and video is
+built to fit it. Verify that a narration length that is *not* a frame multiple
+still produces a frame-exact segment with no A/V drift.
+
+A deliberately awkward 3.717 s narration at 30 fps.
+`ceil(3.717 × 30) = 112 frames = 3.733333 s`.
+
+```bash
+ffmpeg -y -i land.png -i n.mp3 -filter_complex "\
+[0:v]scale=3240:-2:flags=lanczos,zoompan=z='min(1+0.1*on/112,1.1)':d=112:s=1920x1080:fps=30,setsar=1,format=yuv420p[v];\
+[1:a]aresample=48000,apad,atrim=0:3.733333,asetpts=N/SR/TB[a]" \
+  -map "[v]" -map "[a]" -frames:v 112 \
+  -c:v libx264 -preset medium -crf 18 -c:a aac -b:a 192k -ar 48000 -ac 2 seg.mp4
+```
+
+| Stream | Value |
+|---|---|
+| video | h264, 112 frames, 3.733333 s, time_base 1/15360 |
+| audio | aac, 48000 Hz, 2 ch, 3.733 s, time_base 1/48000 |
+| container | 3.733333 s |
+
+Correct. `apad` then `atrim` to the frame-aligned length is the recipe: **pad
+narration up to the frame grid, never trim video down to the audio.** The
+0.33 ms audio shortfall is one AAC frame boundary (1024 samples = 21.33 ms) and
+does not accumulate, because the concat demuxer re-bases timestamps per segment.
+
+→ **D-022.**
+
+---
+
+## 8. What is still unmeasured
+
+Do not present any of these as known.
+
+- **Windows.** Every number here is arm64 macOS. Peak RSS, encoder behaviour,
+  and path handling all need re-measuring on Windows before D-071 closes.
+- **Real photographs.** `testsrc2` is a synthetic worst case for stepping.
+  Confirm the 3× prescale finding on real JPEGs, including CMYK and
+  EXIF-rotated ones.
+- **Hardware encoders.** D-036 asserts VideoToolbox bands on slow gradient pans.
+  That is reasoning from how these encoders behave, **not** a measurement taken
+  here. Benchmark `h264_videotoolbox` against `libx264` on real content before
+  the "fast draft" mode ships.
+- **n=500 in aggregate.** Everything above is a single segment. Pool sizing
+  (D-044), SQLite checkpoint throughput, and total wall time for a 500-scene
+  project are M3 measurements.
+- **Concurrent peak RSS.** ~1.5 GB per worker is extrapolated from the §1
+  control, not measured with N workers in flight.
+- **`xfade` cost curve.** Asserted to scale badly with clip count. Unmeasured.
+
+## 9. Re-running all of it
+
+The commands above are self-contained and need only `ffmpeg`, `ffprobe`, and
+`python3`. Once M1 exists, they become the seed for
+`crates/spoonstill-media/tests/motion_matrix.rs` — the same assertions, run in CI,
+across the matrix D-030 requires: three durations × two frame rates × every V1
+aspect ratio × landscape/portrait/square sources × ASCII/Unicode/spaced paths.
+
+A measurement that only ever ran once, by hand, on one machine, is a fact with a
+short shelf life. Move each of these into a test as soon as there is somewhere
+to put it.
