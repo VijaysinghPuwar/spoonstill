@@ -1,0 +1,6 @@
+# Pinned so CI, the desktop shell, and every contributor build the same
+# compiler. plan.md M0: "Rust stable via rustup. Pin it."
+[toolchain]
+channel    = "1.94.0"
+components = ["clippy", "rustfmt"]
+profile    = "minimal"

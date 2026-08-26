@@ -366,6 +366,38 @@ Do not present any of these as known.
   control, not measured with N workers in flight.
 - **`xfade` cost curve.** Asserted to scale badly with clip count. Unmeasured.
 
+## 8b. Generating an odd-dimension fixture takes three deliberate steps
+
+Measured 2026-08-26, while building `scripts/gen-fixtures.sh` for M0.
+
+§4 proves the SAR trap needs a source with **odd** dimensions. Producing one is
+harder than it looks — FFmpeg rounds to even at three independent points, each
+silently:
+
+| Attempt | Result |
+|---|---|
+| `testsrc2=size=1999x1001` | **1998×1000** — source filters round to even |
+| `... -vf crop=1999:1001` | **1998×1000** — `crop` aligns to chroma boundaries |
+| `... crop=1999:1001:exact=1`, default jpeg pix_fmt | **1998×1000** — `yuvj420p` 4:2:0 cannot represent odd dimensions |
+| `... crop=1999:1001:exact=1 -pix_fmt yuvj444p` | **1999×1001** ✅ |
+
+```bash
+ffmpeg -f lavfi -i "testsrc2=size=2000x1002:rate=1" \
+       -vf "crop=1999:1001:exact=1" -pix_fmt yuvj444p -frames:v 1 odd.jpg
+ffprobe -v error -select_streams v:0 -show_entries stream=width,height \
+       -of csv=p=0 odd.jpg     # 1999,1001
+```
+
+**Why this is worth a section.** A fixture that quietly comes out even makes the
+D-033 regression test pass *for the wrong reason* — it would assert `SAR 1:1` on
+a source that could never have produced a bad SAR, and would never catch BUG
+W2-1. The failure is invisible: the fixture generates without error, the test
+goes green, and the guarantee is gone.
+
+So `gen-fixtures.sh` re-probes `odd.jpg` and hard-fails if it is not exactly
+`1999,1001`. **A fixture that encodes a hazard must assert that it still
+encodes it.**
+
 ## 9. Re-running all of it
 
 The commands above are self-contained and need only `ffmpeg`, `ffprobe`, and

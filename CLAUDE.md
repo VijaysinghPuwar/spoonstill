@@ -6,13 +6,22 @@ narration boundaries. It is **not a video editor** — no timeline, no scrubber.
 
 ## Ground truth, in 30 seconds
 
-- **No application code exists yet.** Nothing has been implemented. If a
-  document sounds like it is describing an existing system, it is describing an
-  intended one.
-- **Rust is not installed on this machine.** `rustc` and `cargo` are absent.
-- **This directory is not a git repository.**
+- **M0 is complete; M1 has not started.** The workspace skeleton exists —
+  six crates, the D-010 boundary test, fixtures, CI. There is **no rendering
+  code**: no filter graph, no FFmpeg process boundary, no state, no queue. If a
+  document describes those as existing, it is describing an intended system.
+  Run `make gates` to see exactly where things stand.
+- **Rust 1.94.0 is installed**, pinned by `rust-toolchain.toml`. Homebrew's
+  rustup keeps its shims in `/opt/homebrew/opt/rustup/bin`, **not**
+  `~/.cargo/bin` — that path is on `PATH` via `~/.zshrc` and is re-exported by
+  the `Makefile`, so `make test` works from any shell.
+- **This is a git repository**, initialised 2026-08-26. The first commit is the
+  planning corpus, deliberately before any code.
+- **The name is `spoonstill`; the command is `still`** (D-073). The directory is
+  still `vidio/` — cosmetic, and the author's call to rename.
 - `plan/` holds **10 read-only reference checkouts** (~1.7 GB) plus three
   retired planning documents. Do not build in there and do not edit them.
+  It is gitignored; pinned commits are in `refergit.md` §2.
 - FFmpeg 8.0.1 is installed (Homebrew, **GPL build** — dev only, see D-062).
 
 ## The four documents that matter

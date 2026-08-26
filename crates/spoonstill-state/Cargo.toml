@@ -1,0 +1,14 @@
+[package]
+name = "spoonstill-state"
+description = "SQLite render state, checkpoints, and the cache index."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+authors.workspace      = true
+publish.workspace      = true
+
+[dependencies]
+spoonstill-core = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "spoonstill-app"
+description = "Application services: import, audio queue, render queue."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+authors.workspace      = true
+publish.workspace      = true
+
+[dependencies]
+spoonstill-core  = { workspace = true }
+spoonstill-media = { workspace = true }
+spoonstill-tts   = { workspace = true }
+spoonstill-state = { workspace = true }
+
+[lints]
+workspace = true

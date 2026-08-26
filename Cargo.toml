@@ -1,0 +1,32 @@
+# spoonstill — batch (still image + narration) -> one MP4 with Ken Burns motion.
+# Layout and dependency direction are fixed by D-010; the direction is enforced
+# by crates/spoonstill-cli/tests/architecture.rs, not by convention.
+[workspace]
+resolver = "3"
+members  = ["crates/*"]
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.94"
+authors      = ["Vijay Puwar <vpuwar199@gmail.com>"]
+publish      = false
+
+[workspace.dependencies]
+spoonstill-core  = { path = "crates/spoonstill-core" }
+spoonstill-media = { path = "crates/spoonstill-media" }
+spoonstill-tts   = { path = "crates/spoonstill-tts" }
+spoonstill-state = { path = "crates/spoonstill-state" }
+spoonstill-app   = { path = "crates/spoonstill-app" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# D-011 / D-052: a shell string is never how we reach FFmpeg.
+# These are the constructs that quietly become one.
+all = { level = "deny", priority = -1 }
+
+[profile.release]
+lto           = "thin"
+codegen-units = 1

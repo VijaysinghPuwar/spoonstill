@@ -1,0 +1,27 @@
+[package]
+name = "spoonstill-cli"
+description = "The permanent, complete control surface. Ships first (D-010)."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+authors.workspace      = true
+publish.workspace      = true
+
+# D-073: the product is `spoonstill`, the command is `still`. Crate names and
+# binary names are independent, which is why `still` being taken on crates.io
+# does not matter. `strip` is real at /usr/bin/strip and was avoided.
+[[bin]]
+name = "still"
+path = "src/main.rs"
+
+[dependencies]
+spoonstill-app  = { workspace = true }
+spoonstill-core = { workspace = true }
+
+[dev-dependencies]
+# Reads the workspace's own manifests to enforce D-010. A dev-dependency, so it
+# never reaches a shipped binary and never appears in a runtime dependency tree.
+toml = "1"
+
+[lints]
+workspace = true
