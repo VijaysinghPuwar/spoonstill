@@ -173,6 +173,34 @@ impl Anchor {
         }
     }
 
+    /// Parse the manifest's `zoom_anchor` cell, or the command-line form.
+    ///
+    /// Compass names are canonical because they are what [`Self::as_str`]
+    /// writes into state. The corner and edge synonyms are accepted because
+    /// operators hand-write manifests (D-013) and `top_left` is what a person
+    /// types; refusing it would be a validation error for a cell whose meaning
+    /// was never in doubt. Separators are interchangeable for the same reason.
+    ///
+    /// `center`/`centre` both work. Nothing else is guessed at — an
+    /// unrecognised cell is [`crate::ProblemKind::UnknownZoomAnchor`], never a
+    /// silent fall back to centre (D-035).
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let normalized = text.trim().to_ascii_lowercase().replace(['_', ' '], "-");
+        Some(match normalized.as_str() {
+            "center" | "centre" | "middle" | "c" => Anchor::Center,
+            "north" | "top" | "n" => Anchor::North,
+            "south" | "bottom" | "s" => Anchor::South,
+            "west" | "left" | "w" => Anchor::West,
+            "east" | "right" | "e" => Anchor::East,
+            "north-west" | "top-left" | "left-top" | "nw" => Anchor::NorthWest,
+            "north-east" | "top-right" | "right-top" | "ne" => Anchor::NorthEast,
+            "south-west" | "bottom-left" | "left-bottom" | "sw" => Anchor::SouthWest,
+            "south-east" | "bottom-right" | "right-bottom" | "se" => Anchor::SouthEast,
+            _ => return None,
+        })
+    }
+
     /// Stable name.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -739,5 +767,32 @@ mod tests {
         assert_eq!(MotionKind::parse("Zoom_In"), Some(MotionKind::ZoomIn));
         assert_eq!(MotionKind::parse("pan right"), Some(MotionKind::PanRight));
         assert_eq!(MotionKind::parse("dolly"), None);
+    }
+
+    /// Every anchor round-trips through its own stable name. Without this,
+    /// a `zoom_anchor` written back into state could fail to parse on the way
+    /// in, and the scene would silently re-seed on the next run (D-035).
+    #[test]
+    fn every_anchor_round_trips_through_its_stable_name() {
+        for anchor in Anchor::ALL {
+            assert_eq!(
+                Anchor::parse(anchor.as_str()),
+                Some(anchor),
+                "{anchor} must survive as_str -> parse"
+            );
+        }
+    }
+
+    #[test]
+    fn anchors_parse_the_forms_an_operator_will_type() {
+        assert_eq!(Anchor::parse("top_left"), Some(Anchor::NorthWest));
+        assert_eq!(Anchor::parse("Bottom Right"), Some(Anchor::SouthEast));
+        assert_eq!(Anchor::parse("centre"), Some(Anchor::Center));
+        assert_eq!(Anchor::parse("ne"), Some(Anchor::NorthEast));
+
+        // D-035: an unrecognised cell is a validation problem, never a quiet
+        // fall back to centre.
+        assert_eq!(Anchor::parse("upper-leftish"), None);
+        assert_eq!(Anchor::parse(""), None);
     }
 }

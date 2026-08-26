@@ -21,11 +21,18 @@ pub mod diagnostics;
 pub mod geometry;
 pub mod hash;
 pub mod motion;
+pub mod path_safety;
+pub mod project;
 pub mod timing;
 
 pub use diagnostics::{Diagnostics, Event, Severity};
 pub use geometry::{Aspect, GeometryError, OutputSpec, PRESCALE_FACTOR, SourceGeometry};
 pub use motion::{Anchor, MotionKind, MotionSpec, build_filter};
+pub use path_safety::{PathError, RealPath, resolve_within};
+pub use project::{
+    AudioSource, MotionRequest, Problem, ProblemKind, ProviderId, SceneDraft, SceneId, SceneSpec,
+    TtsSettings, Validation, VoiceId, validate_draft, validate_drafts,
+};
 pub use timing::{SAMPLE_RATE, duration_for_frames, frames_for_duration, samples_for_frames};
 
 /// Human-owned manifest, relative to the project root (D-013).

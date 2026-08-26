@@ -1,7 +1,7 @@
 # decisions.md — single source of truth for `spoonstill`
 
 **Status:** active. This file wins over every other document in the repo.
-**Last updated:** 2026-08-26 (M1: D-012 resolved; D-016 and D-037 added; D-070 and D-071 accepted).
+**Last updated:** 2026-08-26 (M2 slice 1: D-054 and D-055 added).
 
 `plan/PROJECT_BRIEF.md` and `plan/BRIEF_RECONCILIATION.md` both carry a
 "superseded by `decisions.md`" banner. Until now that file did not exist, so
@@ -541,6 +541,79 @@ scene ID. Never build a command line by string concatenation.
 
 The preview uses the same filter graph at reduced scale and cannot mutate final
 render state. Never make the operator render 500 scenes to check one.
+
+### D-054 — Project paths are contained, and out-of-bounds answers one thing · Accepted
+
+Decided 2026-08-26, at the start of M2, implemented in
+`spoonstill_core::path_safety`.
+
+Every path in a manifest is untrusted (D-052). One function decides what any of
+them means:
+
+1. **Containment is judged on canonical paths, component-wise.** Canonicalize
+   first — that is what folds symlinks, `..`, duplicate separators and the
+   case a volume actually stores into one comparable form — then test
+   containment with `Path::starts_with`, which compares components. A string
+   prefix test passes `/work/proj-evil` for root `/work/proj`, and there is a
+   test named for that.
+2. **The project root is the boundary.** A relative cell joins onto the
+   canonical root; an absolute cell is held to the same rule. There is no
+   trusted-caller escape hatch.
+3. **Out of bounds is one answer whether or not the file exists.** A path
+   inside the project that is missing says so precisely; anything outside says
+   only "outside", for both a file that is there and one that is not. The
+   difference between two error messages is otherwise a working existence
+   oracle for the whole host filesystem, queried one manifest row at a time.
+4. **A missing path is resolved from the deepest ancestor that exists**, then
+   finished lexically. Not for ergonomics: finishing lexically from the top
+   lets `project/link-to-etc/nope` answer "missing inside the project" while
+   its neighbour `project/link-to-etc/passwd` answers "outside" — which is
+   rule 3's oracle rebuilt out of the missing-file case. Every component past
+   the anchor is known not to exist, so no symlink can be hiding in it.
+
+Prior art, per plan.md §M2: `plan/MoneyPrinterTurbo/app/utils/file_security.py`
+`resolve_path_within_directory()` and `app/services/task.py:359`. **Adopt**
+realpath-then-contain and the generic out-of-bounds error, which their comment
+states outright. **Modify** `commonpath` to `starts_with`, and their
+existence-tolerant `realpath` to the ancestor walk above, since Rust's
+`canonicalize` requires the path to exist. **Reject** `allow_server_file_input`,
+the flag that lets a trusted caller resolve outside the boundary: there is no
+second trust level here to spend it on. If a shared media library outside the
+project is ever needed, that is a new decision with an explicit list of roots,
+not a boolean.
+
+Canonicalization itself is the one fact the domain cannot derive, so it enters
+through the `RealPath` trait (D-010). Everything else is pure, which is why the
+tests run identically on macOS and Windows with no fixtures (D-071).
+
+### D-055 — Validation reports everything, and guesses nothing · Accepted
+
+Decided 2026-08-26, implemented in `spoonstill_core::project`.
+
+plan.md §M2 asks for every problem at once. Three rules make that real, and
+each of them is a place where the obvious shortcut is wrong at n=500 (D-002):
+
+- **Nothing short-circuits.** `validate_drafts` returns the scenes that passed
+  *and* every problem found, in input order. An operator with a 500-row
+  manifest cannot fix one typo per run.
+- **Present-but-wrong is not the same as absent.** A blank `text` cell is its
+  own error, not a silent silent-scene. An unparseable `zoom_direction` is an
+  error, not a fall back to the seeded default (D-035) — quietly substituting
+  for a cell the operator did fill in is how 500 scenes come out wrong in a way
+  nobody notices until delivery.
+- **Two sources are never resolved by precedence.** D-020 already says two is
+  an error; the message names every cell that was filled in rather than
+  picking a winner.
+
+A declared `duration` above `MAX_SCENE_SECONDS` (3600 s) is refused as absurd,
+which is D-021's "reject absurd values" made concrete. It is a sanity bound,
+not a product limit: a cell reading `36000` is a typo for `3.6` far more often
+than it is an hour-long title card.
+
+Scene IDs are validated rather than being plain strings, because an ID names
+the segment file on disk: blank, `.`/`..`, path separators and control
+characters are refused. Spaces, Unicode and emoji are **not** — D-052 says
+those are the normal case, and every command is an argument vector (D-011).
 
 ---
 

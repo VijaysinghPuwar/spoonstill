@@ -280,11 +280,36 @@ ls /tmp/s.mp4        # absent, or present and marked partial — never a valid-l
 
 ---
 
-## M2 — Project model and the three audio sources
+## M2 — Project model and the three audio sources · IN PROGRESS
 
 **Goal.** `still render ./project/` renders a three-scene project — one TTS
 scene, one supplied-audio scene, one silent-duration scene — from a folder an
 operator could have produced by hand.
+
+### Progress
+
+M2 is being built in four slices, each one landing with its own tests and its
+own decisions. Where a slice is done, the exit gate it satisfies is named.
+
+| Slice | What | State |
+|---|---|---|
+| **1. The pure domain** | `spoonstill_core::path_safety` + `spoonstill_core::project`: containment, the scene model, and every validation rule that needs no disk. D-054, D-055. | ✅ 2026-08-26 — satisfies `cargo test -p spoonstill-core path_safety` |
+| **2. Import and `still validate`** | `project.yaml` and the CSV manifest, convention-mode stem pairing, path resolution and media probing merged into one problem list, `still validate` printing it. | next |
+| **3. The three audio sources** | `AudioSource::resolve()` → `(normalized_path, Duration)`: ingest normalization to 48 kHz stereo, `ffprobe` on the normalized artifact, generated silence. | |
+| **4. TTS behind a trait** | Provider trait, typed settings and errors, ElevenLabs BYOK against a recorded fixture. | |
+
+Slice 1 notes, for whoever picks this up:
+
+- `spoonstill-core` still has **zero dependencies**. Path canonicalization —
+  the one fact the domain cannot derive — enters through the `RealPath` trait,
+  so the containment tests run with a fake filesystem and pass identically on
+  Windows (D-071).
+- Validation is deliberately incomplete on its own: it never asks whether a
+  file exists or whether it is really a JPEG. `ProblemKind::Path` and
+  `ProblemKind::NotUsableMedia` exist for slice 2 to fill in, so the operator
+  gets **one** report rather than one per stage.
+- `Anchor::parse` was added to `spoonstill_core::motion` for the manifest's
+  `zoom_anchor` column, with a round-trip test over `Anchor::ALL`.
 
 ### Deliverables
 
