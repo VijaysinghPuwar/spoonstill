@@ -97,6 +97,49 @@ dependency, and the shipped FFmpeg binary needs its own LGPL build (D-062).
 
 ## Where to start
 
-`plan.md` §"Immediate next actions". The short version: three Open decisions
-need the author, then M0 is a day of toolchain setup that blocks everything
-else.
+**Catch up in one command.** This prints the real state of the build rather than
+what any document claims:
+
+```bash
+make gates          # 8/8 = M0 intact.  Also: make test | lint | fixtures | help
+git log --oneline   # 2 commits: planning corpus, then M0
+```
+
+If `make gates` is 8/8, everything below is accurate and you can start work
+immediately. If it is not, fix that first — something regressed.
+
+### State as of 2026-08-26
+
+**M0 is complete. M1 has not started.** Do not go looking for rendering code;
+there is none. The six crates exist, the D-010 boundary is enforced by
+`crates/spoonstill-cli/tests/architecture.rs`, and the four infrastructure
+crates are documented stubs with one test each. Details, including what M0
+corrected in the docs: `plan.md` §M0.
+
+**Next task is M1**, in this order — riskiest and most testable first:
+
+1. `spoonstill-core::motion::build_filter` — pure, no I/O. Every assertion it
+   needs is already measured in `ffmpeg-findings.md` §1–§6, so this is
+   test-first work with known answers.
+2. `SEGMENT_PROFILE` + `assert_matches_profile`. Write it in M1 even though
+   nothing concatenates until M3 — retrofitting a profile means re-rendering
+   every segment that already exists.
+3. `spoonstill-media` process boundary. Decide D-012 here (depend on
+   `ffmpeg-sidecar`, or reimplement ~600 lines) and record the call.
+4. `still render-scene` wiring them together — M1's exit gate.
+
+**Open decisions, still unguessed:** D-070 (9:16 + 1:1 in V1 — sets the breadth
+of M1's `motion_matrix`, needed before M1 closes) and D-071 (Windows day one —
+does not block M1). Both have recorded defaults. Everything else is Accepted.
+
+### Two traps this project already fell into
+
+- **A decision that is not in `decisions.md` did not happen.** The project name
+  was chosen by the author, contradicted by the session that chose it, written
+  down nowhere, and lost for two days. See D-073's provenance note. Write
+  decisions into `decisions.md` in the same commit as the code.
+- **A fixture that encodes a hazard must assert that it still encodes it.**
+  `odd.jpg` silently generated as 1998×1000 — even — which would have made the
+  D-033 SAR test pass for the wrong reason forever. See `ffmpeg-findings.md`
+  §8b. The same shape of bug is available to any test whose fixture is
+  generated rather than asserted.

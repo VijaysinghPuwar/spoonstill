@@ -55,7 +55,32 @@ before M2 closes. They are calibration, not commitments.
 
 ---
 
-## M0 — Toolchain and workspace skeleton
+## M0 — Toolchain and workspace skeleton · ✅ COMPLETE 2026-08-26
+
+All 8 exit gates pass; rerun them any time with `make gates`. Commit `6353f25`.
+
+What exists: six crates, binary `still`, `rust-toolchain.toml` pinning 1.94.0,
+`Makefile`, `.github/workflows/ci.yml`, `scripts/gen-fixtures.sh`,
+`scripts/m0-gates.sh`, and `crates/spoonstill-cli/tests/architecture.rs`.
+11 tests green, clippy clean at `-D warnings`.
+
+What does **not** exist: any rendering code at all. No filter graph, no FFmpeg
+process boundary, no `SEGMENT_PROFILE`, no state, no queue, no CLI subcommands.
+The four infrastructure crates are documented stubs with one test each.
+
+Two corrections this milestone made to the documents:
+
+- **Rust was already installed** — this file said otherwise. rustc 1.94.0 was
+  present; only `~/.cargo/bin` was absent, because Homebrew's rustup keeps its
+  shims in `/opt/homebrew/opt/rustup/bin`. That directory was not on `PATH`, so
+  every check reported "not installed". Now on `PATH` via `~/.zshrc`, and
+  re-exported by the `Makefile` so `make test` works from any shell.
+- **`odd.jpg` was generating even** (1998×1000), which would have made the D-033
+  SAR test vacuous. See `ffmpeg-findings.md` §8b. `gen-fixtures.sh` now asserts
+  the fixture is genuinely 1999×1001 and hard-fails otherwise.
+
+`just` is not installed; this section permits "justfile (or Makefile)", so the
+entry points are `make test`, `make lint`, `make fixtures`, `make gates`.
 
 **Goal.** A `cargo test` that runs, in a repo with history, with the
 architectural boundary of D-010 enforced by the compiler rather than by
@@ -522,12 +547,27 @@ Because these creep in as "small additions":
 
 ## Immediate next actions
 
-1. Answer D-070 (9:16 in V1) and D-071 (Windows day one) — both change M2/M3
-   scope and neither needs code.
-2. Answer D-073 (project name) — one constant now, a rename across five crates
-   later.
-3. Install Rust and run M0. It is a day, and everything is blocked behind it.
-4. Decide on `plan/remotion` (D-061). 1.2 GB for a paragraph of concepts that
-   are already written down.
-5. Start the FFmpeg licensing question (D-062). It has lead time and it can
-   invalidate an encoder decision, so it should not wait for M5.
+Updated 2026-08-26, after M0.
+
+1. **Answer D-070 (9:16 + 1:1 in V1).** This is the only Open decision that
+   shapes work already in flight: it sets the breadth of M1's `motion_matrix`,
+   which is M1's headline exit gate. It changes the *test matrix*, not the
+   renderer — D-034's cover-crop is already aspect-agnostic. Recorded default:
+   yes, all three in V1. Needed before M1 closes, not before it starts.
+2. **Start M1.** Unblocked. Order within it, riskiest first:
+   `spoonstill-core::motion::build_filter` (pure, no I/O, fully testable against
+   `ffmpeg-findings.md` §1–§6) → `SEGMENT_PROFILE` + its assertion →
+   `spoonstill-media` process boundary → `still render-scene` wiring them up.
+   Decide D-012 (depend on `ffmpeg-sidecar` vs reimplement ~600 lines) when the
+   process boundary starts, and record it.
+3. **Answer D-071 (Windows day one).** Does not block M1. It decides whether the
+   commented-out Windows job in `.github/workflows/ci.yml` turns on, which also
+   means re-measuring every number in `ffmpeg-findings.md` on Windows.
+4. **Decide on `plan/remotion` (D-061).** 1.2 GB for a paragraph of concepts
+   already written down. Now gitignored either way, so this is disk only.
+5. **Start the FFmpeg licensing question (D-062).** Lead time, and it can
+   invalidate an encoder decision — it should not wait for M5.
+
+Not blocking anything, but worth knowing: the workspace directory is still
+`vidio/` while the project is `spoonstill` (D-073). Renaming it is cosmetic and
+is the author's call.
