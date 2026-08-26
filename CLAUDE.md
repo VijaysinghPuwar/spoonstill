@@ -6,10 +6,11 @@ narration boundaries. It is **not a video editor** — no timeline, no scrubber.
 
 ## Ground truth, in 30 seconds
 
-- **M0 is complete; M1 has not started.** The workspace skeleton exists —
-  six crates, the D-010 boundary test, fixtures, CI. There is **no rendering
-  code**: no filter graph, no FFmpeg process boundary, no state, no queue. If a
-  document describes those as existing, it is describing an intended system.
+- **M0 and M1 are complete; M2 has not started.** There *is* rendering code
+  now: the filter graph, the FFmpeg process boundary, the segment profile and
+  its assertion, and `still render-scene` end to end. There is still **no
+  project model, no state database, no TTS, and no queue** — if a document
+  describes those as existing, it is describing an intended system.
   Run `make gates` to see exactly where things stand.
 - **Rust 1.94.0 is installed**, pinned by `rust-toolchain.toml`. Homebrew's
   rustup keeps its shims in `/opt/homebrew/opt/rustup/bin`, **not**
@@ -23,6 +24,9 @@ narration boundaries. It is **not a video editor** — no timeline, no scrubber.
   retired planning documents. Do not build in there and do not edit them.
   It is gitignored; pinned commits are in `refergit.md` §2.
 - FFmpeg 8.0.1 is installed (Homebrew, **GPL build** — dev only, see D-062).
+- **The code targets macOS and Windows both** (D-071, decided 2026-08-26).
+  Nothing has been *run* on Windows yet, and every number in
+  `ffmpeg-findings.md` is macOS arm64. Do not claim otherwise.
 
 ## The four documents that matter
 
@@ -51,7 +55,9 @@ docs and in the reference repos**, because it was measured here.
 `ffmpeg-ai`, `Automated-Video-Generator`, and `editly` each contain Ken Burns
 code that is wrong, resolution-losing, or solving a problem we do not have.
 `ffmpeg-findings.md` §2 and §3 document exactly how. The production recipe is
-D-030 through D-034 — use it, and if you change it, re-run the benchmarks.
+D-030 through D-034 **plus D-037** — and it is now code, in
+`spoonstill_core::motion::build_filter`, with the exact emitted string pinned by
+a test. Change it there, and change `decisions.md` in the same commit.
 
 **2. Do not re-litigate a settled decision.**
 Prescale, `zoompan` vs `scale`+`crop`, `keyring-rs` vs Stronghold, CLI-first vs
@@ -60,8 +66,10 @@ Cite the D-number and move on. If you have new evidence, change `decisions.md`
 in the same commit as the code.
 
 **3. Do not guess an Open decision.**
-D-070 through D-074 need the author. Each records a default to use if you must
-proceed — say explicitly that you used it.
+Only **D-072** (captions) is still Open, and it records a default to use if you
+must proceed — say explicitly that you used it. D-070 and D-071 were Open and
+are now Accepted; they live under "Resolved from the Open list" so the answer is
+as easy to find as the question was.
 
 **4. Do not invent requirements from the `kenburns-batch` master brief.**
 Several documents call it authoritative. It has never been in this workspace
@@ -74,7 +82,13 @@ Several documents call it authoritative. It has never been in this workspace
   artifact — never estimated from text, never trusted from a container header.
 - **`project.yaml` is an input.** The renderer never writes to it. Machine state
   lives in `.spoonstill/state.db`.
-- **`setsar=1` is the last filter** before `format=yuv420p`, always (D-033).
+- **`setsar=1` is the last filter** before `format=yuv420p`, always (D-033) —
+  with `setparams` immediately before it, pinning colour (D-037).
+- **Colour range is pinned, not inherited.** A JPEG is full-range and that flag
+  reaches the encoder through `format=yuv420p`, producing `yuvj420p`. Measured:
+  `ffmpeg-findings.md` §7b.
+- **Every failure is written down as it happens** (D-016). `still diagnostics
+  export` packages it into one sendable file, with credentials redacted.
 - **FFmpeg does not validate concat.** A mismatched segment joins with exit 0
   and no warning — proven in `ffmpeg-findings.md` §5. We assert the segment
   profile ourselves (D-041).
@@ -101,36 +115,68 @@ dependency, and the shipped FFmpeg binary needs its own LGPL build (D-062).
 what any document claims:
 
 ```bash
-make gates          # 8/8 = M0 intact.  Also: make test | lint | fixtures | help
-git log --oneline   # 2 commits: planning corpus, then M0
+make gates          # M0 8/8 and M1 8/8 = intact.
+                    # Also: make gates-m1 | test | lint | fixtures | help
+git log --oneline   # planning corpus, then M0, then M1
 ```
 
-If `make gates` is 8/8, everything below is accurate and you can start work
-immediately. If it is not, fix that first — something regressed.
+If both milestones are 8/8, everything below is accurate and you can start work
+immediately. If not, fix that first — something regressed.
+
+Then see one render for yourself, which is faster than reading about it:
+
+```bash
+cargo build --release -p spoonstill-cli
+./target/release/still render-scene \
+  --image fixtures/generated/land.jpg \
+  --audio fixtures/generated/n.wav \
+  --out /tmp/s.mp4
+./target/release/still diagnostics export --project /tmp --out /tmp/bundle.txt
+```
 
 ### State as of 2026-08-26
 
-**M0 is complete. M1 has not started.** Do not go looking for rendering code;
-there is none. The six crates exist, the D-010 boundary is enforced by
-`crates/spoonstill-cli/tests/architecture.rs`, and the four infrastructure
-crates are documented stubs with one test each. Details, including what M0
-corrected in the docs: `plan.md` §M0.
+**M0 and M1 are complete. M2 has not started.** `make gates` is 8/8 for M0 and
+8/8 for M1.
 
-**Next task is M1**, in this order — riskiest and most testable first:
+M1 delivered the whole product in miniature: `still render-scene --image X
+--audio Y --out seg.mp4` measures the narration, derives an exact frame count,
+builds the filter chain, renders through an argument-vector process boundary,
+asserts the full segment profile against `ffprobe`, and only then moves the file
+into place. Detail, including what M1 changed in the docs: `plan.md` §M1.
 
-1. `spoonstill-core::motion::build_filter` — pure, no I/O. Every assertion it
-   needs is already measured in `ffmpeg-findings.md` §1–§6, so this is
-   test-first work with known answers.
-2. `SEGMENT_PROFILE` + `assert_matches_profile`. Write it in M1 even though
-   nothing concatenates until M3 — retrofitting a profile means re-rendering
-   every segment that already exists.
-3. `spoonstill-media` process boundary. Decide D-012 here (depend on
-   `ffmpeg-sidecar`, or reimplement ~600 lines) and record the call.
-4. `still render-scene` wiring them together — M1's exit gate.
+What exists now, by crate:
 
-**Open decisions, still unguessed:** D-070 (9:16 + 1:1 in V1 — sets the breadth
-of M1's `motion_matrix`, needed before M1 closes) and D-071 (Windows day one —
-does not block M1). Both have recorded defaults. Everything else is Accepted.
+- `spoonstill-core` — `motion::build_filter` (pure), `geometry`, `timing`,
+  `hash`, `diagnostics` (records + redaction). Still zero dependencies.
+- `spoonstill-media` — `command` (the only place a process is spawned),
+  `probe` (timed, typed), `profile` (`SegmentProfile` + `assert_matches_profile`),
+  `scene` (render → validate → atomic move).
+- `spoonstill-state` — `logs`: the JSON Lines sink and the bundle export.
+  **Still no SQLite** — that is M2/M3.
+- `spoonstill-app` — `render`, `diagnostics`, and `surface` (the re-exports the
+  CLI is allowed to see).
+- `spoonstill-cli` — `still render-scene`, `still diagnostics export|where`.
+
+**Next task is M2** — the project model and the three audio sources. Read
+`plan.md` §M2 before starting. In rough order:
+
+1. `project.yaml` parsing and validation (D-013, D-020, D-050). It is an
+   **input**; the renderer never writes to it.
+2. The three audio sources — supplied file, TTS, explicit duration — behind one
+   resolution path that always ends in a measured duration (D-021).
+3. `.spoonstill/state.db` (D-013, D-042): one transaction per state transition.
+4. Cache keys (D-043), which already have their content hash in
+   `spoonstill_core::hash`.
+
+**Open decisions:** only D-072 (captions) remains, and it does not block M2.
+D-070 and D-071 were answered by the author on 2026-08-26 and are now Accepted;
+they sit under "Resolved from the Open list" in `decisions.md`.
+
+**Do not re-derive these** — they cost measurement time and are already settled
+in code with tests: the exact filter string, the 90 kHz time base, the H.264
+level derivation, `atrim=end_sample=` rather than a rounded decimal, and the
+fact that `-color_primaries` as an encoder option does not survive.
 
 ### Two traps this project already fell into
 
@@ -142,4 +188,6 @@ does not block M1). Both have recorded defaults. Everything else is Accepted.
   `odd.jpg` silently generated as 1998×1000 — even — which would have made the
   D-033 SAR test pass for the wrong reason forever. See `ffmpeg-findings.md`
   §8b. The same shape of bug is available to any test whose fixture is
-  generated rather than asserted.
+  generated rather than asserted — and to any *probe*, which is why the
+  black-edge check has a control test that proves it reads 0 on a real
+  letterbox (`ffmpeg-findings.md` §7c).

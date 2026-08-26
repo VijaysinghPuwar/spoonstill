@@ -7,8 +7,18 @@ rust-version.workspace = true
 authors.workspace      = true
 publish.workspace      = true
 
+# D-012, resolved at M1: reimplement the ffmpeg-sidecar *pattern*, do not
+# depend on the crate. Reasons in decisions.md — briefly: its auto-download is
+# default-on and explicitly rejected (D-012), it offers no timeout-bounded
+# ffprobe (plan.md M1 names probe hangs as a risk, and a timeout added after the
+# first hang is a timeout added too late), and its stderr event classification
+# is not something we may rely on anyway since raw stderr is retained
+# regardless. What remains is a thin builder over std::process — which is what
+# src/command.rs now is, at a fraction of the ~600 lines D-012 estimated.
 [dependencies]
 spoonstill-core = { workspace = true }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [lints]
 workspace = true

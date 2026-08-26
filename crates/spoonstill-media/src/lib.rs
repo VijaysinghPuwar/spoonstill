@@ -10,9 +10,26 @@
 //!   concat (D-041), so the segment profile is asserted here against real
 //!   `ffprobe` output before anything downstream trusts a file.
 //!
-//! M1 fills this in: the `FfmpegCommand` builder, the retained child handle
-//! with separate `quit()`/`kill()`/`wait()`, timed `ffprobe` JSON, and
-//! `SEGMENT_PROFILE`.
+//! M1 filled this in: [`command`] is the builder and the retained child handle
+//! with separate `quit()`/`kill()`/`wait()`, [`probe`] is timed `ffprobe` JSON,
+//! [`profile`] is `SEGMENT_PROFILE` and its assertion, and [`scene`] wires them
+//! into one segment.
+
+#![warn(missing_docs)]
+
+pub mod command;
+pub mod error;
+pub mod probe;
+pub mod profile;
+pub mod scene;
+pub mod tools;
+
+pub use command::{FfmpegChild, FfmpegCommand, Finished, Progress};
+pub use error::MediaError;
+pub use probe::{ProbeResult, Stream, StreamKind, probe, probe_counting_frames};
+pub use profile::{Mismatch, SegmentProfile, assert_matches_profile};
+pub use scene::{Cancel, EncodeSettings, RenderedScene, SceneRequest, render_scene};
+pub use tools::Tools;
 
 /// This crate's package name, resolved at compile time.
 pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");

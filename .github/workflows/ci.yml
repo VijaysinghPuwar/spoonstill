@@ -12,9 +12,8 @@ env:
 jobs:
   check:
     name: fmt · clippy · test
-    # D-071 is Open; its recorded default is macOS-first through M3, so macOS is
-    # the only runner for now. The Windows job below is deliberately left in
-    # place rather than deleted — see the comment on it.
+    # macOS is where ffmpeg-findings.md was measured, so this is the runner
+    # whose results those numbers describe. Windows runs below (D-071).
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -48,16 +47,37 @@ jobs:
             exit 1
           fi
 
-  # D-071 — Windows first-class from M4, not now. This job is present and
-  # disabled rather than absent, because plan.md M0 asks for exactly that: the
-  # reason lives next to the thing it disables.
+  # D-071 is Accepted as of 2026-08-26: the code is cross-platform from M1, so
+  # this job is on. It is expected to be the first place a Windows-only mistake
+  # shows up — `fs::rename` over an existing file, a path assumption, a missing
+  # console flag.
   #
-  # Turning it on also requires re-measuring ffmpeg-findings.md on Windows —
-  # every number in that file is macOS arm64 — so this is not a one-line change.
-  #
-  # windows:
-  #   runs-on: windows-2022
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: dtolnay/rust-toolchain@stable
-  #     - run: cargo test --workspace
+  # What this job does NOT do is validate ffmpeg-findings.md. Every number there
+  # is macOS arm64 and stays unmeasured on Windows (findings §8). Green here
+  # means "builds and behaves"; it does not mean "benchmarked".
+  windows:
+    name: windows · fmt · clippy · test
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The test suite renders real media, so it needs the real binaries. It
+      # builds its own fixtures in Rust rather than through gen-fixtures.sh,
+      # precisely so that this job does not need bash.
+      - name: Install FFmpeg
+        run: choco install ffmpeg --no-progress -y
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace

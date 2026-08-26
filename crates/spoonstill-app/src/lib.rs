@@ -8,6 +8,27 @@
 //! It does not own a terminal and it does not own a webview. Both are adapters
 //! over this crate, which is what makes n=500 testable in CI (D-002, D-010).
 
+#![warn(missing_docs)]
+
+pub mod diagnostics;
+pub mod render;
+
+pub use render::{RenderError, RenderSceneOptions, render_scene};
+
+/// The types the control surface needs, re-exported through the layer it is
+/// allowed to depend on.
+///
+/// D-010 forbids `spoonstill-cli` from reaching past this crate into
+/// `spoonstill-media` or `spoonstill-state`, and
+/// `spoonstill-cli/tests/architecture.rs` enforces it. That rule is the reason
+/// the Tauri shell at M4 will not have to re-derive any of this: whatever the
+/// CLI can reach, the shell can reach, through the same door.
+pub mod surface {
+    pub use spoonstill_media::Progress;
+    pub use spoonstill_media::scene::{Cancel, EncodeSettings, RenderedScene};
+    pub use spoonstill_state::logs::LOGS_DIR;
+}
+
 /// This crate's package name, resolved at compile time.
 pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
 

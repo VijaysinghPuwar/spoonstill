@@ -17,6 +17,13 @@ path = "src/main.rs"
 [dependencies]
 spoonstill-app  = { workspace = true }
 spoonstill-core = { workspace = true }
+# The CLI is the permanent, complete control surface (D-010), so its help text
+# and its error messages are product surface rather than scaffolding.
+clap = { version = "4", features = ["derive"] }
+# D-045 asks for graceful-then-forced cancellation. A hand-rolled signal handler
+# would need `unsafe`, which the workspace forbids, and would not cover the
+# Windows console control events that D-071 now puts in scope.
+ctrlc = "3"
 
 [dev-dependencies]
 # Reads the workspace's own manifests to enforce D-010. A dev-dependency, so it

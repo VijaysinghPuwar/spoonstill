@@ -122,7 +122,54 @@ cargo tree -p spoonstill-core | grep -iE 'tauri|reqwest|elevenlabs'   # no outpu
 
 ---
 
-## M1 — One scene, end to end
+## M1 — One scene, end to end · COMPLETE (2026-08-26)
+
+> **Status: complete. `make gates-m1` is 8/8.**
+>
+> `still render-scene --image X --audio Y --out seg.mp4` produces a segment that
+> passes the full profile assertion. What landed:
+>
+> | Deliverable | Where |
+> |---|---|
+> | `build_filter`, pure | `spoonstill-core/src/motion.rs` |
+> | geometry, prescale, the three aspects | `spoonstill-core/src/geometry.rs` |
+> | frame/sample arithmetic (D-021, D-022) | `spoonstill-core/src/timing.rs` |
+> | stable content hash (D-035, D-043) | `spoonstill-core/src/hash.rs` |
+> | process boundary, retained child | `spoonstill-media/src/command.rs` |
+> | timed, typed `ffprobe` | `spoonstill-media/src/probe.rs` |
+> | `SEGMENT_PROFILE` + assertion | `spoonstill-media/src/profile.rs` |
+> | render → validate → atomic move (D-042) | `spoonstill-media/src/scene.rs` |
+> | the motion matrix | `spoonstill-media/tests/motion_matrix.rs` |
+> | `still render-scene`, `still diagnostics` | `spoonstill-cli/src/main.rs` |
+>
+> **Decisions made or changed while building it** — each recorded in
+> `decisions.md` in the same commit as the code:
+>
+> - **D-012 resolved: reimplement, do not depend on `ffmpeg-sidecar`.** Its
+>   auto-download is default-on and already rejected; it has no timeout-bounded
+>   `ffprobe`, which M1 named as a risk and needed from the first call; and its
+>   typed stderr events are something plan.md already forbids relying on.
+> - **D-037 added, and it changes this milestone's filter chain.** A JPEG is
+>   full-range, and that flag survives `format=yuv420p` into the encoder, which
+>   then reports `yuvj420p`. The chain gains `:out_range=tv` on the prescale and
+>   a `setparams` before `setsar=1`. Measured, with the reproduction in
+>   `ffmpeg-findings.md` §7b. D-033 still holds literally — `setparams` sets
+>   metadata and does not touch SAR.
+> - **D-016 added:** diagnostics are written as they happen and exported as one
+>   file, so a failure on another machine can be diagnosed here. Author request.
+> - **D-070 accepted** (16:9, 9:16, 1:1 all V1) — the recorded default, now
+>   implemented and covered in the matrix.
+> - **D-071 accepted** (cross-platform from M1) — author decision. The code is
+>   written for both platforms and the Windows CI job is on; **nothing has been
+>   run on Windows yet**, and every number in `ffmpeg-findings.md` is still
+>   macOS arm64.
+>
+> Two things this milestone added beyond its brief, both because they were
+> cheaper now than later: the segment profile pins the four colour fields, not
+> just SAR and pixel format; and the black-edge probe has a control test proving
+> it can fail (`ffmpeg-findings.md` §7c), because a vacuous probe would have
+> made every black-edge assertion in the matrix meaningless.
+
 
 **Goal.** `still render-scene --image X.jpg --audio Y.mp3 --out seg.mp4`
 produces a segment that passes the full profile assertion, on a machine that

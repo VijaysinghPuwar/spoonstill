@@ -346,12 +346,119 @@ does not accumulate, because the concat demuxer re-bases timestamps per segment.
 
 ---
 
+## 7b. The full-range JPEG trap — `yuv420p` is not what comes out
+
+Measured 2026-08-26, while building M1. **Not predicted by any prior document.**
+
+A JPEG is full-range. Running the documented D-030/D-034 chain on one — which
+ends `setsar=1,format=yuv420p` — and then probing the result:
+
+```bash
+ffmpeg -y -i land.jpg -i n.wav -filter_complex "\
+[0:v]scale=5760:3240:force_original_aspect_ratio=increase,crop=5760:3240,\
+zoompan=z='1+0.1*min(on/111,1)':x='0.5*(iw-iw/zoom)':y='0.5*(ih-ih/zoom)':\
+d=112:s=1920x1080:fps=30,setsar=1,format=yuv420p[v];\
+[1:a]aresample=48000,apad,atrim=end_sample=179200,asetpts=N/SR/TB[a]" \
+  -map "[v]" -map "[a]" -frames:v 112 -c:v libx264 -preset medium -crf 18 \
+  -c:a aac -b:a 192k -ar 48000 -ac 2 proto.mp4
+
+ffprobe -v error -select_streams v:0 -show_entries stream=pix_fmt -of csv=p=0 proto.mp4
+```
+
+| Expected | Measured |
+|---|---|
+| `yuv420p` | **`yuvj420p`** |
+
+The `format=yuv420p` filter converts the *layout*; it does not clear the range
+flag, which travels on the frame into libx264 and is signalled in the
+bitstream. So the segment's declared pixel format depends on the colour range of
+the **source image**.
+
+**Why this is a §5 problem, not a cosmetic one.** Two scenes whose sources
+differ in range — one JPEG, one PNG — produce segments with different pixel
+formats and different rendered colour. Per §5, the concat demuxer joins them
+with exit 0 and no warning. It surfaces as "some scenes look washed out" in a
+finished 500-scene render, months later.
+
+**The fix, and what did not work.** Setting `-color_range tv -colorspace bt709
+-color_primaries bt709 -color_trc bt709` as *encoder* options was tried first:
+
+| Field | With encoder options | With `setparams` in the chain |
+|---|---|---|
+| `pix_fmt` | `yuv420p` ✅ | `yuv420p` ✅ |
+| `color_range` | `tv` ✅ | `tv` ✅ |
+| `color_space` | `bt709` ✅ | `bt709` ✅ |
+| `color_primaries` | **unset** ❌ | `bt709` ✅ |
+| `color_transfer` | **unset** ❌ | `bt709` ✅ |
+
+So the range conversion goes on the prescale (`:out_range=tv`, where the
+full-range source first meets a scaler), and the tagging goes in the chain:
+
+```
+setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709,
+setsar=1,format=yuv420p
+```
+
+Verified on `odd.jpg` (1999x1001): all four colour fields correct, SAR 1:1.
+`setparams` sets metadata only and does not touch SAR, so §4's rule is intact —
+`setsar=1` is still the last filter before `format`.
+
+→ **D-037.**
+
+---
+
+## 7c. The border probe, and proving it can fail
+
+Measured 2026-08-26. §6 checked for black edges by reading the top border of
+three frames with a Python helper. M1 needed that in CI, for every case in the
+matrix, cheaply — and needed it to check all four borders rather than one.
+
+All four in a single decode, without letting a scaler blend a thin black edge
+into its bright neighbour:
+
+```bash
+ffmpeg -v info -i seg.mp4 -filter_complex \
+"[0:v]select='eq(n\,0)+eq(n\,55)+eq(n\,111)',split=4[a][b][c][d];\
+[a]crop=W:4:0:0,scale=64:64:flags=neighbor[t];\
+[b]crop=W:4:0:H-4,scale=64:64:flags=neighbor[bo];\
+[c]crop=4:H:0:0,scale=64:64:flags=neighbor[l];\
+[d]crop=4:H:W-4:0,scale=64:64:flags=neighbor[r];\
+[t][bo][l][r]vstack=inputs=4,signalstats,metadata=print:key=lavfi.signalstats.YMIN" \
+  -fps_mode passthrough -f null -
+```
+
+`flags=neighbor` matters: any interpolating scaler would average a 4-pixel black
+edge with the content beside it and lift `YMIN` off zero.
+
+**The control.** §8b's lesson is that a check encoding a hazard must assert it
+still encodes it. A border probe that always returned a positive number would
+make every black-edge assertion vacuous and nothing else would notice. So the
+same probe was run against a deliberately letterboxed file
+(`force_original_aspect_ratio=decrease` + `pad`, which is the failure D-034
+removes):
+
+| File | `YMIN` |
+|---|---|
+| cover-fit, landscape 4000x3000 → 360x640 | 37 / 31 / 32 |
+| letterboxed, same source and size | **0** |
+
+Both the probe and the control now live in
+`crates/spoonstill-media/tests/motion_matrix.rs`.
+
+---
+
 ## 8. What is still unmeasured
 
 Do not present any of these as known.
 
 - **Windows.** Every number here is arm64 macOS. Peak RSS, encoder behaviour,
-  and path handling all need re-measuring on Windows before D-071 closes.
+  and path handling all need re-measuring on Windows.
+
+  > D-071 is now **Accepted** — cross-platform from M1, by author decision on
+  > 2026-08-26 — which changes the code but **not this entry**. The code is
+  > written for both platforms and the Windows CI job is enabled; nothing has
+  > yet been *run* there. "Compiles and is written correctly for Windows" and
+  > "measured on Windows" are different claims, and only the first is true.
 - **Real photographs.** `testsrc2` is a synthetic worst case for stepping.
   Confirm the 3× prescale finding on real JPEGs, including CMYK and
   EXIF-rotated ones.
@@ -401,10 +508,21 @@ encodes it.**
 ## 9. Re-running all of it
 
 The commands above are self-contained and need only `ffmpeg`, `ffprobe`, and
-`python3`. Once M1 exists, they become the seed for
-`crates/spoonstill-media/tests/motion_matrix.rs` — the same assertions, run in CI,
-across the matrix D-030 requires: three durations × two frame rates × every V1
-aspect ratio × landscape/portrait/square sources × ASCII/Unicode/spaced paths.
+`python3`. **Done, 2026-08-26.** These are now
+`crates/spoonstill-media/tests/motion_matrix.rs` — the same assertions, run in
+CI, across the matrix D-030 requires: three durations × two frame rates × every
+V1 aspect ratio × landscape/portrait/square sources × ASCII/Unicode/spaced
+paths. The test renders the 54-case cross product of duration × frame rate ×
+aspect × source shape and cycles the three path styles across it rather than
+multiplying by them; `SPOONSTILL_FULL_MATRIX=1` renders all 162. That sampling
+is stated in the test's own header, because a bounded test that reads as
+exhaustive is worse than an honestly bounded one.
+
+The matrix renders at a 360-pixel short edge. Every property it asserts is
+scale-invariant and the prescale rule under test is a *ratio*, so the finding
+transfers; the production size is covered separately by
+`the_production_recipe_at_1080p_is_frame_exact`, which reproduces §7's exact
+case and checks it against the measured answer.
 
 A measurement that only ever ran once, by hand, on one machine, is a fact with a
 short shelf life. Move each of these into a test as soon as there is somewhere

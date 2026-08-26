@@ -12,7 +12,7 @@ export PATH := /opt/homebrew/opt/rustup/bin:$(PATH)
 CARGO ?= cargo
 
 .DEFAULT_GOAL := help
-.PHONY: help test lint fmt fixtures check clean gates
+.PHONY: help test lint fmt fixtures check clean gates gates-m0 gates-m1
 
 help: ## Show available targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -33,8 +33,16 @@ fixtures: ## Generate the synthetic test fixtures (see scripts/gen-fixtures.sh)
 
 check: test lint ## Test and lint — what CI runs
 
-gates: ## Run the M0 exit gates from plan.md and report pass/fail
+gates: ## Run every milestone's exit gates and report pass/fail
 	@bash scripts/m0-gates.sh
+	@echo
+	@bash scripts/m1-gates.sh
+
+gates-m0: ## Just the M0 gates
+	@bash scripts/m0-gates.sh
+
+gates-m1: ## Just the M1 gates
+	@bash scripts/m1-gates.sh
 
 clean: ## Remove build output and generated fixtures
 	$(CARGO) clean

@@ -10,6 +10,12 @@
 //! must never discard the first 146, and a crash must leave either a complete
 //! valid segment or nothing that looks valid.
 
+#![warn(missing_docs)]
+
+pub mod logs;
+
+pub use logs::{BundleReport, EnvironmentLine, FileLog, write_bundle};
+
 /// This crate's package name, resolved at compile time.
 pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
 

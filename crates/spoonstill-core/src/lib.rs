@@ -17,6 +17,17 @@
 /// project's name and its on-disk footprint is this one string.
 pub const STATE_DIR: &str = ".spoonstill";
 
+pub mod diagnostics;
+pub mod geometry;
+pub mod hash;
+pub mod motion;
+pub mod timing;
+
+pub use diagnostics::{Diagnostics, Event, Severity};
+pub use geometry::{Aspect, GeometryError, OutputSpec, PRESCALE_FACTOR, SourceGeometry};
+pub use motion::{Anchor, MotionKind, MotionSpec, build_filter};
+pub use timing::{SAMPLE_RATE, duration_for_frames, frames_for_duration, samples_for_frames};
+
 /// Human-owned manifest, relative to the project root (D-013).
 ///
 /// **The renderer never writes to this file.** It is an input. Hand-editable,

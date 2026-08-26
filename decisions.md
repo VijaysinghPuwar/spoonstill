@@ -1,7 +1,7 @@
 # decisions.md — single source of truth for `spoonstill`
 
 **Status:** active. This file wins over every other document in the repo.
-**Last updated:** 2026-08-26.
+**Last updated:** 2026-08-26 (M1: D-012 resolved; D-016 and D-037 added; D-070 and D-071 accepted).
 
 `plan/PROJECT_BRIEF.md` and `plan/BRIEF_RECONCILIATION.md` both carry a
 "superseded by `decisions.md`" banner. Until now that file did not exist, so
@@ -110,6 +110,26 @@ model needs a dedicated blocking worker boundary before it meets an async queue.
 Whether to depend on the crate or reimplement ~600 lines is deferred to M1; the
 call is cheap either way because the boundary is one module.
 
+> **Resolved at M1, 2026-08-26: reimplement.** `crates/spoonstill-media/src/command.rs`
+> is the whole of it — a builder over `OsString`, a retained child with
+> `quit()`/`kill()`/`wait()`/`cancel()`, and two retention threads. Three
+> reasons, in order of weight:
+>
+> 1. The auto-download is a default feature and is already rejected above, so
+>    the dependency would have to be taken with `default-features = false` and
+>    audited to stay that way.
+> 2. It has no timeout-bounded `ffprobe`. plan.md M1 names probe hangs on
+>    hostile media as a risk and requires a timeout **from the first call**;
+>    that is not a wrapper around the crate, it is the part we needed most.
+> 3. Its value-add is typed stderr events, and plan.md already rules that a
+>    parser-classified log level is not a substitute for exit status plus output
+>    validation. We retain raw stderr regardless, so we would be paying for a
+>    parser we are not allowed to trust.
+>
+> The estimate of ~600 lines was fair; the actual boundary came to rather less,
+> because the download, the version detection and the event taxonomy were the
+> bulk of it and none are wanted.
+
 ### D-013 — Two artifacts: human manifest, machine state · Accepted
 
 - `project.yaml` — human-owned. Hand-editable, diffable, copyable to another
@@ -139,6 +159,44 @@ Resolves reconciliation §1.2. Supersedes `plan/REFERENCES.md`.
 
 A project folder copied to another machine must still render. API keys, window
 state, and UI preferences are machine-scoped and live outside the project.
+
+### D-016 — Diagnostics are written as they happen, and exported as one file · Accepted
+
+Asked for by the author 2026-08-26: *"if anything fails on any machine ... I can
+simply download the logs from the user machine and upload here on the developer
+machine to know the exact reason for the failure."*
+
+The constraint that shapes it: by the time a user says "it failed", the FFmpeg
+stderr that explained it is gone, and the developer has neither the media nor
+the environment. Recording only on failure does not solve this either — the
+interesting failures are the ones where the render *succeeded* and the output
+is wrong.
+
+So:
+
+- **Every run appends**, whether or not anything goes wrong, to JSON Lines under
+  `.spoonstill/logs/`. Append-only and one self-contained record per line, so a
+  crash mid-write loses the last line rather than corrupting the file that
+  explains the crash.
+- **What is recorded is what answers questions**: the exact command executed in
+  paste-ready form (the lossless-cut `LastCommands` pattern), the resolved
+  measurements, every profile mismatch field by field, and retained raw stderr.
+- **`still diagnostics export` writes one text file.** One file, not an archive:
+  the operator has to attach it to an email, and "one text file" has the fewest
+  ways to go wrong. It carries the environment — OS, arch, FFmpeg version *and
+  build configuration* — because "works for us, fails for them" is usually a
+  build difference and no log line shows it.
+- **Credentials never reach it.** With BYOK (D-014, D-023) the machine holds an
+  API key. `spoonstill_core::diagnostics::redact` runs over every value on the
+  way in, keyed on both field name and value shape, and is a pure tested
+  function rather than a discipline anyone has to remember.
+- **The bundle says what it contains**, in plain words, at the top: that it holds
+  file paths from this machine, and that it holds no keys and no media. A person
+  about to send a diagnostics file is entitled to know what is in it.
+
+Logging never fails a render: a write error is retained and reported once, and
+the sink then stops trying rather than turning one full disk into thousands of
+errors.
 
 ---
 
@@ -199,6 +257,8 @@ tier, in the low single digits on cheap plans.
 
 No proxying through any server the project operates. Keys never leave the
 machine.
+
+---
 
 ---
 
@@ -324,6 +384,48 @@ hardware path buys less than it appears to. Probe availability at runtime,
 expose it as an explicit "fast draft" mode, and always fall back to libx264.
 
 Resolves reconciliation §4.5.
+
+### D-037 — Colour range and matrix are pinned in the filter chain · Accepted
+
+Measured 2026-08-26 while building M1, and **not** previously recorded anywhere.
+
+A JPEG is full-range. That range flag survives `format=yuv420p` all the way into
+libx264, which signals it in the bitstream — so `ffprobe` reports the segment's
+pixel format as **`yuvj420p`, not `yuv420p`**, from the documented D-030/D-034
+chain. Reproduced on `land.jpg` at 1920x1080.
+
+That is a segment-profile mismatch of exactly the D-041 kind: two scenes whose
+sources differ in range produce segments that differ in pixel format and in
+rendered colour, and the concat demuxer joins them with exit 0 and no warning.
+It would surface as "some scenes look washed out", months later, in a finished
+render.
+
+So the chain pins colour explicitly, in two places:
+
+```
+scale=<3*OUT_W>:<3*OUT_H>:force_original_aspect_ratio=increase:out_range=tv,
+crop=<3*OUT_W>:<3*OUT_H>,
+zoompan=...,
+setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709,
+setsar=1,
+format=yuv420p
+```
+
+`out_range=tv` on the prescale, where the full-range source first meets a
+scaler; `setparams` immediately before `setsar=1`, because `-color_range` and
+`-color_primaries` as **encoder** options did not survive — measured: the
+matrix reached the output, the primaries and transfer did not.
+
+Two consequences worth stating plainly:
+
+- This adds one filter beyond the chain plan.md M1 specifies. plan.md says "in
+  this order and no other", and this changes that order, which is why it is a
+  decision rather than an implementation detail.
+- `setparams` sets metadata only and does not touch SAR, so D-033 still holds
+  literally: `setsar=1` remains the last filter before `format=yuv420p`.
+
+`color_range`, `color_space`, `color_primaries` and `color_transfer` are all
+pinned fields of the segment profile (D-040) and asserted per segment.
 
 ---
 
@@ -499,20 +601,58 @@ Patterns are not permission to copy code.
 
 ---
 
+## Resolved from the Open list
+
+> These arrived as questions for the author and have been answered. Kept
+> together so the answer is as easy to find as the question was.
+
+### D-070 — 16:9, 9:16 and 1:1 are all V1 · Accepted
+
+Was Open with a recorded default of "yes, V1". **Implemented at M1 as the
+default, and the default is now the decision.**
+
+The marginal cost was as predicted — test-matrix breadth, not new code. D-034's
+cover-fit into the prescale canvas is aspect-agnostic, so all three ratios come
+out of one code path, and `spoonstill_core::geometry::Aspect` derives the
+dimensions from a single short-edge parameter: 1080 gives 1920x1080, 1080x1920
+and 1080x1080, which are the three sizes an operator actually names.
+
+All three are covered in `motion_matrix` against landscape, portrait and square
+sources, and all three are reachable from the CLI.
+
+### D-071 — Cross-platform from M1; the numbers are still macOS-only · Accepted
+
+Decided by the author 2026-08-26: *"whatever you are making should be compatible
+for both mac and windows."* This supersedes the recorded default of
+"macOS-first through M3".
+
+What that means concretely, and what it does not:
+
+**In force from M1 — the code is cross-platform by construction.**
+
+- Paths are `Path`/`OsStr` end to end; no argument is ever built as a `String`.
+- Graceful cancellation is `q` on FFmpeg's stdin, not a signal. There is no
+  portable way to send SIGINT to a child on Windows, so the portable mechanism
+  is the only mechanism — used on both platforms rather than as a fallback.
+- Ctrl-C goes through `ctrlc`, which covers Windows console control events. A
+  hand-rolled handler would need `unsafe`, which the workspace forbids.
+- `fs::rename` replaces silently on Unix and **fails** on Windows when the
+  destination exists, so the atomic move removes the destination first.
+- `CREATE_NO_WINDOW` on every child, so no console flashes.
+- Test media is built in Rust, not by `scripts/gen-fixtures.sh` — the test suite
+  does not depend on bash.
+- The Windows CI job is enabled.
+
+**Not in force, and not to be claimed.** Nothing in this project has yet been
+*run* on Windows, and every number in `ffmpeg-findings.md` is macOS arm64. Peak
+RSS, encoder behaviour and path handling all still need measuring there
+(`ffmpeg-findings.md` §8). Packaging, signing and an LGPL Windows FFmpeg build
+(D-062) remain M4 work. "Compiles and is written correctly for Windows" is what
+is true today; "verified on Windows" is not, until CI has run green there.
+
+---
+
 ## Open — do not guess
-
-### D-070 — Is 9:16 vertical a V1 requirement? · Open
-
-Default if unanswered: **yes, V1.** 16:9, 9:16, 1:1 as a project-level setting.
-D-034 already makes the cover-crop path aspect-agnostic, so the marginal cost is
-test-matrix breadth rather than new code. Confirm before M2 closes.
-
-### D-071 — macOS-only for M1, or Windows day one? · Open
-
-Default if unanswered: **macOS-first through M3, Windows first-class from M4.**
-This roughly halves early packaging work. Cross-platform correctness (paths,
-argument vectors, no shell strings) is built in from M1 regardless — only
-packaging, signing, and CI runners are deferred.
 
 ### D-072 — Captions in M-scope? · Open
 
