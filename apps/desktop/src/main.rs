@@ -972,6 +972,50 @@ fn open_film(app: tauri::AppHandle, session: State<'_, Session>) -> Result<(), S
         .map_err(|e| e.to_string())
 }
 
+/// Where this machine's activity CSV is, and whether anything is in it yet.
+#[derive(Debug, Clone, Serialize)]
+struct ActivityView {
+    path: String,
+    exists: bool,
+    /// Bytes, so the window can say "empty" rather than opening nothing.
+    size: u64,
+}
+
+/// The one CSV holding every event from every project (D-093).
+#[tauri::command]
+fn activity_log() -> Result<ActivityView, String> {
+    let path = spoonstill_app::runs_index_path()
+        .ok_or("this machine will not say where its config directory is")?;
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    Ok(ActivityView {
+        exists: path.exists(),
+        size,
+        path: path.display().to_string(),
+    })
+}
+
+/// Open that CSV in whatever opens a CSV here, or show it in the file manager.
+///
+/// The path is **this program's**, resolved in Rust — the window names neither
+/// a directory nor a file, so there is nothing here for a webview to point
+/// somewhere else (D-085's rule, applied again).
+#[tauri::command]
+fn open_activity_log(app: tauri::AppHandle, reveal: bool) -> Result<(), String> {
+    let path = spoonstill_app::runs_index_path()
+        .ok_or("this machine will not say where its config directory is")?;
+    if !path.exists() {
+        return Err("nothing has been recorded yet — render something first".to_owned());
+    }
+    let target = if reveal {
+        path.parent().unwrap_or(&path).to_path_buf()
+    } else {
+        path
+    };
+    app.opener()
+        .open_path(target.to_string_lossy(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 /// Show the open project in the system file manager. Also takes no path.
 #[tauri::command]
 fn reveal_project(app: tauri::AppHandle, session: State<'_, Session>) -> Result<(), String> {
@@ -1094,6 +1138,8 @@ fn main() {
             forget_project,
             app_settings,
             set_default_voice,
+            activity_log,
+            open_activity_log,
             install_provider,
             create_project,
             add_media,

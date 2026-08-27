@@ -349,13 +349,24 @@ pub fn render_project(
 
     let out = destination(&project, options)?;
 
-    // The log is opened before the work, not after a failure (D-016).
+    // The log is opened before the work, not after a failure (D-016). Two
+    // sinks, not one: the project's own JSON Lines, which is the authority and
+    // travels with the folder, and the machine's CSV, which is the only place
+    // that can answer "what went wrong just now" without already knowing which
+    // folder to look in (D-093). Either may be absent; neither may fail a
+    // render.
     let log = FileLog::open(&project.root).ok();
-    let sink: &dyn Diagnostics = log
+    let index = spoonstill_state::ActivityLog::for_project(&project.root);
+    let both = log
         .as_ref()
-        .map_or(&spoonstill_core::diagnostics::Noop, |l| {
-            l as &dyn Diagnostics
-        });
+        .zip(index.as_ref())
+        .map(|(l, i)| spoonstill_state::Tee(l as &dyn Diagnostics, i as &dyn Diagnostics));
+    let sink: &dyn Diagnostics = match (&both, &log, &index) {
+        (Some(tee), _, _) => tee,
+        (None, Some(l), _) => l,
+        (None, None, Some(i)) => i,
+        _ => &spoonstill_core::diagnostics::Noop,
+    };
 
     let _lock = Lock::take(&project.root, options.force)?;
 

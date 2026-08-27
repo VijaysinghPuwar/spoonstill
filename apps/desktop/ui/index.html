@@ -108,6 +108,22 @@
         </section>
 
         <section class="card">
+          <h3>Activity log</h3>
+          <p class="sub tight">
+            Every event from every project, in one CSV a spreadsheet opens. Each
+            project also keeps its own detailed log; this is the one place that
+            answers "what went wrong just now" without knowing which folder to
+            look in.
+          </p>
+          <p id="activity-path" class="mono wrap whisper left">—</p>
+          <div class="row-actions">
+            <button id="activity-open" class="primary">Open the CSV</button>
+            <button id="activity-reveal">Show in Finder</button>
+          </div>
+          <p id="activity-said" class="whisper left"></p>
+        </section>
+
+        <section class="card">
           <h3>Appearance</h3>
           <div class="theme wide-theme" id="theme-2">
             <button data-theme="dark">Dark</button>
@@ -394,8 +410,10 @@
         <div>
           <h2>Runs</h2>
           <p class="sub">
-            Every run is recorded, successful or not — the interesting failures
-            are the ones where the render succeeded and the output was wrong.
+            This project's own log, in full. Every project's events also land in
+            one CSV on this machine — <strong>Settings &gt; Activity log</strong>
+            — which is the one to open when you do not know which project went
+            wrong.
           </p>
         </div>
         <div class="pane-tools">

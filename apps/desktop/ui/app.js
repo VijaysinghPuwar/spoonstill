@@ -158,6 +158,36 @@ async function openSettings() {
   setStatus("");
   await checkProvider();
   await loadFallbackVoice();
+  await loadActivityLog();
+}
+
+// One CSV, every project, every event (D-093).
+async function loadActivityLog() {
+  const said = el("activity-said");
+  try {
+    const info = await invoke("activity_log");
+    el("activity-path").textContent = info.path;
+    el("activity-open").disabled = !info.exists;
+    said.classList.remove("bad");
+    said.textContent = info.exists
+      ? `${(info.size / 1024).toFixed(0)} KB so far.`
+      : "Nothing recorded yet — it appears the first time you render.";
+  } catch (error) {
+    el("activity-path").textContent = "—";
+    el("activity-open").disabled = true;
+    said.classList.add("bad");
+    said.textContent = String(error);
+  }
+}
+
+async function openActivityLog(reveal) {
+  try {
+    await invoke("open_activity_log", { reveal });
+  } catch (error) {
+    const said = el("activity-said");
+    said.classList.add("bad");
+    said.textContent = String(error);
+  }
 }
 
 async function checkProvider() {
@@ -1168,6 +1198,8 @@ el("app-provider-recheck").addEventListener("click", () => guard(checkProvider()
 el("app-provider-install").addEventListener("click", () => guard(installProvider()));
 el("app-voice").addEventListener("change", (e) => guard(setFallbackVoice(e.target.value)));
 el("app-voice-clear").addEventListener("click", () => guard(setFallbackVoice("")));
+el("activity-open").addEventListener("click", () => guard(openActivityLog(false)));
+el("activity-reveal").addEventListener("click", () => guard(openActivityLog(true)));
 el("new-project").addEventListener("click", newProject);
 el("open-project").addEventListener("click", openProject);
 el("choose-media").addEventListener("click", chooseMedia);

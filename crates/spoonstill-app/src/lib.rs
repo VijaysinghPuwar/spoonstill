@@ -23,6 +23,9 @@ pub use film::{FilmError, FilmEvent, RenderProjectOptions, RenderedFilm, render_
 pub use import::{ImportError, MediaCheck, Mode, ProbeCheck, Project, ResolvedScene, Role};
 pub use ingest::{IngestError, Ingested, add_media, create_project};
 pub use render::{RenderError, RenderSceneOptions, render_scene};
+/// Where this machine's activity CSV lives (D-093). Re-exported because the
+/// control surfaces reach this crate and stop (D-010).
+pub use spoonstill_state::runs::index_path as runs_index_path;
 
 /// The types the control surface needs, re-exported through the layer it is
 /// allowed to depend on.

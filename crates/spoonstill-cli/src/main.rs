@@ -723,6 +723,22 @@ fn show_log_location(project: Option<PathBuf>) -> Result<(), String> {
         .join(spoonstill_app::surface::LOGS_DIR);
 
     println!("{}", dir.display());
+
+    // And the machine-wide one, which is the file to open when the question is
+    // "what went wrong" rather than "what went wrong in this project" (D-093).
+    if let Some(index) = spoonstill_app::runs_index_path() {
+        let size = std::fs::metadata(&index).map(|m| m.len()).unwrap_or(0);
+        println!(
+            "{}   every project, {}",
+            index.display(),
+            if size == 0 {
+                "nothing recorded yet".to_owned()
+            } else {
+                format!("{} KB", size / 1024)
+            }
+        );
+    }
+
     if dir.exists() {
         let mut files: Vec<_> = std::fs::read_dir(&dir)
             .map_err(|e| format!("could not read {}: {e}", dir.display()))?

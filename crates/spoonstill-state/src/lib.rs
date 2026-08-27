@@ -13,8 +13,10 @@
 #![warn(missing_docs)]
 
 pub mod logs;
+pub mod runs;
 
 pub use logs::{BundleReport, EnvironmentLine, FileLog, write_bundle};
+pub use runs::{ActivityLog, Tee, index_path as runs_index_path};
 
 /// This crate's package name, resolved at compile time.
 pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");

@@ -1149,6 +1149,96 @@ number.** D-089 is the same rule applied to a disabled button.
 
 ---
 
+### D-092 — Settings is where you act, not where you are told what to do · Accepted
+
+Decided 2026-08-26, from an operator reading the Settings screen and finding
+nothing on it that did anything.
+
+- **A provider installs itself.** Printing `pip install edge-tts` and leaving
+  the operator to find a terminal is the program declining the thing it has
+  just asked for. `Provider::install()` is part of the trait; Edge tries
+  `pipx`, then `brew`, then a `--user` pip, in that order, because the plain
+  `pip install` we used to print is the one that fails on a modern Homebrew
+  Python with `error: externally-managed-environment`. **Success is not "the
+  installer exited zero"** — it is `availability()` returning Ready
+  afterwards, checked before anything is reported, because a `--user` install
+  can land somewhere that is not on `PATH`.
+
+  This is not D-012's forbidden runtime download. That rule is about the
+  *renderer* quietly fetching an encoder mid-run and producing output nobody
+  can reproduce. This runs when a button that says install is pressed, before
+  any project is rendered, and it fetches through the platform's own package
+  manager rather than pulling a binary from us — the same reasoning D-087
+  applies to FFmpeg.
+
+- **The machine gets a fallback voice, and it is a fallback.** Precedence, and
+  it is worth writing down because there are now three answers: this run's
+  Voice-screen override, then the project's own `tts.voice`, then the
+  machine's fallback, then the provider's own. Nothing at any level writes to
+  `project.yaml` (D-013).
+
+- **A project is a card.** As rows the only thing between one project and the
+  next was a hairline, and a long path made the whole screen one grey block.
+  The path now wraps rather than trailing off, because on a card there is room
+  and the folder is how an operator tells two projects of the same name apart.
+
+- **Prose that restates the screen is deleted.** Two paragraphs explaining what
+  Edge TTS is and one restating what the program does are gone. What is left is
+  a state line, a control, and the sentence a control needs to be understood.
+
+Also recorded here because it was found in the same pass: **the release builds
+one universal `.dmg`** rather than one per architecture, and the Intel CLI
+cross-compiles from the arm64 runner. GitHub no longer serves `macos-13` — two
+release runs sat queued fifteen minutes and never started. D-087 said native
+builds only, on the grounds that a target whose tests cannot run there is a
+target we have not tested; that reasoning still holds, so the cross-compiled
+leg **says so** rather than pretending otherwise: it is checked with `file` for
+the architecture it claims, and it is not smoke-tested, because the arm64
+runner has no Rosetta to run it with.
+
+---
+
+### D-093 — One CSV of everything, beside the operator's other machine state · Accepted
+
+Decided 2026-08-26, asked for directly: *"all the logs of all the folders
+should be inside the CSV file which I can see from the location from the
+settings"*.
+
+D-016 puts every event in the project it belongs to, and that stays true — the
+diagnostics bundle needs it, and a project that moves takes its own history
+with it. What that arrangement cannot answer is **"what went wrong just now"**,
+because the answer is spread across every folder the operator has ever used and
+the folder is frequently the very thing they are trying to work out.
+
+So every event is *also* appended to one CSV in the machine's config directory,
+beside the recent-projects list and for the same reason (D-086): which projects
+this person has used is not a fact about any one of them.
+
+- **Every event, not one row per render.** A render summary would have answered
+  "what have I made" and not "why did that one sound wrong". Each row carries
+  the FFmpeg command line, the filter string, the probe result — the same
+  detail the JSON Lines log holds, in a file a spreadsheet sorts.
+- **It is a convenience over authority that lives elsewhere**, so every failure
+  in that module is silent: a render must never fail because a spreadsheet
+  could not be written. `Tee` composes the two sinks rather than folding the
+  CSV into `FileLog`, so the per-project log still works on a machine that has
+  no config directory.
+- **Every field is quoted, always.** A project folder is the operator's to name
+  and routinely holds a comma; captured FFmpeg stderr holds commas, quotes and
+  newlines together. An unquoted field is a row that silently gains a column
+  (D-052 — hostile input is the normal case).
+- **The column order is a contract** with a spreadsheet the operator may
+  already have open and filtered. New columns go at the end; a test pins it.
+- **It rolls at 16 MB**, keeping one previous file, so a diagnostic convenience
+  cannot fill a disk.
+
+Reachable from Settings — path, Open, and Show in Finder, all resolved in Rust
+so the webview names neither a directory nor a file — and from
+`still diagnostics where`, because the CLI can do everything the window can
+(D-010).
+
+---
+
 ## Reference repositories
 
 ### D-080 — A project is made and filled by the program, not by the operator's file manager · Accepted

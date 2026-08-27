@@ -360,6 +360,22 @@ Both follow one rule: **a screen that shows a true thing in a misleading order,
 or marks a state without naming it, is a defect of the same kind as a wrong
 number.**
 
+**Settings is where you act** (D-092). `Provider::install()` is part of the TTS
+trait — Edge tries pipx, then brew, then a `--user` pip, and reports success only
+when `availability()` says Ready, not when the installer exits zero. The machine
+also holds a **fallback voice**; precedence is run override → project's
+`tts.voice` → machine fallback → provider's own, and none of them writes to
+`project.yaml`. `still voices --install` is the CLI half.
+
+**One CSV of everything, beside the operator's other machine state** (D-093).
+Every event goes to the project's JSON Lines *and* to
+`<config>/spoonstill/runs.csv`, composed with `spoonstill_state::Tee`. That file
+is the one to open when the question is "what went wrong" rather than "what went
+wrong in this project" — every field quoted, column order pinned by a test,
+rolling at 16 MB. Reachable from **Settings > Activity log** and from
+`still diagnostics where`. Failures there are silent by design: a render must
+never fail because a spreadsheet could not be written.
+
 **The logo, in one paragraph.** The mark is final as of 2026-08-26 (D-079):
 three stacked stills, the front one carrying the image. It is **one ink at
 three opacities**, not three greys — each still is an opaque black plate under
@@ -385,7 +401,8 @@ clicked before it is called done.
 anything. D-087 was added after M2: read it before touching a workflow, an
 installer or `README.md`, and D-089 before touching a path or a disabled
 control, D-090 before touching a hostile-name fixture, and D-091 before
-touching the live panel or the voice list. D-054 through D-057 and D-075 through D-082 were added during M2 and
+touching the live panel or the voice list, D-092 before touching Settings or a
+provider's tooling, and D-093 before touching a log sink. D-054 through D-057 and D-075 through D-082 were added during M2 and
 are all Accepted — read D-056 before touching the import path, D-057 before
 touching concat or transitions, D-076/D-077 before touching the pool, D-078
 before changing what the finished film is asserted against, D-079 before
