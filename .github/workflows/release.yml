@@ -199,7 +199,8 @@ jobs:
       # There is no npm build step: `frontendDist` is a folder of static files.
       - uses: cargo-bins/cargo-binstall@main
       - name: Install the Tauri CLI
-        run: cargo binstall -y --no-confirm tauri-cli --version '^2'
+        # `-y` *is* `--no-confirm`; binstall rejects the pair as one argument twice.
+        run: cargo binstall --no-confirm tauri-cli --version '^2'
 
       - name: Bundle
         run: cargo tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
