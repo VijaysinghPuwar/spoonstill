@@ -642,6 +642,7 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 .c-still    { width: 62px; }
 .c-audio    { width: 84px; }
 .c-resolved { width: 132px; text-align: right; }
+.c-arrange  { width: 148px; }
 .c-when     { width: 186px; }
 .c-sev      { width: 62px; }
 .c-scope    { width: 92px; }
@@ -650,6 +651,42 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 .grid td.c-when, .grid td.c-sev, .grid td.c-scope { white-space: nowrap; }
 .grid td.c-resolved { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .grid .frames { color: var(--ink-3); font-size: 11px; margin-left: 5px; }
+
+/* Reordering and removal (D-099). Quiet until the row is under the pointer:
+   these move the operator's photographs about, and a control that shouts is a
+   control that gets pressed by accident. */
+.grid td.c-arrange { text-align: right; white-space: nowrap; }
+.arrange { display: inline-flex; gap: 4px; opacity: 0; transition: opacity 90ms ease; }
+.grid tr:hover .arrange,
+.grid tr:focus-within .arrange { opacity: 1; }
+
+.arrange-button {
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 7px;
+  color: var(--ink-2);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  cursor: pointer;
+}
+.arrange-button:hover:not(:disabled) { color: var(--ink); border-color: var(--line-2); }
+.arrange-button:disabled { opacity: .3; cursor: default; }
+
+/* Armed, not destructive-looking: the files move to removed/ and can be
+   dragged back, so this is a warning rather than a danger. */
+.arrange-button.armed {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
 
 .thumb {
   width: 44px;

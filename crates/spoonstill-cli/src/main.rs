@@ -37,6 +37,10 @@ enum Command {
     New(NewArgs),
     /// Copy photos and recordings into a project, numbered and paired.
     Add(AddArgs),
+    /// Take a scene out of a project, keeping its files (D-099).
+    Remove(RemoveArgs),
+    /// Move a scene to another position in the film (D-099).
+    Move(MoveArgs),
     /// Check a project folder and report every problem at once.
     Validate(ValidateArgs),
     /// Render a whole project folder to one film.
@@ -73,6 +77,32 @@ struct AddArgs {
     /// Photos and recordings, or folders of them.
     #[arg(value_name = "FILE", required = true)]
     media: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct RemoveArgs {
+    /// The project folder.
+    #[arg(value_name = "DIR")]
+    project: PathBuf,
+
+    /// Which scene, by its number: `7`, `07` and `007` are the same scene.
+    #[arg(value_name = "SCENE", required = true)]
+    scenes: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct MoveArgs {
+    /// The project folder.
+    #[arg(value_name = "DIR")]
+    project: PathBuf,
+
+    /// Which scene to move.
+    #[arg(value_name = "SCENE")]
+    scene: String,
+
+    /// Where it should end up, counting from 1. Past the end means the end.
+    #[arg(value_name = "POSITION")]
+    to: usize,
 }
 
 #[derive(Debug, Args)]
@@ -277,6 +307,8 @@ fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
         Command::New(args) => new_project(args),
         Command::Add(args) => add_media(&args.project, &args.media),
+        Command::Remove(args) => remove_scenes(&args.project, &args.scenes),
+        Command::Move(args) => move_scene(&args.project, &args.scene, args.to),
         Command::Validate(args) => validate(args),
         Command::Voices(args) => list_voices(&args),
         Command::Render(args) => render_project(args),
@@ -311,6 +343,52 @@ fn new_project(args: NewArgs) -> Result<(), String> {
 ///
 /// Prints what each file became, because renaming someone's files for them is
 /// only acceptable if they can see exactly what happened (D-080).
+/// `still remove DIR SCENE...` — take scenes out, keeping their files (D-099).
+///
+/// Several at once, and **highest first**: removing 002 renumbers everything
+/// after it, so `still remove p 002 005` would otherwise take 002 and then
+/// whatever happened to land on 005 afterwards — which is scene 6. Sorting
+/// descending means each removal only renumbers scenes the operator has
+/// already named.
+fn remove_scenes(root: &std::path::Path, ids: &[String]) -> Result<(), String> {
+    let mut wanted: Vec<&String> = ids.iter().collect();
+    wanted.sort_by_key(|id| std::cmp::Reverse(id.trim().parse::<usize>().unwrap_or(0)));
+
+    let mut last = None;
+    for id in wanted {
+        let removed = spoonstill_app::arrange::remove(root, id).map_err(|e| e.to_string())?;
+        println!(
+            "  removed {:<8} {} file{} moved to {}/",
+            removed.id,
+            removed.files,
+            if removed.files == 1 { "" } else { "s" },
+            spoonstill_app::arrange::REMOVED_DIR
+        );
+        last = Some(removed);
+    }
+
+    if let Some(removed) = last {
+        println!(
+            "  {} scene{} left. Nothing was deleted — {} holds what came out.",
+            removed.remaining,
+            if removed.remaining == 1 { "" } else { "s" },
+            removed.moved_to.display()
+        );
+    }
+    Ok(())
+}
+
+/// `still move DIR SCENE POSITION` — put a scene somewhere else in the film.
+fn move_scene(root: &std::path::Path, id: &str, to: usize) -> Result<(), String> {
+    let after = spoonstill_app::arrange::move_to(root, id, to).map_err(|e| e.to_string())?;
+    let landed = to.max(1).min(after.len());
+    println!("  scene {id} is now {landed} of {}", after.len());
+    for scene in &after {
+        println!("  {:<8} {}", scene.id, name_of(&scene.files[0]));
+    }
+    Ok(())
+}
+
 fn add_media(root: &std::path::Path, media: &[PathBuf]) -> Result<(), String> {
     let report = spoonstill_app::add_media(root, media).map_err(|e| e.to_string())?;
 

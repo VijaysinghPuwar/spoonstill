@@ -55,38 +55,84 @@ jobs:
             --draft \
             --title "spoonstill $TAG" \
             --notes "$(cat <<'NOTES'
-          ## Install
+          Turn a folder of photos and narration into one MP4, with Ken Burns
+          motion on every still and the cuts on the narration's own boundaries.
 
-          **macOS**
+          ## Get the app
+
+          The one-line installer below is the way that does not argue with
+          Gatekeeper. If you would rather click:
+
+          **macOS** — download **spoonstill-macOS.dmg** below
+          1. Open the `.dmg` and drag spoonstill to Applications
+          2. First launch is blocked — see **Opening it the first time**, below
+          3. Drop a folder of photos in, press Render
+
+          **Windows** — download **spoonstill-Windows-Installer.exe** below
+          1. Double-click it and follow the wizard
+          2. If SmartScreen objects: **More info > Run anyway**
+          3. Launch spoonstill from the Start Menu
+
+          The `.msi` is the same app for anyone who deploys with one.
+
+          ## Get the command line
+
+          The CLI is the complete control surface — the window owns no logic
+          the command line does not have (D-010). One line installs it and
+          verifies its checksum first:
+
           ```bash
           curl -fsSL https://raw.githubusercontent.com/VijaysinghPuwar/spoonstill/master/scripts/install.sh | bash
           ```
-
-          **Windows** (PowerShell)
           ```powershell
           irm https://raw.githubusercontent.com/VijaysinghPuwar/spoonstill/master/scripts/install.ps1 | iex
           ```
 
-          Or take a file below: `.dmg` / `-setup.exe` for the window, the
-          `still-*` archive for the command line.
-
-          ## Before you render
-
-          FFmpeg is not bundled yet (D-062 — the shipped build needs its own
-          LGPL build first). Install it once:
+          Or take the archive for your machine below — **still-macOS-AppleSilicon**,
+          **still-macOS-Intel**, or **still-Windows** — and put `still` on your PATH.
 
           ```bash
-          brew install ffmpeg          # macOS
-          winget install Gyan.FFmpeg   # Windows
+          still new ~/film ~/Photos/*.jpg ~/Recordings/*.m4a
+          still render ~/film --out film.mp4
           ```
 
-          Text read aloud by a neural voice also wants `pipx install edge-tts`.
+          ## Requirements
 
-          ## These builds are unsigned
+          - **FFmpeg**, which is not bundled yet (D-062 — a shipped build needs
+            its own LGPL build first). Install it once:
+            `brew install ffmpeg` / `winget install Gyan.FFmpeg`
+          - **macOS 12 or later**, or **Windows 10/11 (64-bit)**
+          - For narration read aloud by a neural voice: `pipx install edge-tts`,
+            and an internet connection while it speaks. Your own recordings and
+            silent scenes need neither.
 
-          Signing and notarization are M5. macOS: right-click the app > Open.
-          Windows: More info > Run anyway. See the README for why, and for
-          building from source instead.
+          ## Opening it the first time
+
+          These are preview builds — unsigned, un-notarized, no updater. macOS
+          marks anything downloaded through a browser as quarantined, and for
+          an unsigned app it shows:
+
+          > **"spoonstill" Not Opened** — Apple could not verify "spoonstill"
+          > is free of malware... **[Move to Trash] [Done]**
+
+          Press **Done**, never Move to Trash. Then either:
+
+          - **System Settings > Privacy & Security**, scroll down, **Open Anyway**, or
+          - `xattr -dr com.apple.quarantine /Applications/spoonstill.app`
+
+          Right-click > Open is the advice everywhere on the internet and
+          **Apple removed it in macOS 15** — it does nothing on 15 or later.
+
+          The one-line installer above avoids all of this: it verifies the
+          checksum, installs the app, and clears the quarantine attribute
+          itself, so the first launch is just the app opening.
+
+          On Windows, SmartScreen says the publisher is unknown: **More info >
+          Run anyway**.
+
+          Signing and notarization are M5 work rather than an oversight. Every
+          asset has a `.sha256` beside it, and the installers refuse to install
+          anything whose checksum does not match.
           NOTES
           )"
 
@@ -104,6 +150,11 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
             archive: tar.gz
+            # What the file is called on the release page and in the operator's
+            # Downloads folder (D-098). `aarch64-apple-darwin` is precise and
+            # answers the wrong question: the person choosing has a Mac, not a
+            # triple.
+            pretty: still-macOS-AppleSilicon
             smoke: true
           # Cross-compiled, not native — GitHub no longer serves `macos-13`
           # runners (two runs sat queued 15+ minutes and never started). Apple's
@@ -113,10 +164,12 @@ jobs:
           - os: macos-14
             target: x86_64-apple-darwin
             archive: tar.gz
+            pretty: still-macOS-Intel
             smoke: false
           - os: windows-2022
             target: x86_64-pc-windows-msvc
             archive: zip
+            pretty: still-Windows
             smoke: true
     steps:
       - uses: actions/checkout@v4
@@ -151,7 +204,7 @@ jobs:
         env:
           TAG: ${{ needs.draft.outputs.tag }}
         run: |
-          name="still-${TAG}-${{ matrix.target }}.tar.gz"
+          name="${{ matrix.pretty }}.tar.gz"
           tar -czf "$name" -C "target/${{ matrix.target }}/release" still
           shasum -a 256 "$name" > "$name.sha256"
           echo "ASSET=$name" >> "$GITHUB_ENV"
@@ -162,7 +215,7 @@ jobs:
         env:
           TAG: ${{ needs.draft.outputs.tag }}
         run: |
-          $name = "still-$env:TAG-${{ matrix.target }}.zip"
+          $name = "${{ matrix.pretty }}.zip"
           Compress-Archive -Path "target/${{ matrix.target }}/release/still.exe" -DestinationPath $name -Force
           $hash = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
           # Same two-field shape `shasum -c` writes, so one installer format serves both.
@@ -252,9 +305,16 @@ jobs:
         shell: bash
         run: |
           out="dist"; mkdir -p "$out"
-          find "target/${{ matrix.target }}/release/bundle" \
-               -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*-setup.exe' \) \
-               -exec cp {} "$out/" \;
+          # Tauri names its bundles `spoonstill_0.1.0_x64_en-US.msi`, which
+          # carries a version the tag already states and a locale nobody chose.
+          # Renamed on the way out (D-098): the person downloading is choosing
+          # an operating system, so the file is named after one.
+          find "target/${{ matrix.target }}/release/bundle" -type f -name '*.dmg' \
+               -exec cp {} "$out/spoonstill-macOS.dmg" \;
+          find "target/${{ matrix.target }}/release/bundle" -type f -name '*-setup.exe' \
+               -exec cp {} "$out/spoonstill-Windows-Installer.exe" \;
+          find "target/${{ matrix.target }}/release/bundle" -type f -name '*.msi' \
+               -exec cp {} "$out/spoonstill-Windows-Installer.msi" \;
           ls -1 "$out" | grep . || { echo "::error::the bundler produced nothing"; exit 1; }
           cd "$out"
           sum() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1"; else sha256sum "$1"; fi; }

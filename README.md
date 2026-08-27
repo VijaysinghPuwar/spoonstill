@@ -40,8 +40,8 @@ Grab the build for your machine from the
 
 | Your machine | Desktop app | Command line |
 |---|---|---|
-| **macOS** — Apple Silicon *or* Intel | `spoonstill_*_universal.dmg` | `still-*-aarch64-apple-darwin.tar.gz` (Apple Silicon)<br>`still-*-x86_64-apple-darwin.tar.gz` (Intel) |
-| **Windows 10/11, 64-bit** | `spoonstill_*_x64-setup.exe` | `still-*-x86_64-pc-windows-msvc.zip` |
+| **macOS** — Apple Silicon *or* Intel | `spoonstill-macOS.dmg` | `still-macOS-AppleSilicon.tar.gz`<br>`still-macOS-Intel.tar.gz` |
+| **Windows 10/11, 64-bit** | `spoonstill-Windows-Installer.exe` | `still-Windows.zip` |
 
 The Mac app is one universal build, so you do not have to know which processor
 you have. The one-line installer below works that out for the command line too.
@@ -145,16 +145,25 @@ redacted, that you can attach to an issue.
 
 ---
 
-## "macOS says the app is damaged" / "Windows protected your PC"
+## "Apple could not verify spoonstill is free of malware"
 
 These builds are **not code-signed yet** — signing certificates are M5 work.
 The operating system is telling you it cannot identify the publisher, which is
 true, and not that anything is wrong with the file.
 
-- **macOS** — right-click the app > Open, then Open again. Or, once:
+**The one-line installer above avoids this entirely.** It verifies the
+checksum, installs the app, and clears the quarantine attribute itself, so the
+first launch is just the app opening. If you downloaded the `.dmg` through a
+browser instead:
+
+- **macOS** — press **Done** on that dialog, never *Move to Trash*. Then either
+  **System Settings > Privacy & Security**, scroll down, **Open Anyway** — or,
+  once:
   ```bash
   xattr -dr com.apple.quarantine /Applications/spoonstill.app
   ```
+  Right-click > Open is the advice everywhere on the internet and **Apple
+  removed it in macOS 15**; on 15 or later it does nothing.
 - **Windows** — on the SmartScreen dialog, click **More info** > **Run anyway**.
 
 If that trade is not one you want to make, [build from source](#build-from-source)

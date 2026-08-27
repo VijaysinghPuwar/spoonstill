@@ -666,6 +666,44 @@ async fn add_media(root: String, files: Vec<String>) -> Result<IngestView, Strin
     .map_err(|e| format!("the copy failed: {e}"))?
 }
 
+/// Take a scene out of the project (D-099).
+///
+/// The files are moved, never deleted — `removed/` inside the project holds
+/// them, and the window says so, because "delete" in a tool that owns the
+/// operator's only copy of a photograph has to be a promise it can keep.
+#[tauri::command]
+async fn remove_scene(root: String, scene: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let removed = spoonstill_app::arrange::remove(std::path::Path::new(&root), &scene)
+            .map_err(|e| e.to_string())?;
+        Ok(format!(
+            "Scene {} removed — its {} file{} moved to {}/, not deleted.",
+            removed.id,
+            removed.files,
+            if removed.files == 1 { "" } else { "s" },
+            spoonstill_app::arrange::REMOVED_DIR
+        ))
+    })
+    .await
+    .map_err(|e| format!("the removal failed: {e}"))?
+}
+
+/// Move a scene to another position in the film (D-099).
+///
+/// `to` counts from 1 and is clamped, so the last row's "move down" is a no-op
+/// rather than an error.
+#[tauri::command]
+async fn move_scene(root: String, scene: String, to: usize) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let after = spoonstill_app::arrange::move_to(std::path::Path::new(&root), &scene, to)
+            .map_err(|e| e.to_string())?;
+        let landed = to.max(1).min(after.len().max(1));
+        Ok(format!("Scene moved to {landed} of {}.", after.len()))
+    })
+    .await
+    .map_err(|e| format!("the move failed: {e}"))?
+}
+
 /// Every voice a provider offers, or the sentence that says why there are none.
 #[tauri::command]
 async fn voices(provider: String) -> Result<Vec<VoiceView>, String> {
@@ -1070,6 +1108,8 @@ fn main() {
             provider_status,
             validate_project,
             set_narration,
+            remove_scene,
+            move_scene,
             render_project,
             cancel_render,
             open_film,

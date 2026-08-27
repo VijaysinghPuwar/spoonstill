@@ -46,7 +46,9 @@ if ($Version -eq 'latest') {
   $Tag = $Version
 }
 
-$Asset = "still-$Tag-$Target.zip"
+# One name, chosen for the person downloading rather than for the triple
+# (D-098). Windows has exactly one published build.
+$Asset = "still-Windows.zip"
 $Base  = "https://github.com/$Repo/releases/download/$Tag"
 $Tmp   = Join-Path ([System.IO.Path]::GetTempPath()) ("spoonstill-" + [System.Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $Tmp -Force | Out-Null

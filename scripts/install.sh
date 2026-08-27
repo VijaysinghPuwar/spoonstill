@@ -7,11 +7,27 @@
 #   1. works out which build this machine needs
 #   2. downloads that build and the checksum published beside it, and verifies
 #   3. installs the `still` binary into ~/.local/bin
-#   4. checks for FFmpeg, and offers to install it through Homebrew
+#   4. installs the window into /Applications, without the Gatekeeper dialog
+#   5. checks for FFmpeg, and offers to install it through Homebrew
 #
-# It never uses sudo, never writes outside $HOME, and never downloads FFmpeg
-# itself — D-012 forbids a runtime binary download, and D-062 forbids shipping
-# the GPL build this project develops against.
+# It never uses sudo and never downloads FFmpeg itself — D-012 forbids a runtime
+# binary download, and D-062 forbids shipping the GPL build this project
+# develops against. Step 4 writes to /Applications when that is possible
+# without sudo and to ~/Applications when it is not (D-098).
+#
+# Step 4 exists because of one dialog. An unsigned app downloaded through a
+# browser carries `com.apple.quarantine`, and on macOS 15 and later Apple
+# removed the right-click > Open escape hatch that every instruction on the
+# internet still names. What the operator gets instead is
+#
+#   "spoonstill" Not Opened — Apple could not verify "spoonstill" is free of
+#   malware ...            [Move to Trash]  [Done]
+#
+# where the highlighted button deletes the thing they just downloaded. An
+# installer running under their own hand can remove that attribute, and then
+# the app simply opens. Signing and notarization (M5) fix it properly.
+
+SKIP_APP="${SPOONSTILL_SKIP_APP:-}"     # set to 1 to install only the CLI
 
 set -euo pipefail
 
@@ -60,7 +76,10 @@ else
   TAG="$VERSION"
 fi
 
-ASSET="still-${TAG}-${TARGET}.tar.gz"
+case "$TARGET" in
+  aarch64-apple-darwin) ASSET="still-macOS-AppleSilicon.tar.gz" ;;
+  *)                    ASSET="still-macOS-Intel.tar.gz" ;;
+esac
 BASE="https://github.com/$REPO/releases/download/${TAG}"
 
 tmp=$(mktemp -d)
@@ -89,7 +108,50 @@ xattr -d com.apple.quarantine "$INSTALL_DIR/still" 2>/dev/null || true
 
 say "${green}Installed${reset} $INSTALL_DIR/still  ($("$INSTALL_DIR/still" --version 2>/dev/null || echo "$TAG"))"
 
-# --- 4. FFmpeg ---------------------------------------------------------------
+# --- 4. the window -----------------------------------------------------------
+
+if [ -n "$SKIP_APP" ]; then
+  say "${dim}Skipping${reset}  the window (SPOONSTILL_SKIP_APP is set)"
+else
+  APP="spoonstill-macOS.dmg"
+  step "Downloading $APP"
+  if curl -fSL --progress-bar -o "$tmp/$APP" "$BASE/$APP" \
+     && curl -fsSL -o "$tmp/$APP.sha256" "$BASE/$APP.sha256"; then
+
+    ( cd "$tmp" && shasum -a 256 -c "$APP.sha256" >/dev/null ) \
+      || die "Checksum mismatch on $APP. Nothing installed."
+
+    mnt="$tmp/mnt"
+    mkdir -p "$mnt"
+    hdiutil attach -nobrowse -quiet -mountpoint "$mnt" "$tmp/$APP" \
+      || die "Could not open $APP."
+
+    # Detaching has to happen however this ends, or the volume is left mounted.
+    trap 'hdiutil detach "$mnt" -quiet 2>/dev/null || true; rm -rf "$tmp"' EXIT
+
+    src=$(find "$mnt" -maxdepth 1 -name '*.app' -print -quit)
+    [ -n "$src" ] || die "$APP did not contain an application."
+
+    apps="/Applications"
+    [ -w "$apps" ] || apps="$HOME/Applications"
+    mkdir -p "$apps"
+    rm -rf "$apps/$(basename "$src")"
+    cp -R "$src" "$apps/" || die "Could not copy the app into $apps."
+
+    hdiutil detach "$mnt" -quiet 2>/dev/null || true
+    trap 'rm -rf "$tmp"' EXIT
+
+    # The whole reason this step exists. Without it the first launch is a
+    # dialog whose brightest button is "Move to Trash".
+    xattr -dr com.apple.quarantine "$apps/$(basename "$src")" 2>/dev/null || true
+
+    say "${green}Installed${reset} $apps/$(basename "$src")  ${dim}(opens without a Gatekeeper prompt)${reset}"
+  else
+    warn "Could not download the window; the command line above is installed and complete."
+  fi
+fi
+
+# --- 5. FFmpeg ---------------------------------------------------------------
 
 if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
   say "${green}Found${reset}     $(command -v ffmpeg)"

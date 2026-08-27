@@ -448,7 +448,8 @@ function drawRows() {
         <span class="file"></span><span class="narration"></span>
       </div></td>
       <td class="c-audio"><span class="badge"></span></td>
-      <td class="c-resolved"></td>`;
+      <td class="c-resolved"></td>
+      <td class="c-arrange"><div class="arrange"></div></td>`;
 
     // textContent, never innerHTML, for anything an operator named or typed: a
     // file called <img onerror=…> is a filename, not markup (D-052).
@@ -477,6 +478,7 @@ function drawRows() {
     }
 
     tr.querySelector(".c-resolved").innerHTML = resolved(scene);
+    drawArrange(tr.querySelector(".arrange"), scene, shown.length);
     rows.appendChild(tr);
   }
 }
@@ -530,6 +532,83 @@ function editNarration(scene, cell) {
     if (event.key === "Escape") finish(false);
   });
   input.addEventListener("blur", () => finish(true));
+}
+
+// Move a scene, or take it out (D-099).
+//
+// Only under the folder convention: there, the scene's *number is* its
+// position, so reordering means renaming files and spoonstill owns that
+// naming. A manifest's order is the operator's own column, and rewriting
+// someone's CSV is not this program's business (D-050).
+//
+// Positions are the scene's real index in the film, not its row in a filtered
+// view — "move up" while a filter hides the scene above would otherwise move
+// it somewhere the operator cannot see.
+function drawArrange(box, scene, showing) {
+  if (!project.convention) {
+    box.textContent = "";
+    box.title = "This project's order comes from its manifest — edit the CSV to change it.";
+    return;
+  }
+
+  const total = project.scenes.length;
+  const position = scene.index + 1;
+  const filtered = showing !== total;
+
+  const button = (label, hint, enabled, run) => {
+    const b = document.createElement("button");
+    b.className = "arrange-button";
+    b.textContent = label;
+    b.title = hint;
+    b.disabled = !enabled || rendering;
+    if (enabled && !rendering) b.addEventListener("click", run);
+    box.appendChild(b);
+    return b;
+  };
+
+  button("↑", filtered ? `Move to ${position - 1} (positions are the film's, not this filtered list's)`
+                       : `Move to position ${position - 1}`,
+    position > 1, () => arrange("move_scene", { root: project.root, scene: scene.id, to: position - 1 },
+      `Scene ${scene.id} moved up.`));
+
+  button("↓", filtered ? `Move to ${position + 1} (positions are the film's, not this filtered list's)`
+                       : `Move to position ${position + 1}`,
+    position < total, () => arrange("move_scene", { root: project.root, scene: scene.id, to: position + 1 },
+      `Scene ${scene.id} moved down.`));
+
+  // Two steps rather than a dialog. A modal confirm blocks a webview outright,
+  // and a single click that renumbers the whole film is a click nobody meant.
+  const remove = button("Remove", "Move this scene's files to removed/ — nothing is deleted", true, () => {
+    if (remove.dataset.armed) {
+      arrange("remove_scene", { root: project.root, scene: scene.id }, null);
+      return;
+    }
+    box.querySelectorAll(".arrange-button").forEach((b) => delete b.dataset.armed);
+    remove.dataset.armed = "1";
+    remove.textContent = "Remove?";
+    remove.classList.add("armed");
+    setStatus(`Click again to take scene ${scene.id} out. Its files move to removed/, not deleted.`);
+    setTimeout(() => {
+      if (!remove.dataset.armed) return;
+      delete remove.dataset.armed;
+      remove.textContent = "Remove";
+      remove.classList.remove("armed");
+    }, 4000);
+  });
+}
+
+// One arrangement, then a reload — the folder is the truth and it has changed
+// under us, so nothing here edits the model in place.
+async function arrange(command, args, said) {
+  if (rendering) return;
+  try {
+    setStatus("Rearranging…");
+    const answer = await invoke(command, args);
+    await load(project.root);
+    setStatus(said ?? String(answer));
+  } catch (error) {
+    setStatus(String(error));
+  }
 }
 
 function drawProblems() {

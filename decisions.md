@@ -1515,6 +1515,118 @@ Two things to keep:
   reused and re-run, so a failed leg is re-run into the same release rather than
   needing the tag deleted and re-cut.
 
+### D-098 — A release asset is named for the person downloading it · Accepted
+
+Decided 2026-08-27, comparing this project's first release page against the
+author's own `setuptts`. Theirs offers `SetupTTS-macOS.dmg` and
+`SetupTTS-Windows-Installer.exe`. Ours offered
+`spoonstill_0.1.0_universal.dmg` and
+`still-v0.1.0-aarch64-apple-darwin.tar.gz`.
+
+Both are accurate. Only one is answerable by someone standing in front of it:
+the person choosing has a Mac, not a triple, and `aarch64-apple-darwin`
+requires knowing what Apple called its own processors. The version is in the
+tag, the page title and the app itself, so putting it in the filename three
+more times buys nothing and costs the reader a scan.
+
+So the CLI matrix carries a `pretty` name and Tauri's bundles are renamed on
+the way out: `spoonstill-macOS.dmg`, `spoonstill-Windows-Installer.exe`,
+`still-macOS-AppleSilicon.tar.gz`, `still-macOS-Intel.tar.gz`,
+`still-Windows.zip`. `scripts/install.sh` and `install.ps1` follow, which is
+the part that must not be forgotten — an installer that constructs the old name
+404s against the new release.
+
+**And the notes lead with the download.** They used to open with a
+`curl | bash`, which is the right first line for a developer and the wrong one
+for the person who came to the page because they wanted an app. The one-liner
+is still there, under the thing that gets clicked.
+
+### D-099 — Gatekeeper is a dialog whose brightest button deletes your download · Accepted
+
+Found 2026-08-27, the first time the published `.dmg` was opened on the
+author's own machine:
+
+> **"spoonstill" Not Opened** — Apple could not verify "spoonstill" is free of
+> malware that may harm your Mac or compromise your privacy.
+> **[Move to Trash]** [Done]
+
+The default, highlighted, blue button **deletes the thing that was just
+downloaded**. That is what an unsigned app looks like on macOS now, and two
+things about it are worth writing down.
+
+**The advice everyone gives is wrong.** "Right-click the app > Open" is in our
+README, in our release notes, and in every StackOverflow answer — and **Apple
+removed it in macOS 15**. On 15 or later it does nothing at all. The path now is
+System Settings > Privacy & Security > Open Anyway, or `xattr -dr
+com.apple.quarantine`. Our own documentation was confidently telling operators
+to do something that has not worked for two releases of the operating system.
+
+**And the installer can simply prevent it.** Quarantine is an extended
+attribute applied by the *downloading* program. A shell script the operator ran
+deliberately can remove it, and then the app opens like any other. So
+`scripts/install.sh` now installs the window as well as the CLI — verify the
+checksum, mount the dmg, copy to `/Applications` (or `~/Applications` when that
+needs no sudo), clear the attribute, detach. `SPOONSTILL_SKIP_APP=1` opts out.
+
+This is not a way around code signing, and it does not pretend to be: it is the
+operator's own machine, their own command, and their own decision, which is
+precisely what Gatekeeper's dialog is asking for and doing badly. Signing and
+notarization (M5) remove the question entirely.
+
+### D-100 — A scene can be removed and moved, and nothing is ever deleted · Accepted
+
+Decided 2026-08-27, from the author's own use: *"there is no option to delete
+and move the scene from one place to another"*. The window could make a project
+and fill it, and then do nothing to it but render. A photo imported twice
+stayed twice. A scene that belonged third stayed eleventh.
+
+Both are one gesture in every tool anyone has used, and the answer here was to
+open Finder and rename eleven files by hand — the same twenty minutes D-080 was
+written to delete, reappearing one step later in the workflow.
+
+**The order is the numbers.** Under D-050's convention a scene is every file
+sharing a numeric stem, and render order is the natural order of those numbers.
+There is nowhere to record "this one is third now": the name *is* the position,
+so moving a scene means renaming files. A `position:` column would be a second
+source of truth for order, and a second thing to disagree with the folder.
+
+Four rules, each with a test:
+
+- **Only where the convention holds.** A project whose stills are `opening.jpg`
+  has an order the operator arranged by hand; renumbering it would be rewriting
+  something we did not write. It is refused, and the refusal says how to make
+  the project editable. A manifest's order is its CSV's, and that file is the
+  operator's (D-050).
+- **Nothing is deleted, ever.** A removed scene's files move to `removed/`
+  inside the project — which the folder scan never sees, because it reads one
+  level and takes only files. The operator drags them back if it was a mistake.
+  This program frequently holds the only copy of a photograph, and "delete" has
+  to be a promise it can keep. Removing twice after a renumber can produce two
+  different photographs both called `003.jpeg`; the second is kept beside the
+  first rather than replacing it.
+- **Renaming is two passes.** Renumbering in place means writing `001` while the
+  old `001` is still there — which silently destroys a file on Unix and fails
+  with an error on Windows (D-071 again: the platforms disagree and neither
+  outcome is acceptable). Everything moves to a staging name first.
+- **The whole scene moves together.** The still, its script and its recording
+  share a stem and are renamed as a set. Renaming the image alone would
+  unpair the narration and produce a scene that still renders, with the wrong
+  voice on it — a wrong answer that looks like a right one.
+
+`still remove DIR SCENE...` and `still move DIR SCENE POSITION` come first,
+because the CLI is the complete control surface (D-010) and a window verb with
+no command behind it does not exist. `remove` takes several scenes and applies
+them **highest-numbered first**, since removing 002 renumbers everything after
+it — otherwise `still remove p 002 005` would take 002 and then whatever landed
+on 005, which is scene 6.
+
+In the window the controls are quiet until the row is hovered, and Remove arms
+before it fires: a modal `confirm()` blocks a webview outright, and one click
+that renumbers a whole film is a click nobody meant. The arrows move by the
+scene's position **in the film**, not its row in a filtered view — "move up"
+while a filter hides the scene above would otherwise move it somewhere the
+operator cannot see.
+
 ---
 
 ## Reference repositories

@@ -305,6 +305,30 @@ What exists now, by crate:
   should not have been; it is a shell over M2 and gains M3's resumability for
   free when M3 lands.
 
+**A scene can be removed and moved, and nothing is ever deleted** (D-100).
+`spoonstill_app::arrange` is the module; `still remove DIR SCENE...` and
+`still move DIR SCENE POSITION` are the CLI half, and the window's Scenes rows
+grew ↑ ↓ and Remove. **The order is the numbers** — under D-050's convention a
+scene is every file sharing a numeric stem, so moving one means renaming files,
+and a `position:` column would be a second source of truth for order. Four rules
+with tests behind them: it works **only where stills are numbered** (a project of
+`opening.jpg` is refused, not renumbered); **nothing is deleted** — files move
+to `removed/`, which the folder scan never sees; **renaming is two passes**,
+because writing `001` over a live `001` destroys a file on Unix and errors on
+Windows; and **the whole scene moves together**, or a still is silently unpaired
+from its narration and renders with the wrong voice. `still remove` takes
+several ids highest-first, since removing 002 renumbers everything after it.
+
+**A release asset is named for the person downloading it** (D-098), and
+**Gatekeeper's brightest button deletes your download** (D-099). Assets are
+`spoonstill-macOS.dmg`, `still-macOS-AppleSilicon.tar.gz` and so on — the
+version is in the tag, not three more times in the filename — and `install.sh`
+/ `install.ps1` construct those names, so renaming one without the other 404s.
+The dialog an unsigned `.dmg` produces on macOS offers **Move to Trash** as its
+default; "right-click > Open" is what every document including ours said, and
+**Apple removed it in macOS 15**. `install.sh` now installs the window too and
+clears `com.apple.quarantine` itself, so the operator never meets the dialog.
+
 **The window has two levels, and the first one is the operator's projects**
 (D-086). Home lists every folder ever opened — newest first, path written
 `~/Downloads/test`, a moved project struck through with a Forget button rather
@@ -459,7 +483,8 @@ provider's tooling, and D-093 before touching a log sink, and **D-094 before tou
 provider, a retry, or the pre-flight check in `film.rs`, and D-095 before
 touching how a long line is split or joined, and D-096 before giving a probe a
 constant timeout, and D-097 before touching a release workflow's toolchain
-setup**. D-054 through D-057 and D-075 through D-082 were added during M2 and
+setup, D-098 before renaming an asset, D-099 before touching an installer's
+quarantine handling, and D-100 before touching `arrange` or the Scenes rows**. D-054 through D-057 and D-075 through D-082 were added during M2 and
 are all Accepted — read D-056 before touching the import path, D-057 before
 touching concat or transitions, D-076/D-077 before touching the pool, D-078
 before changing what the finished film is asserted against, D-079 before

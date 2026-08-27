@@ -10,6 +10,7 @@
 
 #![warn(missing_docs)]
 
+pub mod arrange;
 pub mod audio;
 pub mod diagnostics;
 pub mod film;
