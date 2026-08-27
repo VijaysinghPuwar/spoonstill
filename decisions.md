@@ -1412,6 +1412,55 @@ in `edge_live.rs`, where `ffprobe` has to read the joined file as one continuous
 track of the expected length — a join that dropped or repeated a part misses
 that by a whole part.
 
+### D-096 — A probe that decodes is timed by what it decodes · Accepted
+
+Found 2026-08-26 by rendering a six-hour film, which is the only way this was
+ever going to be found. Six scenes of an hour each, `--jobs 4`. Every one of
+the first four failed, at the same moment, with:
+
+```
+FAILED 004: no response after 30.0s
+  ffprobe … -count_frames -i …/.seg-0003-….mp4.partial
+```
+
+Nothing was wrong with the segments. They were correct, complete, and about to
+be thrown away by **their own verification**.
+
+`probe_counting_frames` is D-041's gate: a container's frame count is a claim,
+so we make `ffprobe` decode the file and report what is actually in it. That is
+right, and it means the call's cost is *the length of the video*, not the size
+of its header — while the timeout it was given, `DEFAULT_PROBE_TIMEOUT`, is the
+one shared with probes that read a header and return.
+
+Measured here: **18 000 frames took 15.4 s**, or 0.85 ms per frame. So a flat
+30 s covers about 35 000 frames — nineteen minutes of 30 fps video — and an
+hour-long scene needs 92 s on an idle machine. With four workers decoding at
+once it needs several times that, which is why all four failed together rather
+than one at a time.
+
+So the ceiling is derived from the frames the call is about to read: **30 s plus
+5 ms per frame**, capped at twenty minutes. Six times the measured rate, and the
+multiple is contention, not padding — `--jobs 4` is the default shape of a
+render, and four of these decodes share the same cores. A four-second segment
+gains 600 ms it never uses; nothing else about the normal case changes.
+
+Two things worth keeping from how this was found:
+
+- **`scene.rs` is the only place that counts frames.** The film's own assertion
+  (`concat.rs`) and the reuse check (`film.rs`) both read headers, so they are
+  as fast on a six-hour film as on a four-second one. One call site, one fix —
+  worth confirming rather than assuming, because a second one would have failed
+  the same way and only at the same scale.
+- **A timeout that is a constant is a guess about the input.** The same mistake
+  had already been made in the voice provider, where a flat 90 s refused a long
+  paragraph (D-094), and it was made here independently. Where a call's cost
+  scales with something we know, the ceiling should be computed from that
+  something.
+
+**n=500 is the design point, and this is the other axis.** Every gate and every
+benchmark in this project so far measures many short scenes; nothing measured
+one long one. A six-hour film is six scenes, and it failed at the first.
+
 ---
 
 ## Reference repositories

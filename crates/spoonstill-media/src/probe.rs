@@ -31,6 +31,38 @@ use crate::tools::Tools;
 /// stuck.
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// What counting the frames of one segment adds to that, per frame (D-096).
+///
+/// `-count_frames` does not read metadata — it decodes the whole file, which
+/// is the point (D-041: a container's frame count is a claim, and we check
+/// what is actually in there). Measured on this machine, 2026-08-26:
+/// **18 000 frames took 15.4 s**, or 0.85 ms per frame.
+///
+/// Five milliseconds is roughly six times that, and the multiple is not
+/// padding: `--jobs 4` means four of these decodes run at once on the same
+/// cores, and the fixed 30-second ceiling this replaces failed *all four*
+/// hour-long scenes of a six-hour film simultaneously, for exactly that
+/// reason. A segment of a few seconds is unaffected — it never gets near
+/// either number.
+const PROBE_PER_FRAME: Duration = Duration::from_millis(5);
+
+/// No probe waits longer than this. At 5 ms/frame it is reached by a segment
+/// of about 200 000 frames, which is nearly two hours — longer than a scene is
+/// allowed to be (`spoonstill_core::project::MAX_SCENE_SECONDS`).
+const PROBE_CEILING: Duration = Duration::from_secs(1_200);
+
+/// How long to allow for decoding and counting `frames` frames.
+///
+/// A fixed timeout is right for a probe that reads a header and wrong for one
+/// that decodes an hour of video, and the two are the same function call away
+/// from each other.
+#[must_use]
+pub fn counting_timeout(frames: u32) -> Duration {
+    DEFAULT_PROBE_TIMEOUT
+        .saturating_add(PROBE_PER_FRAME.saturating_mul(frames))
+        .min(PROBE_CEILING)
+}
+
 /// Everything we read back from a file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProbeResult {
@@ -369,6 +401,41 @@ struct RawStream {
 
 #[cfg(test)]
 mod tests {
+
+    /// The bug this exists for (D-096): a fixed 30 s allowed about 35 000
+    /// frames, so every hour-long scene of a six-hour film failed its own
+    /// verification — all four at once, because `--jobs 4` had them competing
+    /// for the same cores.
+    #[test]
+    fn counting_a_long_segment_is_allowed_longer_than_counting_a_short_one() {
+        // A four-second segment: nothing changes for the normal case.
+        assert_eq!(
+            counting_timeout(120),
+            DEFAULT_PROBE_TIMEOUT + Duration::from_millis(600)
+        );
+
+        // 18 000 frames took 15.4 s measured; the ceiling must clear that with
+        // room for three other decodes running beside it.
+        let ten_minutes = counting_timeout(18_000);
+        assert!(
+            ten_minutes > Duration::from_secs(15 * 4),
+            "{ten_minutes:?} leaves no room for contention"
+        );
+
+        // An hour at 30 fps — the longest scene the project model allows.
+        let an_hour = counting_timeout(108_000);
+        assert!(
+            an_hour > Duration::from_secs(92 * 4),
+            "92 s measured idle, and four of these run at once: {an_hour:?}"
+        );
+        assert!(an_hour <= PROBE_CEILING);
+
+        assert_eq!(
+            counting_timeout(u32::MAX),
+            PROBE_CEILING,
+            "nothing waits forever"
+        );
+    }
     use super::*;
 
     /// Real captured output, from the prototype render that validated the M1

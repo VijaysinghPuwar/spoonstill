@@ -414,8 +414,10 @@ fn validate(
     log: &dyn Diagnostics,
 ) -> Result<ProbeResult, MediaError> {
     // Counted, not declared. A container's frame count is metadata; this
-    // decodes the file and reports what is actually in it.
-    let probe = probe::probe_counting_frames(tools, path, DEFAULT_PROBE_TIMEOUT)?;
+    // decodes the file and reports what is actually in it — so the time it
+    // takes is the length of the segment, not the size of its header, and the
+    // ceiling is derived from the frames we are about to make it read (D-096).
+    let probe = probe::probe_counting_frames(tools, path, probe::counting_timeout(frames))?;
 
     if let Err(mismatches) = profile::assert_matches_profile(expected, &probe) {
         // Each field on its own record, so a bundle can be scanned for "which

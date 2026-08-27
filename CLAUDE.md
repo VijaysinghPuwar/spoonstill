@@ -247,6 +247,17 @@ library while we use the CLI. And **a line no scene could hold is refused before
 the first request** rather than spoken for eleven minutes and then rejected for
 its measured duration.
 
+**A probe that decodes is timed by what it decodes** (D-096). Rendering a
+six-hour film — six scenes of an hour, `--jobs 4` — failed all four of the
+first round at once, not because the segments were wrong but because
+`ffprobe -count_frames` could not decode 108 000 frames inside the flat 30-second
+`DEFAULT_PROBE_TIMEOUT`. Measured: 18 000 frames take 15.4 s. The ceiling is now
+30 s + 5 ms/frame (the multiple is four workers sharing cores, not padding).
+`scene.rs` is the **only** place that counts frames; the film's assertion and the
+reuse check read headers and are as fast on six hours as on four seconds. Every
+gate in this project measures many short scenes — this is the other axis, and it
+broke at the first scene.
+
 **Parallel rendering, in one paragraph.** `--jobs N` sets how many scenes
 encode at once; the default is `available_parallelism() / 2` capped at 4,
 because the speedup curve flattens at three while memory keeps climbing at
@@ -436,7 +447,8 @@ control, D-090 before touching a hostile-name fixture, and D-091 before
 touching the live panel or the voice list, D-092 before touching Settings or a
 provider's tooling, and D-093 before touching a log sink, and **D-094 before touching the Edge
 provider, a retry, or the pre-flight check in `film.rs`, and D-095 before
-touching how a long line is split or joined**. D-054 through D-057 and D-075 through D-082 were added during M2 and
+touching how a long line is split or joined, and D-096 before giving a probe a
+constant timeout**. D-054 through D-057 and D-075 through D-082 were added during M2 and
 are all Accepted — read D-056 before touching the import path, D-057 before
 touching concat or transitions, D-076/D-077 before touching the pool, D-078
 before changing what the finished film is asserted against, D-079 before
