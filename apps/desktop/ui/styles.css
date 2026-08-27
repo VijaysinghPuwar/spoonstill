@@ -335,27 +335,53 @@ button.wide { width: 100%; padding: 7px 12px; }
   flex-direction: column;
 }
 
-.projects { margin: 0; padding: 0; list-style: none; }
+/* A project is a thing you pick up, so it is a card. As a row-per-project list
+   the only thing separating one from the next was a hairline, and a long path
+   made the whole screen read as one grey block. D-092. */
+.projects { margin: 0; padding: 0 18px 18px; list-style: none; }
 
-.projects li {
-  display: flex;
-  align-items: baseline;
-  gap: 14px;
-  padding: 11px 18px;
-  border-bottom: 1px solid var(--line);
-  cursor: pointer;
+.projects.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
 }
 
-.projects li:hover { background: var(--hover); }
-.projects .p-name { flex: none; width: 210px; font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.projects .p-path { flex: 1; min-width: 0; font-size: 11px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.projects .p-when { flex: none; color: var(--ink-3); font-size: 12px; white-space: nowrap; }
-.projects .p-forget { flex: none; padding: 2px 10px; font-size: 11px; opacity: 0; }
-.projects li:hover .p-forget { opacity: 1; }
+.projects li {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto auto auto;
+  gap: 4px;
+  padding: 15px 16px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  cursor: pointer;
+  transition: border-color 90ms ease, background 90ms ease;
+}
+
+.projects li:hover { background: var(--hover); border-color: var(--accent-line); }
+.projects .p-name { font-weight: 600; font-size: 14.5px; letter-spacing: -0.01em;
+                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The path wraps rather than trailing off: on a card there is room, and the
+   folder is how an operator tells two projects of the same name apart. */
+.projects .p-path { font-size: 11px; color: var(--ink-3); line-height: 1.45;
+                    overflow-wrap: anywhere; }
+.projects .p-when { margin-top: 2px; color: var(--ink-3); font-size: 11.5px; }
+.projects .p-forget {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  padding: 2px 9px;
+  font-size: 11px;
+  opacity: 0;
+}
+.projects li:hover .p-forget, .projects li:focus-within .p-forget { opacity: 1; }
 
 /* Moved or deleted. Shown and marked rather than dropped: a project that
    silently vanishes from this list is a program that appears to have lost it. */
 .projects li.gone { cursor: default; }
+.projects li.gone { border-style: dashed; }
+.projects li.gone:hover { border-color: var(--line); background: var(--panel); }
 .projects li.gone .p-name, .projects li.gone .p-path { color: var(--ink-3); text-decoration: line-through; }
 .projects li.gone .p-when { color: var(--warn); }
 .projects li.gone .p-forget { opacity: 1; }
@@ -841,3 +867,7 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
   .search { width: 150px; }
   .projects .p-name { width: 150px; }
 }
+
+
+/* A voice picker wide enough to read a language name in. */
+.wide-select { flex: 1; min-width: 0; }

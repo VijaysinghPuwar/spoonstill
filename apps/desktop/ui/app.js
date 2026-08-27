@@ -50,6 +50,8 @@ let outError = "";
 let voices = [];
 let voicesLoaded = false;
 let providerDefault = "";
+// The machine's fallback voice, from Settings. Null means "the provider's own".
+let appDefaultVoice = null;
 
 // Per-scene render state, keyed by scene index. Wiped at the start of a render
 // and filled by the progress channel — never merged into `project`, which is
@@ -98,7 +100,7 @@ async function loadHome() {
     if (!entry.exists) li.classList.add("gone");
     li.innerHTML =
       `<span class="p-name"></span><span class="p-path mono"></span>` +
-      `<span class="p-when"></span><button class="p-forget">Forget</button>`;
+      `<span class="p-when"></span><button class="p-forget" title="">Forget</button>`;
     li.children[0].textContent = entry.name;
     li.children[1].textContent = entry.pretty || entry.path;
     li.children[2].textContent = entry.exists ? ago(entry.at) : "moved or deleted";
@@ -155,6 +157,7 @@ async function openSettings() {
   show("settings");
   setStatus("");
   await checkProvider();
+  await loadFallbackVoice();
 }
 
 async function checkProvider() {
@@ -165,14 +168,97 @@ async function checkProvider() {
     const status = await invoke("provider_status", { provider: "edge" });
     providerDefault = status.default_voice || providerDefault;
     el("app-provider").textContent = status.id;
-    el("app-default-voice").textContent = status.default_voice
-      ? `${status.default_voice} — ${describe(status.default_voice)}`
-      : "—";
     state.className = "state " + (status.ready ? "ready" : "missing");
-    state.textContent = status.ready ? "Ready. Written lines can be spoken." : status.detail;
+    state.textContent = status.ready
+      ? "Ready. Written lines can be spoken."
+      : status.detail;
+    // Offered only when it would do something. D-092.
+    el("app-provider-install").hidden = status.ready;
   } catch (error) {
     state.className = "state missing";
     state.textContent = String(error);
+    el("app-provider-install").hidden = false;
+  }
+}
+
+// Fetch the provider's tooling through this machine's own package manager,
+// rather than printing a command and leaving the operator to find a terminal.
+async function installProvider() {
+  const button = el("app-provider-install");
+  const said = el("app-install-said");
+  const was = button.textContent;
+  button.disabled = true;
+  button.textContent = "Installing…";
+  said.hidden = false;
+  said.classList.remove("bad");
+  said.textContent = "This runs your package manager and can take a minute.";
+  try {
+    const ran = await invoke("install_provider", { provider: "edge" });
+    said.textContent = `Installed with ${ran}`;
+    await checkProvider();
+    await loadFallbackVoice();
+  } catch (error) {
+    said.classList.add("bad");
+    said.textContent = String(error);
+  } finally {
+    button.disabled = false;
+    button.textContent = was;
+  }
+}
+
+// The fallback voice: what a project that names none will use. A *fallback*,
+// never a write — project.yaml stays an input (D-013, D-092).
+async function loadFallbackVoice() {
+  const select = el("app-voice");
+  const said = el("app-voice-said");
+  try {
+    const settings = await invoke("app_settings");
+    appDefaultVoice = settings.default_voice || null;
+  } catch {
+    appDefaultVoice = null;
+  }
+
+  let catalogue = [];
+  try {
+    catalogue = await invoke("voices", { provider: "edge" });
+  } catch {
+    catalogue = [];
+  }
+
+  select.innerHTML = "";
+  const own = document.createElement("option");
+  own.value = "";
+  own.textContent = providerDefault
+    ? `The provider's own — ${describe(providerDefault)}`
+    : "The provider's own";
+  select.appendChild(own);
+
+  for (const voice of catalogue) {
+    const option = document.createElement("option");
+    option.value = voice.id;
+    option.textContent = `${voiceName(voice)} · ${languageOf(voice.locale)} · ${voice.gender}`;
+    select.appendChild(option);
+  }
+  select.value = appDefaultVoice ?? "";
+  select.disabled = catalogue.length === 0;
+
+  said.textContent = catalogue.length === 0
+    ? "No voices to choose from until the voice service is installed."
+    : appDefaultVoice
+      ? `Projects that name no voice will use ${describe(appDefaultVoice)}.`
+      : "Projects that name no voice use whatever the provider picks.";
+}
+
+async function setFallbackVoice(id) {
+  try {
+    const settings = await invoke("set_default_voice", { voice: id || null });
+    appDefaultVoice = settings.default_voice || null;
+    el("app-voice").value = appDefaultVoice ?? "";
+    el("app-voice-said").textContent = appDefaultVoice
+      ? `Projects that name no voice will use ${describe(appDefaultVoice)}.`
+      : "Projects that name no voice use whatever the provider picks.";
+  } catch (error) {
+    el("app-voice-said").textContent = String(error);
   }
 }
 
@@ -518,12 +604,22 @@ function describe(id) {
   return language ? `${voiceName(voice)} · ${language}` : voiceName(voice);
 }
 
-// The voice that will actually be used if nothing is chosen here.
+// The voice that will actually be used if nothing is chosen here. Three
+// answers in order of who wins: this run's override, the project's own
+// `tts.voice`, then the machine's fallback — and the provider's own only when
+// none of the three said anything (D-092).
+// True when `project.yaml` left the choice open, which is what makes the
+// machine's fallback apply at all.
+function projectNamesNoVoice() {
+  const named = project?.voice || "";
+  return !named || named === "default";
+}
+
 function effectiveVoice() {
   if (chosenVoice) return chosenVoice;
   const named = project?.voice || "";
   if (named && named !== "default") return named;
-  return providerDefault;
+  return appDefaultVoice || providerDefault;
 }
 
 async function loadVoices() {
@@ -926,7 +1022,10 @@ async function render() {
         jobs: null,
         audioJobs: null,
         force: false,
-        voice: chosenVoice,
+        // The override this run asked for — the Voice screen's pick, or the
+        // machine's fallback when the project names none. Never written back
+        // to project.yaml (D-013, D-092).
+        voice: chosenVoice || (projectNamesNoVoice() ? appDefaultVoice : null),
         outDir: el("out-dir").value,
         outName: el("out-name").value,
       },
@@ -1066,6 +1165,9 @@ el("fill-back").addEventListener("click", goHome);
 el("settings-open").addEventListener("click", () => guard(openSettings()));
 el("settings-back").addEventListener("click", goHome);
 el("app-provider-recheck").addEventListener("click", () => guard(checkProvider()));
+el("app-provider-install").addEventListener("click", () => guard(installProvider()));
+el("app-voice").addEventListener("change", (e) => guard(setFallbackVoice(e.target.value)));
+el("app-voice-clear").addEventListener("click", () => guard(setFallbackVoice("")));
 el("new-project").addEventListener("click", newProject);
 el("open-project").addEventListener("click", openProject);
 el("choose-media").addEventListener("click", chooseMedia);

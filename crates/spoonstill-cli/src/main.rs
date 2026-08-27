@@ -149,6 +149,14 @@ struct VoicesArgs {
     /// Show only voices whose name or locale contains this, case-insensitively.
     #[arg(value_name = "FILTER")]
     filter: Option<String>,
+
+    /// Install the provider's tooling, through this machine's own package
+    /// manager, and then list what it offers.
+    ///
+    /// The window has a button for this; the rule is that the CLI can do
+    /// everything the window can (D-010), so it is here first.
+    #[arg(long)]
+    install: bool,
 }
 
 #[derive(Debug, Args)]
@@ -372,7 +380,14 @@ fn list_voices(args: &VoicesArgs) -> Result<(), String> {
     let provider = spoonstill_app::tts::provider(&args.provider).map_err(|e| e.to_string())?;
 
     if let spoonstill_app::tts::Availability::Missing(detail) = provider.availability() {
-        return Err(detail);
+        if !args.install {
+            return Err(format!("{detail}\n  try `still voices --install`"));
+        }
+        println!("  installing {}…", provider.id());
+        let ran = provider.install().map_err(|e| e.to_string())?;
+        println!("  {ran}");
+    } else if args.install {
+        println!("  {} is already installed", provider.id());
     }
 
     let wanted = args.filter.as_deref().map(str::to_lowercase);

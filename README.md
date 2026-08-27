@@ -40,12 +40,11 @@ Grab the build for your machine from the
 
 | Your machine | Desktop app | Command line |
 |---|---|---|
-| **macOS, Apple Silicon** (M1–M5) | `spoonstill_*_aarch64.dmg` | `still-*-aarch64-apple-darwin.tar.gz` |
-| **macOS, Intel** | `spoonstill_*_x64.dmg` | `still-*-x86_64-apple-darwin.tar.gz` |
+| **macOS** — Apple Silicon *or* Intel | `spoonstill_*_universal.dmg` | `still-*-aarch64-apple-darwin.tar.gz` (Apple Silicon)<br>`still-*-x86_64-apple-darwin.tar.gz` (Intel) |
 | **Windows 10/11, 64-bit** | `spoonstill_*_x64-setup.exe` | `still-*-x86_64-pc-windows-msvc.zip` |
 
-Not sure which Mac you have?  → menu > About This Mac. "Apple M-something" is
-Apple Silicon.
+The Mac app is one universal build, so you do not have to know which processor
+you have. The one-line installer below works that out for the command line too.
 
 ### Or install with one line
 
@@ -65,6 +64,9 @@ Either script installs the `still` command, then checks for FFmpeg and installs
 it through Homebrew or winget if it is missing. Nothing runs as administrator
 and nothing is written outside your own user folder.
 
+The desktop app can install the voice service for you from **Settings > Voice
+service > Install it**; on the command line that is `still voices --install`.
+
 ---
 
 ## One thing to install first
@@ -81,10 +83,17 @@ winget install Gyan.FFmpeg   # Windows
 Want a neural voice to read your text? Install one more, once:
 
 ```bash
-pipx install edge-tts        # or: pip install edge-tts
+still voices --install       # or: pipx install edge-tts
 ```
 
 Skip it if you are only using recordings you made yourself.
+
+**A note on quality.** Edge TTS is Microsoft's free endpoint and it returns
+24 kHz, mono, 48 kbps MP3 — the format is fixed in `edge-tts` itself, because
+its word-timing arithmetic divides by exactly that bitrate. spoonstill does not
+degrade it further (the working artifact is lossless PCM and the film's audio is
+192 kbps AAC), but a free service's ceiling is a free service's ceiling. A
+higher-fidelity provider is on the roadmap.
 
 ---
 

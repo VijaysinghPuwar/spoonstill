@@ -142,6 +142,70 @@ struct RecentProject {
 /// Where the window remembers the operator's projects.
 const RECENT_FILE: &str = "recent-projects.json";
 
+/// Where the window remembers the answers that are about this machine rather
+/// than about any one project (D-092). Same reasoning as `RECENT_FILE`: a
+/// fallback voice is not a fact about a project, so it does not live in one.
+const SETTINGS_FILE: &str = "app-settings.json";
+
+/// The machine's own answers. Every field is optional, because every field has
+/// a working default and a first run has none of them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct AppSettings {
+    /// The voice a project that names none falls back to.
+    ///
+    /// **A fallback, never a write.** `project.yaml` is an input (D-013), so
+    /// choosing here changes what the *next render* asks for and nothing on
+    /// disk. A project that names its own voice still wins, and the Voice
+    /// screen's per-run override wins over both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_voice: Option<String>,
+}
+
+fn settings_file(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let dir = app.path().app_config_dir().ok()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(SETTINGS_FILE))
+}
+
+/// Read them, or the defaults. As with the recent list, every failure here is
+/// "there are none yet", which is normal and never an error in front of anyone.
+#[tauri::command]
+fn app_settings(app: tauri::AppHandle) -> AppSettings {
+    settings_file(&app)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Set the fallback voice, or clear it by passing nothing.
+#[tauri::command]
+fn set_default_voice(app: tauri::AppHandle, voice: Option<String>) -> Result<AppSettings, String> {
+    let mut settings = app_settings(app.clone());
+    settings.default_voice = voice.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+
+    let path = settings_file(&app).ok_or("this machine has no config directory")?;
+    let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))?;
+    Ok(settings)
+}
+
+/// Install a provider's tooling, and say what was run.
+///
+/// The window used to print `pip install edge-tts` and leave the operator to
+/// find a terminal, which is the program declining to do the thing it just
+/// asked for (D-092).
+#[tauri::command]
+async fn install_provider(provider: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        spoonstill_app::tts::provider(&provider)
+            .map_err(|e| e.to_string())?
+            .install()
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("the install thread failed: {e}"))?
+}
+
 /// How many to keep. Long enough to cover a working period, short enough that
 /// the home screen stays a list rather than an archive.
 const RECENT_LIMIT: usize = 30;
@@ -1028,6 +1092,9 @@ fn main() {
             initial_project,
             recent_projects,
             forget_project,
+            app_settings,
+            set_default_voice,
+            install_provider,
             create_project,
             add_media,
             voices,

@@ -41,6 +41,52 @@ use spoonstill_media::command::FfmpegCommand;
 
 use crate::{Availability, Provider, Request, Spoken, TtsError, Voice, opening};
 
+/// How long to let a package manager run. Installing pulls a dependency tree
+/// over a network, so this is minutes rather than seconds.
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The package managers to try, in the order that works most often.
+///
+/// `pipx` first because it is the one that does not fight a system Python;
+/// `brew` next on macOS; a `--user` pip last, which is the advice that fails on
+/// a modern Homebrew Python and is therefore the fallback rather than the lead.
+#[cfg(target_os = "macos")]
+const INSTALLERS: &[(&str, &[&str])] = &[
+    ("pipx", &["install", "edge-tts"]),
+    ("brew", &["install", "edge-tts"]),
+    (
+        "python3",
+        &["-m", "pip", "install", "--user", "--upgrade", "edge-tts"],
+    ),
+];
+
+/// Windows has no Homebrew, and its Python is not externally managed, so a
+/// plain `pip --user` is the normal answer rather than the last resort.
+#[cfg(not(target_os = "macos"))]
+const INSTALLERS: &[(&str, &[&str])] = &[
+    ("pipx", &["install", "edge-tts"]),
+    (
+        "python",
+        &["-m", "pip", "install", "--user", "--upgrade", "edge-tts"],
+    ),
+    (
+        "python3",
+        &["-m", "pip", "install", "--user", "--upgrade", "edge-tts"],
+    ),
+];
+
+/// The last thing a failing installer said, which is the part that names the
+/// cause. Package managers print pages; an error box holds a sentence.
+fn last_line(stderr: &str) -> String {
+    stderr
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("no output")
+        .to_owned()
+}
+
 /// Environment override for the `edge-tts` binary. Development convenience,
 /// and the hook a packaged build would use — same shape as
 /// `spoonstill_media::tools` (D-012: no auto-download, no candidate search).
@@ -132,6 +178,56 @@ impl Provider for Edge {
 
     fn default_voice(&self) -> &str {
         DEFAULT_VOICE
+    }
+
+    /// Fetch `edge-tts` through whichever package manager this machine has.
+    ///
+    /// Told to run `pip install edge-tts`, an operator on a Homebrew Python
+    /// meets `error: externally-managed-environment` and stops. So the
+    /// candidates are tried in the order that works most often, and the first
+    /// one that both exists and succeeds wins. Nothing is downloaded from us
+    /// (D-062, D-012): every candidate is the platform's own package manager,
+    /// run because a button that says install was pressed.
+    fn install(&self) -> Result<String, TtsError> {
+        let mut tried: Vec<String> = Vec::new();
+
+        for (program, args) in INSTALLERS {
+            let mut command = FfmpegCommand::new(*program);
+            command.args(*args);
+            let shown = command.display();
+
+            match command.spawn().and_then(|c| c.wait_until(INSTALL_TIMEOUT)) {
+                Ok(finished) if finished.status.success() => {
+                    // Present is not the same as runnable: a `pip --user`
+                    // install can land somewhere that is not on PATH, and
+                    // reporting success there would be reporting a lie.
+                    return match self.availability() {
+                        Availability::Ready => Ok(shown),
+                        Availability::Missing(detail) => Err(TtsError::Unavailable {
+                            provider: ID.to_owned(),
+                            detail: format!(
+                                "`{shown}` succeeded but {} still cannot be run \
+                                 — it is probably not on PATH. {detail}",
+                                self.program.display()
+                            ),
+                        }),
+                    };
+                }
+                Ok(finished) => tried.push(format!(
+                    "`{shown}` exited {}: {}",
+                    finished.status.code().unwrap_or(-1),
+                    last_line(&finished.stderr)
+                )),
+                // Not installed on this machine — the next candidate is the
+                // point of having a list.
+                Err(_) => tried.push(format!("`{program}` is not on this machine")),
+            }
+        }
+
+        Err(TtsError::Unavailable {
+            provider: ID.to_owned(),
+            detail: format!("could not install it. {}", tried.join("; ")),
+        })
     }
 
     fn voices(&self) -> Result<Vec<Voice>, TtsError> {

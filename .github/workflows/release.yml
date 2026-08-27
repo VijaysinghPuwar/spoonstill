@@ -104,12 +104,20 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
             archive: tar.gz
-          - os: macos-13
+            smoke: true
+          # Cross-compiled, not native — GitHub no longer serves `macos-13`
+          # runners (two runs sat queued 15+ minutes and never started). Apple's
+          # linker targets both architectures from either, so this builds; it is
+          # **not** covered by the test suite, which runs on arm64 only. See
+          # D-087's amendment.
+          - os: macos-14
             target: x86_64-apple-darwin
             archive: tar.gz
+            smoke: false
           - os: windows-2022
             target: x86_64-pc-windows-msvc
             archive: zip
+            smoke: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -150,13 +158,23 @@ jobs:
           "$hash  $name" | Out-File -FilePath "$name.sha256" -Encoding ascii -NoNewline
           "ASSET=$name" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      # Only where it can actually execute: the arm64 runner has no Rosetta, so
+      # the cross-compiled Intel binary is checked by `file`, not by running it.
       - name: Smoke test the binary that is about to ship
+        if: matrix.smoke
         shell: bash
         run: |
           bin="target/${{ matrix.target }}/release/still"
           if [ -f "$bin.exe" ]; then bin="$bin.exe"; fi
           "$bin" --version
           "$bin" --help > /dev/null
+
+      - name: Check the cross-compiled binary is the architecture it claims
+        if: ${{ !matrix.smoke }}
+        shell: bash
+        run: |
+          file "target/${{ matrix.target }}/release/still" | tee /dev/stderr | grep -q "x86_64" \
+            || { echo "::error::not an x86_64 binary"; exit 1; }
 
       - name: Upload
         shell: bash
@@ -174,14 +192,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # One .dmg that runs on both Macs, rather than asking the operator
+          # which processor they have. Tauri lipos the two slices together, so
+          # the arm64 runner produces the whole thing.
           - os: macos-14
-            target: aarch64-apple-darwin
-            bundles: dmg
-          - os: macos-13
-            target: x86_64-apple-darwin
+            target: universal-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
             bundles: dmg
           - os: windows-2022
             target: x86_64-pc-windows-msvc
+            rust-targets: x86_64-pc-windows-msvc
             bundles: nsis,msi
     steps:
       - uses: actions/checkout@v4
@@ -190,7 +210,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.rust-targets }}
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -237,8 +257,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.draft.outputs.tag }}
         run: |
-          # Six CLI files, plus each platform's bundles and their checksums.
-          # Anything less and the installers,
+          # Six CLI files, one universal .dmg and the two Windows installers,
+          # each with a checksum: twelve. Anything less and the installers,
           # which verify before they install, would fail on a live release.
           count=$(gh release view "$TAG" --json assets --jq '.assets | length')
           echo "$count assets attached"

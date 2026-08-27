@@ -54,8 +54,10 @@
       </div>
     </div>
 
-    <div class="grid-wrap">
-      <ul class="projects" id="project-list"></ul>
+    <div class="grid-wrap scroll">
+      <!-- Boxes, not table rows: a project is a thing you pick up, and the
+           list had no edges to tell one from the next. D-092. -->
+      <ul class="projects cards" id="project-list"></ul>
       <div id="no-projects" class="nothing" hidden>
         <img class="hero-mark" src="icon.svg" alt="" />
         <p>Nothing here yet. Make a project, or drop a folder of photos into this window.</p>
@@ -82,16 +84,27 @@
           <p id="app-provider-state" class="state">Checking…</p>
           <dl class="facts">
             <dt>Provider</dt><dd id="app-provider" class="mono">edge</dd>
-            <dt>Its default voice</dt><dd id="app-default-voice" class="mono">—</dd>
           </dl>
           <div class="row-actions">
+            <!-- Not a sentence telling the operator to open a terminal. D-092. -->
+            <button id="app-provider-install" class="primary" hidden>Install it</button>
             <button id="app-provider-recheck">Check again</button>
           </div>
-          <p class="whisper left">
-            Edge TTS is a command line tool this program runs; it is free and it
-            needs no key. If it is missing, install it with
-            <code>pip install edge-tts</code> and check again.
+          <p id="app-install-said" class="whisper left" hidden></p>
+        </section>
+
+        <section class="card">
+          <h3>Fallback voice</h3>
+          <p class="sub tight">
+            Used by any project whose <code>project.yaml</code> names no voice.
+            A project that names one wins, and a project's own Voice screen wins
+            over both. Nothing here is written to <code>project.yaml</code>.
           </p>
+          <div class="row-actions">
+            <select id="app-voice" class="select wide-select"></select>
+            <button id="app-voice-clear">Use the provider's own</button>
+          </div>
+          <p id="app-voice-said" class="whisper left"></p>
         </section>
 
         <section class="card">
@@ -100,7 +113,7 @@
             <button data-theme="dark">Dark</button>
             <button data-theme="light">Light</button>
           </div>
-          <p class="whisper left">Dark is the default, because the mark is drawn on black.</p>
+
         </section>
 
         <section class="card">
@@ -112,8 +125,7 @@
             </div>
           </div>
           <p class="whisper left">
-            Photos and narration in, one MP4 out. Everything happens on this
-            machine; nothing is uploaded except the lines you ask a voice
+            Everything happens on this machine, except the lines you ask a voice
             service to speak.
           </p>
         </section>

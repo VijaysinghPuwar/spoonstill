@@ -220,6 +220,31 @@ pub trait Provider: Send + Sync {
         ""
     }
 
+    /// Install this provider's tooling, and say what was run.
+    ///
+    /// Telling an operator to open a terminal and run `pip install edge-tts` is
+    /// telling them the program cannot do the one thing it just asked for. A
+    /// provider that is a command line tool knows how to fetch itself; one that
+    /// is an API key does not, and says so.
+    ///
+    /// This is **not** D-012's forbidden runtime download. That rule is about
+    /// the *renderer* quietly fetching an encoder mid-run, producing output
+    /// nobody can reproduce. This runs only when an operator presses a button
+    /// that says install, before any project is rendered, and it fetches
+    /// through the platform's own package manager rather than pulling a binary
+    /// from us.
+    ///
+    /// # Errors
+    ///
+    /// [`TtsError::Unavailable`] when the provider cannot install itself, with
+    /// the sentence saying what the operator must do instead.
+    fn install(&self) -> Result<String, TtsError> {
+        Err(TtsError::Unavailable {
+            provider: self.id().to_owned(),
+            detail: "this provider cannot install itself".to_owned(),
+        })
+    }
+
     /// Say `request` into `destination`, which the provider creates.
     ///
     /// The destination's parent already exists. On any error the provider
