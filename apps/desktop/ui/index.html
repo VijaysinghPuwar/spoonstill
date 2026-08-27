@@ -298,7 +298,8 @@
       <div class="pane-head">
         <div>
           <h2>Output</h2>
-
+          <p class="sub">Where the film lands. An override for the next render —
+            <code>project.yaml</code> is an input and nothing here writes to it.</p>
         </div>
         <div class="pane-tools">
           <button id="out-default">Use the project default</button>
@@ -342,7 +343,7 @@
     </div>
 
     <!-- ---------------------------------------------------------- render -->
-    <div class="pane scroll" id="pane-render" hidden>
+    <div class="pane" id="pane-render" hidden>
       <div class="pane-head">
         <div>
           <h2>Render</h2>
@@ -354,7 +355,7 @@
         </div>
       </div>
 
-      <div class="body">
+      <div class="body fill">
         <section class="card">
           <div class="progress"><div id="bar" class="bar"></div></div>
           <p id="progress-line" class="whisper left">Nothing has been rendered in this window yet.</p>
@@ -363,7 +364,7 @@
             <dt>Film</dt><dd id="r-out" class="mono wrap"></dd>
           </dl>
         </section>
-        <section class="card">
+        <section class="card grow">
           <!--
             In the film's order, always — not the order the workers happen to
             finish in. The pool renders several scenes at once (D-076) and a

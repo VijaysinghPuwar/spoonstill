@@ -91,8 +91,8 @@ html[data-theme="light"] {
   --w-scene: 58px;
   --w-still: 58px;
   --w-audio: 76px;
-  --w-resolved: 104px;
-  --w-arrange: 122px;
+  --w-resolved: 126px;
+  --w-arrange: 132px;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
 }
 
@@ -489,8 +489,9 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
   justify-content: center;
 }
 
-.stack { display: flex; flex-direction: column; align-items: center; gap: 11px; }
-.stack h2 { margin: 0 0 6px; font-size: 19px; font-weight: 600; }
+.stack { display: flex; flex-direction: column; align-items: center; gap: 11px; max-width: 100%; padding: 0 24px; }
+/* A project is named after its folder, and a folder can be named anything. */
+.stack h2 { margin: 0 0 6px; font-size: 19px; font-weight: 600; text-align: center; overflow-wrap: anywhere; }
 .hero-mark { width: 56px; height: 56px; margin-bottom: 14px; border-radius: 10px; }
 
 .whisper { margin: 6px 0 0; color: var(--ink-3); font-size: 12px; text-align: center; max-width: 46ch; }
@@ -529,6 +530,15 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 
 .body { padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; }
 .body.scroll { flex: 1; min-height: 0; overflow: auto; }
+
+/* One scroll region, not two. The render pane used to scroll as a whole *and*
+   cap its live list at 340px, so a long film had nested scrollbars and the
+   progress bar left the screen the moment you looked at a scene. Here the
+   progress card is pinned and the list takes the rest of the window — which is
+   also why it reads as a list of 500 scenes rather than eight of them. */
+.body.fill { flex: 1; min-height: 0; overflow: hidden; }
+.body.fill .card.grow { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.body.fill .card.grow .live { flex: 1; min-height: 0; max-height: none; }
 
 .cols {
   display: grid;
@@ -704,12 +714,26 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 
 .grid td.c-scene { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
 .grid td.c-when, .grid td.c-sev, .grid td.c-scope { white-space: nowrap; }
-.grid td.c-resolved { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.grid .frames { color: var(--ink-3); font-size: 11px; margin-left: 5px; }
+/* `4.000 declared` is the widest thing this column ever holds, and it used to
+   run straight out of its cell and under the arrange buttons — a fixed table
+   clips nothing on its own. Wide enough for that string, and clipped if a
+   future one is wider. */
+.grid td.c-resolved {
+  text-align: right;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.grid .frames { color: var(--ink-3); font-size: 10.5px; margin-left: 4px; }
 
 /* Reordering and removal (D-099). Quiet until the row is under the pointer:
    these move the operator's photographs about, and a control that shouts is a
    control that gets pressed by accident. */
+/* Its own gutter: this column is buttons, and a button needs less air on its
+   left than a column of text does. */
+.grid td.c-arrange, .grid th.c-arrange { padding-left: 6px; }
 .grid td.c-arrange { text-align: right; white-space: nowrap; }
 
 /* Present, not hidden. These used to sit at `opacity: 0` until the row was
@@ -719,6 +743,9 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
    discoverable, still quiet, still not shouting at the row you are reading
    (D-101, softening D-100). */
 .arrange { display: inline-flex; gap: 4px; opacity: 0.42; transition: opacity 90ms ease; }
+/* Reserved once, so arming Remove cannot make the row's controls jump — and so
+   the column's width is a constant the media queries can be checked against. */
+.arrange-button.wordy { min-width: 62px; }
 .grid tr:hover .arrange,
 .grid tr:focus-within .arrange { opacity: 1; }
 
@@ -726,7 +753,7 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
   font: inherit;
   font-size: 11px;
   line-height: 1;
-  padding: 4px 7px;
+  padding: 4px 6px;
   color: var(--ink-2);
   background: var(--panel);
   border: 1px solid var(--line);
@@ -767,7 +794,11 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
    narration does and disappears before the narration is unreadable: the words
    are the content of this screen and the filename is a label for them. */
 .file {
-  flex: 0 1 auto;
+  /* Never shrinks, only caps. Shrinking it left `a-really-…` in the column,
+     which is a filename that identifies nothing; a real one — `001.jpeg` — is
+     eight characters and always fits. Past the cap it ellipsizes, and below
+     1040px it goes entirely. */
+  flex: 0 0 auto;
   min-width: 0;
   max-width: 15ch;
   overflow: hidden;
@@ -890,12 +921,12 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 .voices li {
   display: grid;
   grid-template-columns:
-    minmax(108px, 1.15fr)   /* name */
-    var(--v-mark, 104px)    /* selected / project default */
-    minmax(96px, 1fr)       /* language */
-    56px                    /* gender */
-    minmax(0, 1.5fr)        /* note */
-    minmax(0, 1.15fr)       /* id */
+    minmax(110px, 200px)    /* name */
+    104px                   /* selected / project default */
+    minmax(100px, 190px)    /* language */
+    58px                    /* gender */
+    minmax(0, 1fr)          /* note — the slack lives here */
+    minmax(0, 200px)        /* id */
     auto;                   /* ▶ */
   align-items: center;
   gap: 12px;
@@ -912,6 +943,9 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 .voices li.on { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
 .voices li.is-default { box-shadow: inset 3px 0 0 var(--ink-3); }
 
+/* Only ever holds "✓ Selected" or "Project default", and only on one row —
+   but the track is always there, because a column that appears when a row is
+   picked would move every other row sideways. */
 .voices .v-mark {
   min-width: 0;
   overflow: hidden;
@@ -1017,47 +1051,56 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
    Nothing reflows into a mobile layout, because there is no mobile. */
 
 /* Wide enough for a laptop, not for a filename beside every line. */
+/* A hidden column is removed from the template, not set to zero width: a
+   zero-width track still carries the gap on either side of it, which is how a
+   list with three columns visible ended up with two inches of nothing in the
+   middle of every row. */
 @media (max-width: 1280px) {
-  :root { --w-resolved: 92px; }
+  :root { --w-resolved: 120px; }
   .voices .v-note { display: none; }
-  .voices li { grid-template-columns: minmax(108px, 1.15fr) var(--v-mark, 104px) minmax(96px, 1fr) 56px 0 minmax(0, 1.15fr) auto; }
+  .voices li { grid-template-columns: minmax(110px, 200px) 104px minmax(100px, 190px) 58px minmax(0, 1fr) auto; }
 }
 
 @media (max-width: 1180px) {
   .path { display: none; }
   :root { --rail: 168px; }
-  .file { max-width: 11ch; }
+}
+
+@media (max-width: 1040px) {
+  .file { display: none; }
 }
 
 /* The point where the arrange buttons stop spelling "Remove". The word is the
    button's tooltip and its accessible name either way — see `drawArrange`. */
 @media (max-width: 1080px) {
-  :root { --w-arrange: 92px; --w-still: 52px; --w-scene: 52px; }
+  :root { --w-arrange: 92px; --w-still: 52px; --w-scene: 56px; }
   .grid td, .grid th { padding-left: 8px; padding-right: 8px; }
-  .arrange-button.wordy { font-size: 0; padding: 4px 7px; }
+  .grid th:first-child, .grid td:first-child { padding-left: 11px; }
+  .grid th:last-child,  .grid td:last-child  { padding-right: 11px; }
+  .grid thead th { font-size: 10px; letter-spacing: 0.03em; }
+  /* The reservation above is for the word; the glyph does not need it. */
+  .arrange-button.wordy { min-width: 0; font-size: 0; padding: 4px 7px; }
   .arrange-button.wordy::after { content: "✕"; font-size: 11px; }
   .arrange-button.wordy.armed::after { content: "✕?"; }
   .voices .v-id { display: none; }
-  .voices li { grid-template-columns: minmax(108px, 1.15fr) var(--v-mark, 104px) minmax(96px, 1fr) 56px 0 0 auto; }
+  .voices li { grid-template-columns: minmax(110px, 200px) 104px minmax(0, 1fr) 58px auto; }
 }
 
 /* At the floor the filename goes and the narration takes what it leaves. */
 @media (max-width: 980px) {
-  :root { --w-audio: 68px; --w-resolved: 84px; }
-  .file { display: none; }
+  :root { --w-audio: 68px; --w-resolved: 112px; }
   .search { flex: 1 1 140px; }
-  .voices .v-mark { --v-mark: 86px; }
-  .voices li { grid-template-columns: minmax(96px, 1.15fr) 86px minmax(88px, 1fr) 52px 0 0 auto; }
+  .voices li { grid-template-columns: minmax(100px, 180px) 92px minmax(0, 1fr) 52px auto; gap: 10px; }
 }
 
 /* Below the window's own minimum. Reachable only on a scaled display or a
    webview under test, and it should still be usable rather than clipped. */
 @media (max-width: 820px) {
-  :root { --rail: 148px; --w-still: 0px; --w-resolved: 76px; }
+  :root { --rail: 148px; --w-still: 0px; --w-resolved: 112px; }
   .c-still { display: none; }
   .grid thead th.c-still { display: none; }
-  .voices li { grid-template-columns: minmax(90px, 1.2fr) 0 minmax(80px, 1fr) 0 0 0 auto; }
   .voices .v-mark, .voices .v-gender { display: none; }
+  .voices li { grid-template-columns: minmax(94px, 180px) minmax(0, 1fr) auto; }
 }
 
 /* Short windows: the two lists that set their own height give it back. */
@@ -1067,5 +1110,17 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 }
 
 
+/* A card's controls, on one line until there is no line left. The class was
+   in the markup and in nothing else, so these were inline-block elements in
+   normal flow: no gap, no alignment, and a select capped at 260px sitting in a
+   400px card with its own voice name cut in half. */
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 /* A voice picker wide enough to read a language name in. */
-.wide-select { flex: 1; min-width: 0; }
+.wide-select { flex: 1 1 220px; min-width: 0; max-width: none; }

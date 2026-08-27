@@ -1637,6 +1637,73 @@ scene's position **in the film**, not its row in a filtered view — "move up"
 while a filter hides the scene above would otherwise move it somewhere the
 operator cannot see.
 
+### D-101 — Every column is on screen at every window size · Accepted
+
+Decided 2026-08-27, from the author's own screenshots: the scenes grid ran off
+the right edge of the window, narration was cut mid-word with no ellipsis, and
+*"you can not see the remove and all of the button at very end so the new user
+will find difficulty in navigating around it"*. Reproduced in a browser
+harness at the shipped default of 1180x820 — the table was 1458px wide inside a
+1318px pane, which put Audio, Resolved and the entire arrange column outside the
+window.
+
+**The cause was `table-layout: auto`.** The browser sizes an auto table's
+columns from their content, and one line of narration is content three thousand
+pixels wide. The table grew, `.grid-wrap` scrolled sideways to accommodate it,
+and everything past the narration left the screen. Nothing was broken in a way a
+test could see: the DOM was complete, the data was right, the columns simply
+were not where the operator was looking. `table-layout: fixed` makes the
+declared widths the whole truth, and the sum is always the window.
+
+The consequence to keep in mind when touching that grid: **a fixed table clips
+nothing on its own.** Every cell now either ellipsizes or wraps, and one that
+does neither will silently run under its neighbour — which is exactly how
+`4.000 declared` ended up printed across the arrange buttons before the column
+was measured against its own widest string.
+
+What follows from "one screen", in the order things are given up as the window
+narrows — and nothing in that order is a control:
+
+| below | what goes |
+|---|---|
+| 1280px | the voice list's freeform note |
+| 1180px | the path in the title bar |
+| 1080px | the voice id; Remove becomes ✕, keeping the word as its tooltip and its accessible name |
+| 1040px | the still's filename beside each line |
+| 980px | tighter audio and resolved columns |
+| 820px | the thumbnail; the voice list's gender and selection mark |
+
+The floor is the window's own: `tauri.conf.json` says 900x600, and the
+stylesheet said 1100x700 — a whole band of legal sizes nobody had looked at.
+Verified with a layout audit (nothing clipped without an ellipsis, nothing past
+the viewport, no unintended sideways scroller) across every screen at nine sizes
+from 760x560 to 2560x1400, in both themes.
+
+**Three things this changed that are not about width.**
+
+The arrange controls were `opacity: 0` until the row was hovered (D-100). That
+is why the author could not find them: you cannot hover a control you do not
+know exists. They sit at 0.42 at rest and full ink under the pointer — still
+quiet, now discoverable. D-100's reasoning was about not shouting, and this
+keeps that; it was the invisibility that was wrong.
+
+Narration is edited in a **textarea that grows to fit**, not a one-line input.
+The grid shows one elided line because it is a review grid at 500 rows (D-051) —
+but the moment the operator opens a line to read or change it, showing them two
+thirds of their own sentence is the same defect as clipping it, and D-095 exists
+precisely because a scene can hold an hour of narration.
+
+The render pane had **two scroll regions**: the pane scrolled and the live list
+capped itself at 340px inside it. The progress bar left the screen the moment
+you looked at a scene, and the list showed eight rows of a five-hundred-scene
+film. The card now fills the window and scrolls once.
+
+Two smaller repairs found while measuring. `.row-actions` was a class in the
+markup and in nothing else, so Settings' controls were inline-block elements in
+normal flow with a select capped at 260px cutting its own voice name in half.
+And a path is never trimmed (D-089), but a *heading* built from a folder name
+now wraps rather than running off the centred screen.
+
 ---
 
 ## Reference repositories

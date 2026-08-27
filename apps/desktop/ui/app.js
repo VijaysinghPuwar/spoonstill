@@ -520,7 +520,12 @@ function editNarration(scene, cell) {
   // in this window where scrolling text is the right answer.
   const fit = () => {
     input.style.height = "auto";
-    input.style.height = Math.min(input.scrollHeight, Math.round(innerHeight * 0.4)) + "px";
+    // `box-sizing: border-box` is set for everything in this window, so the
+    // height has to carry the border that `scrollHeight` does not — without it
+    // every line is two pixels short and the last one is shaved.
+    const border = input.offsetHeight - input.clientHeight;
+    const cap = Math.round(innerHeight * 0.4);
+    input.style.height = Math.min(input.scrollHeight + border, cap) + "px";
   };
   input.addEventListener("input", fit);
   fit();
@@ -670,7 +675,7 @@ function drawStatus() {
   if (errors > 0) {
     const loud = document.createElement("span");
     loud.className = "attention";
-    loud.textContent = `   ${errors} need attention`;
+    loud.textContent = `   ${errors} ${errors === 1 ? "needs" : "need"} attention`;
     el("counts").appendChild(loud);
   }
   setStatus(project.root);
@@ -978,7 +983,7 @@ function renderBlocker() {
   if (!project) return "Open a project first.";
   if (project.has_errors) {
     const n = attention();
-    return `${n} scene${n === 1 ? "" : "s"} need attention — see the list on Scenes.`;
+    return `${n} scene${n === 1 ? " needs" : "s need"} attention — see the list on Scenes.`;
   }
   if (outError) return outError;
   return "";

@@ -1791,10 +1791,16 @@ aiohttp.client_exceptions.ClientProxyConnectionError: Cannot connect to host 127
     #[test]
     fn the_limit_refuses_only_what_could_never_fit() {
         const SLOWEST_SEEN: f64 = 11.9;
-        assert!(
-            SPEECH_CHARS_PER_SECOND > SLOWEST_SEEN,
-            "the limit must come from the fastest rate, or it refuses lines that would have fitted"
-        );
+        // A const block, so the invariant is checked when this crate compiles
+        // rather than when the test runs — both sides are constants, and
+        // clippy is right that an ordinary `assert!` on two of them is a
+        // runtime check of something already known.
+        const {
+            assert!(
+                SPEECH_CHARS_PER_SECOND > SLOWEST_SEEN,
+                "the limit must come from the fastest rate, or it refuses lines that would have fitted"
+            )
+        };
 
         // A line just under the limit is refusable downstream if it happens to
         // be slow prose — and that is correct, because the duration that

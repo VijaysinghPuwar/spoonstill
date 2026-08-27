@@ -319,6 +319,26 @@ Windows; and **the whole scene moves together**, or a still is silently unpaired
 from its narration and renders with the wrong voice. `still remove` takes
 several ids highest-first, since removing 002 renumbers everything after it.
 
+**Every column is on screen at every size** (D-101). The scenes grid was a
+`table-layout: auto` table, so the browser sized its columns from their content
+— and one line of narration is content 3 000px wide. At the shipped default of
+1180x820 the table was 1458px inside a 1318px pane: narration was cut mid-word,
+and Audio, Resolved and **the whole arrange column** were outside the window,
+which is how an operator concluded there was no way to remove a scene. It is
+`table-layout: fixed` now, every fixed width is a token on `:root`, and the
+narration column takes the slack. The rule that follows: **a fixed table clips
+nothing on its own** — every cell either ellipsizes or wraps, or it runs
+silently under its neighbour. Six breakpoints from 1280 down to 820 give up
+*content* (a note, a filename, a thumbnail) and never a control; below 1080 the
+Remove button becomes ✕ and keeps the word as its tooltip and accessible name.
+The floor is the window's own 900x600, not the 1100x700 the stylesheet used to
+claim. Three things changed that are not about width: the arrange controls are
+visible at rest rather than `opacity: 0` (you cannot hover what you do not know
+is there), narration is edited in a **textarea that grows to fit**, and the
+render pane has one scroll region instead of two. Verified with a layout audit
+across every screen at nine sizes from 760x560 to 2560x1400 in both themes, and
+in the real WKWebView window.
+
 **A release asset is named for the person downloading it** (D-098), and
 **Gatekeeper's brightest button deletes your download** (D-099). Assets are
 `spoonstill-macOS.dmg`, `still-macOS-AppleSilicon.tar.gz` and so on — the
@@ -479,7 +499,8 @@ anything. D-087 was added after M2: read it before touching a workflow, an
 installer or `README.md`, and D-089 before touching a path or a disabled
 control, D-090 before touching a hostile-name fixture, and D-091 before
 touching the live panel or the voice list, D-092 before touching Settings or a
-provider's tooling, and D-093 before touching a log sink, and **D-094 before touching the Edge
+provider's tooling, **D-101 before touching the scenes grid, a breakpoint, or
+anything that can be long enough to clip**, and D-093 before touching a log sink, and **D-094 before touching the Edge
 provider, a retry, or the pre-flight check in `film.rs`, and D-095 before
 touching how a long line is split or joined, and D-096 before giving a probe a
 constant timeout, and D-097 before touching a release workflow's toolchain
