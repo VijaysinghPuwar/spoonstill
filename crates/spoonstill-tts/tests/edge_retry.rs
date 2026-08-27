@@ -93,6 +93,16 @@ fn brisk() -> Retry {
     }
 }
 
+/// A narration long enough to become roughly `parts` requests, built out of
+/// whole sentences so the splitter cuts where it is supposed to.
+fn long_line(parts: usize) -> String {
+    const SENTENCE: &str = "The harbour was empty by the time we arrived. ";
+    // A little under `parts` whole chunks, so the last part is a real piece of
+    // narration rather than a stray fragment.
+    let target = spoonstill_tts::edge::CHUNK_CHARS * parts - SENTENCE.len() * 4;
+    SENTENCE.repeat(target / SENTENCE.len() + 1)
+}
+
 fn say(edge: &Edge, destination: &Path) -> Result<u64, TtsError> {
     edge.speak(
         &Request {
@@ -194,6 +204,148 @@ fn a_permanent_failure_costs_one_attempt_and_not_three() {
         "it explains itself: {error}"
     );
     assert_eq!(runs(&directory, "refuses"), 1, "asked once, told once");
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Long form, offline: a line too big for one request becomes several, and
+/// what lands on disk is all of them, in order.
+///
+/// The fake writes its own run number into the file, so the joined result
+/// spells out the order the parts were spoken in — a join that silently
+/// reversed or dropped a part would still be an MP3 of about the right size.
+#[test]
+fn a_long_line_becomes_several_requests_joined_in_order() {
+    let directory = scratch("chunked");
+    let script = directory.join("numbering");
+    let counter = directory.join("numbering.runs");
+    std::fs::write(
+        &script,
+        format!(
+            r#"#!/bin/sh
+printf 'x' >> "{counter}"
+runs=$(wc -c < "{counter}" | tr -d ' ')
+media=""
+while [ $# -gt 0 ]; do
+  case "$1" in --write-media) media="$2"; shift 2 ;; *) shift ;; esac
+done
+# An mp3 frame sync, then this run's number, so order is visible.
+printf '\377\363' > "$media"
+printf '%s' "$runs" >> "$media"
+exit 0
+"#,
+            counter = counter.display()
+        ),
+    )
+    .expect("write");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    // Four sentences, and a limit that fits about one of them.
+    // Long enough to cross the provider's real chunk limit a few times. The
+    // limit is not a test knob: a test that lowered it would be testing a
+    // number that never runs.
+    let line = long_line(3);
+    let line = line.as_str();
+    let destination = directory.join("line.mp3");
+    let spoken = Edge::at(&script)
+        .with_retry(brisk())
+        .speak(
+            &Request {
+                text: line,
+                voice: "en-US-AvaNeural",
+                settings: &[],
+            },
+            &destination,
+        )
+        .expect("a long line still produces one file");
+
+    let joined = std::fs::read(&destination).expect("the artifact");
+    let numbers: String = String::from_utf8_lossy(&joined)
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect();
+    assert!(
+        numbers.len() >= 2,
+        "a line this long is more than one request: {numbers:?}"
+    );
+    assert_eq!(
+        numbers,
+        (1..=numbers.len())
+            .map(|n| n.to_string())
+            .collect::<String>(),
+        "the parts are joined in the order they were spoken"
+    );
+    assert_eq!(spoken.bytes, joined.len() as u64, "the count is the file");
+    assert!(spoken.how.contains("more parts"), "{}", spoken.how);
+
+    let left: Vec<_> = std::fs::read_dir(&directory)
+        .expect("readable")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains("part") || n.contains("partial"))
+        .collect();
+    assert!(left.is_empty(), "every part temporary is gone: {left:?}");
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// One part failing must not leave the other parts on disk, and must say which
+/// part it was — "no audio for 'Alpha bravo…'" is unhelpful when the line was
+/// eleven requests.
+#[test]
+fn a_part_that_fails_takes_the_whole_line_with_it_and_says_which_part() {
+    let directory = scratch("chunk-fails");
+    let script = directory.join("second-fails");
+    let counter = directory.join("second-fails.runs");
+    std::fs::write(
+        &script,
+        format!(
+            r#"#!/bin/sh
+printf 'x' >> "{counter}"
+runs=$(wc -c < "{counter}" | tr -d ' ')
+media=""
+while [ $# -gt 0 ]; do
+  case "$1" in --write-media) media="$2"; shift 2 ;; *) shift ;; esac
+done
+if [ "$runs" -ge 2 ]; then
+  printf 'ValueError: Invalid voice %s
+' "nope" >&2
+  exit 1
+fi
+printf '\377\363\144\304' > "$media"
+exit 0
+"#,
+            counter = counter.display()
+        ),
+    )
+    .expect("write");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let line = long_line(3);
+    let line = line.as_str();
+    let destination = directory.join("line.mp3");
+    let error = Edge::at(&script)
+        .with_retry(brisk())
+        .speak(
+            &Request {
+                text: line,
+                voice: "en-US-AvaNeural",
+                settings: &[],
+            },
+            &destination,
+        )
+        .expect_err("the second part refuses");
+
+    assert!(matches!(error, TtsError::BadRequest { .. }), "{error}");
+    assert!(!destination.exists(), "no partial narration is left behind");
+    let left: Vec<_> = std::fs::read_dir(&directory)
+        .expect("readable")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains("part") || n.contains("partial"))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "including the part that did work: {left:?}"
+    );
     let _ = std::fs::remove_dir_all(&directory);
 }
 

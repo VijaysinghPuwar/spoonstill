@@ -224,6 +224,72 @@ fn a_line_with_nothing_speakable_in_it_is_not_retried() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// Long form against the real service (D-095): a narration too big for one
+/// request comes back as one file of the right length.
+///
+/// The measurement this defends: 20 000 characters is a single 128-second
+/// request producing 19 minutes of audio, and any failure in it throws away
+/// all 128 seconds. Split, the same narration is a few requests that each
+/// stand or fall on their own — and the joined result has to be
+/// indistinguishable from the unsplit one to everything downstream, which
+/// means ffprobe has to read it as one continuous track of the expected
+/// length.
+#[test]
+#[ignore = "talks to Microsoft for a couple of minutes; run with `make tts-live`"]
+fn a_narration_longer_than_one_request_comes_back_as_one_file() {
+    let Some(edge) = installed() else { return };
+    let directory = scratch("long-form");
+    let destination = directory.join("narration.mp3");
+
+    // Three requests' worth: past the limit, and short enough to wait for.
+    const SENTENCE: &str = "The harbour was empty by the time we arrived. ";
+    let target = spoonstill_tts::edge::CHUNK_CHARS * 3 - SENTENCE.len() * 4;
+    let narration = SENTENCE.repeat(target / SENTENCE.len() + 1);
+    let characters = narration.chars().count();
+
+    let spoken = edge
+        .speak(
+            &Request {
+                text: &narration,
+                voice: DEFAULT_VOICE,
+                settings: &[],
+            },
+            &destination,
+        )
+        .expect("a long narration");
+
+    assert!(spoken.how.contains("more parts"), "{}", spoken.how);
+    assert!(
+        !spoken.how.contains("harbour"),
+        "the script still never reaches the log (D-016): {}",
+        spoken.how
+    );
+
+    let probed = spoonstill_media::probe::probe(
+        &spoonstill_media::Tools::from_env(),
+        &destination,
+        Duration::from_secs(60),
+    )
+    .expect("ffprobe reads the joined file as one track");
+    let seconds = probed.audio_duration().expect("an audio stream");
+
+    // 17.3 characters per second of speech, measured 2026-08-26. A join that
+    // dropped or duplicated a part would miss this by a whole part.
+    let expected = characters as f64 / 17.3;
+    assert!(
+        (seconds - expected).abs() < expected * 0.15,
+        "{characters} characters should be about {expected:.0}s of speech, not {seconds:.0}s \
+         — a part is missing or repeated"
+    );
+
+    assert_eq!(
+        leftovers(&directory),
+        vec!["narration.mp3".to_owned()],
+        "every part temporary is gone"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 /// Eight lines at once, which is what the audio pool of D-044 does. The point
 /// is not speed: it is that nothing collides — no shared temporary, no
 /// half-file, and eight distinct results.

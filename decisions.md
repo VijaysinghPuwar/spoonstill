@@ -1337,6 +1337,81 @@ length differing in 5 916 bytes. Nothing downstream depends on it, since
 duration is measured and not assumed (D-021), but it is why D-084's raw speech
 cache is load-bearing rather than an optimization.
 
+### D-095 — Long form is split into requests, and a line too long for a scene is refused · Accepted
+
+Decided 2026-08-26, after measuring what this provider actually does with
+long-form narration. Three numbers, all from this machine against
+`edge-tts 7.2.8`:
+
+| text | one request takes | audio produced |
+|---|---|---|
+| 5 980 chars | 37.6 s | ~5.8 min |
+| 20 000 chars | 128.3 s | 19.2 min |
+| 62 000 chars | **245 s** | 59.6 min — a full scene |
+
+**One request works and is still the wrong shape.** A 62 000-character
+narration is a four-minute all-or-nothing bet against a reverse-engineered
+endpoint: a dropped socket at 3:59 throws away all of it, and the retry of
+D-094 then throws away four more minutes. So a line is **split at 9 000
+characters** — roughly 520 s of speech and about a minute of generation, a unit
+of work worth retrying on its own.
+
+Nine thousand is not ours. The author's own `setuptts` speaks to this same
+service in production and settled on 9 200–10 500 after real use; this is the
+conservative end of that range. The rest of that program's design was read and
+deliberately *not* copied: it splits because it drives the Python library
+directly and must respect a websocket payload limit, while we drive the CLI,
+which does its own payload splitting and knows the real ceiling better than we
+do. **Our limit exists to bound what one failure costs, not to satisfy a
+protocol.**
+
+- **The seam goes where a reader would pause** — paragraph, then sentence, then
+  word, and a hard cut only for a single word longer than a chunk. Each piece
+  is a separate request, so the seam between two pieces is audible.
+- **Then the pieces are packed.** Cutting at every sentence is correct and
+  useless: an hour of narration is fourteen hundred sentences, and fourteen
+  hundred requests is worse than the one request this exists to avoid.
+- **The join is byte concatenation**, because MPEG audio is a stream of
+  self-describing frames with no container to fix up. No FFmpeg process, no
+  transcode. Each piece after the first contributes its encoder's info frame,
+  about 26 ms of silence at each seam — a breath, and cheaper than re-encoding
+  an hour of speech to remove it. Nothing downstream is misled, because the
+  duration that reaches the renderer is measured on the normalized artifact and
+  never added up from parts (D-021).
+- **Sequentially, not in parallel.** The audio pool already runs several scenes
+  at once (D-044); speaking one line's pieces concurrently would multiply the
+  request rate against a service that rate-limits, to save time the pool is
+  already saving.
+
+**It is also faster.** Measured: 27 000 characters split into three requests
+took 66 s — 2.4 ms/char against 6.4 ms/char unsplit, a 2.6× speed-up. That was
+not the goal and it is not the reason; it is why there is no trade-off to weigh.
+
+**A line no scene could hold is refused before the first request.** At 17.3
+characters per second of speech (measured), a scene's hour is about 62 000
+characters. Today a 100 000-character script is spoken for eleven minutes,
+normalized by two FFmpeg passes, and *then* refused for its measured duration
+of 1.6 hours. The limit is derived from `MAX_SCENE_SECONDS` rather than typed in
+beside it, and it is deliberately generous — a line slowed with `--rate -50%`
+can still pass here and be caught downstream on what it actually measures. This
+is for the line nobody could have meant.
+
+**One correction to D-094, from the same source.** `NoAudioReceived` was
+classified as always permanent. `setuptts` retries it at full size once before
+re-splitting, which is production evidence that the service also returns it when
+a payload does not suit it. So it is permanent for a line of **200 characters or
+fewer** — a caption an operator can read at a glance, where "there are no words
+in this" is verifiable — and transient above that. A row of punctuation is still
+attempted exactly once.
+
+Tested three ways: the splitter's contract (no piece over the limit, no word
+lost or invented, cuts at sentence ends) as pure unit tests; the join and the
+"one part fails, nothing is left behind" path offline through a fake `edge-tts`
+in `edge_retry.rs`; and a real three-request narration against the live service
+in `edge_live.rs`, where `ffprobe` has to read the joined file as one continuous
+track of the expected length — a join that dropped or repeated a part misses
+that by a whole part.
+
 ---
 
 ## Reference repositories

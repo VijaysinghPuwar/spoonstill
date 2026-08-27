@@ -163,6 +163,211 @@ fn speak_timeout(characters: usize) -> Duration {
     SPEAK_BASE.saturating_add(scaled).min(SPEAK_CEILING)
 }
 
+/// The largest slice of a line this provider sends in one request (D-095).
+///
+/// Long-form is where a single request stops being a good bet. Measured here:
+/// 20 000 characters is one 128-second call producing 19 minutes of audio, and
+/// **any failure anywhere in it throws away all 128 seconds**. At the scene cap
+/// — an hour of narration, about 62 000 characters — that is a seven-minute
+/// all-or-nothing request over a reverse-engineered endpoint.
+///
+/// Nine thousand characters is roughly 520 s of speech and 58 s of generation:
+/// a unit of work worth retrying on its own. The number comes from the
+/// author's own `setuptts`, which speaks to this same service in production
+/// and settled on 9 200–10 500 after real use; the conservative end of that
+/// range is the one to copy.
+///
+/// This is **not** a protocol limit. `edge-tts` splits its own websocket
+/// payloads and knows the real byte ceiling far better than we do. This limit
+/// exists to bound what one failure costs.
+pub const CHUNK_CHARS: usize = 9_000;
+
+/// A line at or under this length that comes back with no audio has nothing
+/// speakable in it, and saying it again will not change that. Above it, the
+/// same answer from the service is more likely to be about the payload.
+///
+/// Two hundred characters is a caption an operator can read at a glance — the
+/// scale at which "there are no words in this" is a thing a human can verify.
+const EXAMINABLE_CHARS: usize = 200;
+
+/// Characters of text per second of speech, at `--rate +0%`.
+///
+/// Measured on this machine, 2026-08-26: 20 000 characters produced 1 153.2 s
+/// of audio — 17.3 characters per second.
+const SPEECH_CHARS_PER_SECOND: f64 = 17.3;
+
+/// The longest line that could fit in one scene.
+///
+/// A scene holds at most [`MAX_SCENE_SECONDS`] of narration (D-021), and
+/// exceeding it is checked on the *measured* artifact — which today means a
+/// 100 000-character script is spoken for eleven minutes, normalized by two
+/// FFmpeg passes, and only then refused for being 1.6 hours long. Refusing it
+/// before the first request costs nothing and saves all of that.
+///
+/// Deliberately generous: it is derived from the normal speaking rate, so a
+/// line slowed with `--rate -50%` can still pass here and be caught downstream
+/// on its measured duration. This limit is for the line nobody could have
+/// meant, not for the borderline one.
+fn max_line_chars() -> usize {
+    (spoonstill_core::project::MAX_SCENE_SECONDS * SPEECH_CHARS_PER_SECOND) as usize
+}
+
+/// Split a line into pieces no longer than `limit`, at the most natural
+/// boundary available.
+///
+/// Paragraph, then sentence, then word, then — only if a single word is longer
+/// than the limit — a hard cut. The order matters for how the result *sounds*:
+/// each piece is a separate request and the seam between two pieces is a seam
+/// in the speech, so it belongs where a reader would have paused anyway.
+///
+/// Then the pieces are **packed**: consecutive units are merged while they
+/// still fit. Cutting at every sentence would be correct and useless — an hour
+/// of narration is fourteen hundred sentences, and fourteen hundred requests
+/// is far worse than the one request this exists to avoid. The unit of work
+/// wants to be as large as it can be while staying worth retrying.
+///
+/// Returns the whole line as one piece when it already fits, which is the case
+/// for every line in a normal project.
+fn split_line(text: &str, limit: usize) -> Vec<&str> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Vec::new();
+    }
+    if text.chars().count() <= limit {
+        return vec![text];
+    }
+
+    // Atomic units, in order, as byte ranges into `text`. Ranges rather than
+    // slices so that packing two of them keeps whatever separated them —
+    // rejoining with a space of our own would edit the operator's line.
+    let mut units: Vec<(usize, usize)> = Vec::new();
+    for (from, to) in paragraphs(text) {
+        if text[from..to].chars().count() <= limit {
+            units.push((from, to));
+            continue;
+        }
+        for (from, to) in sentences(text, from, to) {
+            if text[from..to].chars().count() <= limit {
+                units.push((from, to));
+            } else {
+                units.extend(words(text, from, to, limit));
+            }
+        }
+    }
+
+    let mut out: Vec<&str> = Vec::new();
+    let mut current: Option<(usize, usize)> = None;
+    for (from, to) in units {
+        current = match current {
+            Some((start, end)) => {
+                if text[start..to].chars().count() <= limit {
+                    Some((start, to))
+                } else {
+                    out.push(text[start..end].trim());
+                    Some((from, to))
+                }
+            }
+            None => Some((from, to)),
+        };
+    }
+    if let Some((start, end)) = current {
+        out.push(text[start..end].trim());
+    }
+    out.retain(|piece| !piece.is_empty());
+    out
+}
+
+/// Byte ranges of the paragraphs in `text`, split on a blank line.
+fn paragraphs(text: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let bytes = text.as_bytes();
+    let mut at = 0;
+    while at + 1 < bytes.len() {
+        if bytes[at] == b'\n' && bytes[at + 1] == b'\n' {
+            let mut end = at + 2;
+            while end < bytes.len() && bytes[end] == b'\n' {
+                end += 1;
+            }
+            if at > start {
+                out.push((start, at));
+            }
+            start = end;
+            at = end;
+        } else {
+            at += 1;
+        }
+    }
+    if start < text.len() {
+        out.push((start, text.len()));
+    }
+    out
+}
+
+/// Byte ranges of the sentences in `text[from..to]`.
+///
+/// Cut after `.`, `!`, `?`, `…` or a full-width stop when whitespace follows,
+/// keeping the punctuation — and any closing quote or bracket — with the
+/// sentence it ends.
+fn sentences(text: &str, from: usize, to: usize) -> Vec<(usize, usize)> {
+    let slice = &text[from..to];
+    let mut out = Vec::new();
+    let mut start = from;
+    let chars: Vec<(usize, char)> = slice.char_indices().collect();
+
+    for (position, (_, ch)) in chars.iter().enumerate() {
+        if !matches!(ch, '.' | '!' | '?' | '…' | '。' | '！' | '？') {
+            continue;
+        }
+        // Run past a cluster like "?!" or `."` so it stays with its sentence.
+        let after = chars[position + 1..].iter().find(|(_, next)| {
+            !matches!(next, '.' | '!' | '?' | '…' | '"' | '\'' | '”' | '’' | ')')
+        });
+        if let Some((at, next)) = after
+            && next.is_whitespace()
+        {
+            let cut = from + at;
+            if cut > start {
+                out.push((start, cut));
+            }
+            start = cut;
+        }
+    }
+    if start < to {
+        out.push((start, to));
+    }
+    out
+}
+
+/// Last resort: byte ranges that fill to `limit` on word boundaries, cutting a
+/// word only when one word is longer than a whole chunk.
+fn words(text: &str, from: usize, to: usize, limit: usize) -> Vec<(usize, usize)> {
+    let slice = &text[from..to];
+    let mut out = Vec::new();
+    let mut start = from;
+    let mut count = 0;
+    let mut last_space: Option<usize> = None;
+
+    for (offset, ch) in slice.char_indices() {
+        let at = from + offset;
+        if count == limit {
+            let cut = last_space.filter(|space| *space > start).unwrap_or(at);
+            out.push((start, cut));
+            start = cut;
+            count = text[start..at].chars().count();
+            last_space = None;
+        }
+        if ch.is_whitespace() {
+            last_space = Some(at);
+        }
+        count += 1;
+    }
+    if start < to {
+        out.push((start, to));
+    }
+    out
+}
+
 /// Listing voices talks to the same service and returns 300-odd rows.
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -366,16 +571,32 @@ fn interpret(error: spoonstill_media::MediaError, voice: &str, text: &str) -> Fa
                         ),
                     })
                 }
+                // `NoAudioReceived` means two different things depending on
+                // how much was asked for, and the author's own `setuptts`
+                // learned the difference in production: it retries no-audio at
+                // full size once and then re-splits smaller.
+                //
+                // On a line short enough to read at a glance, it is the truth
+                // — there is nothing in it to say. On a long one it is also
+                // what the service does when a payload does not suit it, and a
+                // second request can succeed where the first did not.
                 Fault::Permanent if said.contains("NoAudioReceived") => {
-                    Failure::Permanent(TtsError::NoAudio {
-                        provider: ID.to_owned(),
-                        text: opening(text),
-                        detail: format!(
-                            "the service accepted the request for {voice} and returned no \
-                             audio. A line with no speakable words in it — only punctuation, \
-                             digits or symbols — does this."
-                        ),
-                    })
+                    if text.chars().count() <= EXAMINABLE_CHARS {
+                        Failure::Permanent(TtsError::NoAudio {
+                            provider: ID.to_owned(),
+                            text: opening(text),
+                            detail: format!(
+                                "the service accepted the request for {voice} and returned no \
+                                 audio. A line with no speakable words in it — only punctuation, \
+                                 digits or symbols — does this."
+                            ),
+                        })
+                    } else {
+                        Failure::Transient(format!(
+                            "the service returned no audio for {} characters",
+                            text.chars().count()
+                        ))
+                    }
                 }
                 Fault::Permanent => Failure::Permanent(TtsError::NoAudio {
                     provider: ID.to_owned(),
@@ -525,6 +746,46 @@ impl Edge {
         }
 
         Ok(Spoken { bytes, how })
+    }
+
+    /// One piece of a line: write it, say it, retry it if the service faltered.
+    fn say_one(
+        &self,
+        voice: &str,
+        text: &str,
+        knobs: &Knobs,
+        destination: &Path,
+        audio: &Path,
+    ) -> Result<Spoken, TtsError> {
+        let script = atomic::partial_path(&destination.with_extension("txt"));
+        write_script(&script, text)?;
+
+        // Retries reuse the script — the words have not changed, and rewriting
+        // them would be the one part of this loop that can fail for a reason
+        // that has nothing to do with the service.
+        let outcome = persevere(
+            self.retry,
+            |_attempt| self.attempt_speak(voice, text, knobs, &script, audio),
+            std::thread::sleep,
+        );
+
+        // The script is the operator's words on our disk. It goes away whether
+        // the run worked or not, and before the error is even shaped.
+        let _ = std::fs::remove_file(&script);
+
+        match outcome {
+            Ok(spoken) => Ok(spoken),
+            Err((_, Failure::Permanent(error))) => Err(error),
+            Err((attempts, Failure::Transient(reason))) => Err(TtsError::NoAudio {
+                provider: ID.to_owned(),
+                text: opening(text),
+                detail: format!(
+                    "the voice service failed {attempts} time{} in a row. \
+                     The last attempt said: {reason}",
+                    if attempts == 1 { "" } else { "s" }
+                ),
+            }),
+        }
     }
 }
 
@@ -695,6 +956,24 @@ impl Provider for Edge {
             request.voice
         };
 
+        // A line no scene could hold is refused before the first request
+        // rather than after the last one (D-095). Speaking it would take
+        // minutes, normalizing it two FFmpeg passes, and the measured duration
+        // would refuse it anyway.
+        let characters = request.text.chars().count();
+        let limit = max_line_chars();
+        if characters > limit {
+            return Err(TtsError::BadRequest {
+                provider: ID.to_owned(),
+                detail: format!(
+                    "this line is {characters} characters — about {:.0} minutes of speech, \
+                     and one scene holds at most {:.0} (D-021). Split it across scenes.",
+                    characters as f64 / SPEECH_CHARS_PER_SECOND / 60.0,
+                    spoonstill_core::project::MAX_SCENE_SECONDS / 60.0,
+                ),
+            });
+        }
+
         // Every knob is validated before anything is spawned or written: a
         // typo in `project.yaml` should not cost a process, a temporary file
         // and a network round trip to discover, five hundred times.
@@ -704,44 +983,119 @@ impl Provider for Edge {
             pitch: hertz(request.setting("pitch"))?,
         };
 
-        // Both temporaries live beside the destination: a rename within one
+        // One piece for every normal line; several for long-form, so that one
+        // dropped connection costs a minute rather than the whole narration.
+        let pieces = split_line(request.text, CHUNK_CHARS);
+        if pieces.is_empty() {
+            return Err(TtsError::BadRequest {
+                provider: ID.to_owned(),
+                detail: "the line is empty".to_owned(),
+            });
+        }
+
+        // The temporary lives beside the destination: a rename within one
         // filesystem is atomic, one across two is a copy (D-042).
-        let script = atomic::partial_path(&destination.with_extension("txt"));
         let audio = atomic::partial_path(destination);
-        write_script(&script, request.text)?;
-
-        // Retries reuse the script — the words have not changed, and rewriting
-        // them would be the one part of this loop that can fail for a reason
-        // that has nothing to do with the service.
-        let outcome = persevere(
-            self.retry,
-            |_attempt| self.attempt_speak(voice, request.text, &knobs, &script, &audio),
-            std::thread::sleep,
-        );
-
-        // The script is the operator's words on our disk. It goes away whether
-        // the run worked or not, and before the error is even shaped.
-        let _ = std::fs::remove_file(&script);
-
-        let spoken = match outcome {
-            Ok(spoken) => spoken,
-            Err((_, Failure::Permanent(error))) => return Err(error),
-            Err((attempts, Failure::Transient(reason))) => {
-                return Err(TtsError::NoAudio {
-                    provider: ID.to_owned(),
-                    text: opening(request.text),
-                    detail: format!(
-                        "the voice service failed {attempts} time{} in a row. \
-                         The last attempt said: {reason}",
-                        if attempts == 1 { "" } else { "s" }
-                    ),
-                });
-            }
+        let mut parts: Vec<PathBuf> = Vec::new();
+        let mut spoken = Spoken {
+            bytes: 0,
+            how: String::new(),
         };
+
+        for (index, piece) in pieces.iter().enumerate() {
+            let part = if pieces.len() == 1 {
+                audio.clone()
+            } else {
+                atomic::partial_path(&destination.with_extension(format!("part{index}.mp3")))
+            };
+            match self.say_one(voice, piece, &knobs, destination, &part) {
+                Ok(said) => {
+                    spoken.bytes += said.bytes;
+                    // The command of the first piece, which is the one an
+                    // operator would paste. The others differ only in which
+                    // temporary file held the words.
+                    if spoken.how.is_empty() {
+                        spoken.how = said.how;
+                    }
+                    parts.push(part);
+                }
+                Err(error) => {
+                    for part in &parts {
+                        let _ = std::fs::remove_file(part);
+                    }
+                    let _ = std::fs::remove_file(&part);
+                    return Err(match error {
+                        // Name the piece, or an operator reading "no audio for
+                        // 'The harbour…'" cannot tell which of eleven requests
+                        // failed.
+                        TtsError::NoAudio {
+                            provider,
+                            text,
+                            detail,
+                        } if pieces.len() > 1 => TtsError::NoAudio {
+                            provider,
+                            text,
+                            detail: format!("{detail} (part {} of {})", index + 1, pieces.len()),
+                        },
+                        other => other,
+                    });
+                }
+            }
+        }
+
+        if pieces.len() > 1 {
+            join_mp3(&parts, &audio)?;
+            for part in &parts {
+                let _ = std::fs::remove_file(part);
+            }
+            spoken.bytes = std::fs::metadata(&audio)
+                .map(|m| m.len())
+                .unwrap_or(spoken.bytes);
+            spoken.how = format!("{} (and {} more parts)", spoken.how, pieces.len() - 1);
+        }
 
         atomic::move_into_place(&audio, destination)?;
         Ok(spoken)
     }
+}
+
+/// Join the pieces of one line into a single MP3, in order.
+///
+/// **By concatenating the bytes**, which for MPEG audio is a real join: the
+/// format is a stream of self-describing frames with no container around them
+/// and no index to fix up, which is why `cat a.mp3 b.mp3` has always worked.
+/// No FFmpeg process, no transcode, no second copy of the audio in memory.
+///
+/// The one artifact is that each piece after the first begins with its
+/// encoder's info frame, which decodes as about 26 ms of silence. Measured
+/// against a seam in a sentence, that is a breath; against the alternative —
+/// re-encoding an hour of speech to remove it — it is not worth paying for.
+/// Nothing downstream is misled by it either, because the duration that
+/// reaches the renderer is *measured* on the normalized artifact and never
+/// added up from parts (D-021).
+fn join_mp3(parts: &[PathBuf], out: &Path) -> Result<(), TtsError> {
+    use std::io::{BufWriter, copy};
+
+    let file = std::fs::File::create(out).map_err(|source| TtsError::Io {
+        path: out.to_path_buf(),
+        source,
+    })?;
+    let mut writer = BufWriter::new(file);
+    for part in parts {
+        let mut reader = std::fs::File::open(part).map_err(|source| TtsError::Io {
+            path: part.clone(),
+            source,
+        })?;
+        copy(&mut reader, &mut writer).map_err(|source| TtsError::Io {
+            path: out.to_path_buf(),
+            source,
+        })?;
+    }
+    writer.flush().map_err(|source| TtsError::Io {
+        path: out.to_path_buf(),
+        source,
+    })?;
+    Ok(())
 }
 
 /// Put the line in a file for `edge-tts --file` to read.
@@ -1268,6 +1622,191 @@ aiohttp.client_exceptions.ClientProxyConnectionError: Cannot connect to host 127
         match interpret(error, "en-US-AvaNeural", "A line.") {
             Failure::Transient(reason) => assert!(reason.contains("90"), "{reason}"),
             Failure::Permanent(error) => panic!("a timeout is worth retrying: {error}"),
+        }
+    }
+
+    // ---- long form (D-095) ----------------------------------------------
+
+    /// The normal case, and the one that must not change: a line that fits is
+    /// one request, unsplit, exactly as it was written.
+    #[test]
+    fn a_line_that_fits_is_never_split() {
+        let line = "The harbour was empty by the time we arrived.";
+        assert_eq!(split_line(line, CHUNK_CHARS), vec![line]);
+        assert_eq!(split_line("  padded  ", CHUNK_CHARS), vec!["padded"]);
+        assert!(split_line("   ", CHUNK_CHARS).is_empty());
+    }
+
+    /// A seam between two requests is a seam in the speech, so it goes where a
+    /// reader would have paused: a paragraph break first, then a sentence end.
+    #[test]
+    fn a_long_line_is_cut_where_a_reader_would_pause() {
+        let a = "First sentence here. Second sentence here. Third one here.";
+        let pieces = split_line(a, 30);
+        assert!(
+            pieces.iter().all(|p| p.ends_with('.')),
+            "every cut landed on a sentence end: {pieces:?}"
+        );
+        assert_eq!(pieces.concat().replace(' ', ""), a.replace(' ', ""));
+
+        let paragraphs = "One two three.\n\nFour five six.";
+        assert_eq!(
+            split_line(paragraphs, 20),
+            vec!["One two three.", "Four five six."],
+            "a paragraph break is the first choice"
+        );
+    }
+
+    /// No piece may exceed the limit, whatever the text is made of — that is
+    /// the whole contract, and a sentence longer than a chunk is the case that
+    /// breaks a naive splitter.
+    #[test]
+    fn no_piece_is_ever_longer_than_the_limit() {
+        let unbroken = "word ".repeat(4_000);
+        let no_spaces = "x".repeat(5_000);
+        let mixed = format!("Short. {unbroken} Also short.\n\n{no_spaces}");
+
+        for (name, text) in [
+            ("unbroken", unbroken.as_str()),
+            ("no spaces", no_spaces.as_str()),
+            ("mixed", mixed.as_str()),
+        ] {
+            for limit in [50, 500, 9_000] {
+                let pieces = split_line(text, limit);
+                assert!(
+                    pieces.iter().all(|p| p.chars().count() <= limit),
+                    "{name} at limit {limit}: {:?}",
+                    pieces
+                        .iter()
+                        .map(|p| p.chars().count())
+                        .filter(|n| *n > limit)
+                        .collect::<Vec<_>>()
+                );
+                assert!(
+                    !pieces.is_empty(),
+                    "{name} at limit {limit} produced nothing"
+                );
+            }
+        }
+    }
+
+    /// Nothing may be dropped and nothing invented. Whitespace at the seams is
+    /// the provider's to normalize; the words are not.
+    #[test]
+    fn splitting_loses_no_words() {
+        let text = "Alpha bravo charlie. Delta echo foxtrot! Golf hotel india? Juliet.";
+        for limit in [10, 25, 40, 1_000] {
+            let pieces = split_line(text, limit);
+            let rejoined: String = pieces
+                .iter()
+                .flat_map(|p| p.split_whitespace())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(
+                rejoined,
+                text.split_whitespace().collect::<Vec<_>>().join(" "),
+                "limit {limit} lost or invented words: {pieces:?}"
+            );
+        }
+    }
+
+    /// An hour of narration — the most a scene can hold — becomes a handful of
+    /// requests rather than one seven-minute bet.
+    #[test]
+    fn an_hour_of_narration_becomes_several_requests() {
+        let hour = "The harbour was empty by the time we arrived. ".repeat(1_400);
+        assert!(
+            hour.chars().count() > 60_000,
+            "{} characters",
+            hour.chars().count()
+        );
+
+        let pieces = split_line(&hour, CHUNK_CHARS);
+        assert!(
+            (5..=12).contains(&pieces.len()),
+            "an hour is a handful of requests, not {} of them",
+            pieces.len()
+        );
+        for piece in &pieces {
+            let ceiling = speak_timeout(piece.chars().count());
+            assert!(
+                ceiling < SPEAK_CEILING,
+                "no piece may be big enough to need the hard ceiling: {ceiling:?}"
+            );
+        }
+    }
+
+    /// The bug this found: a script far longer than a scene can hold used to be
+    /// spoken for eleven minutes, normalized by two FFmpeg passes, and *then*
+    /// refused for its measured duration. It is refused before the first
+    /// request now, and the refusal says what to do.
+    #[test]
+    fn a_line_no_scene_could_hold_is_refused_before_anything_is_spoken() {
+        let far_too_long = "The harbour was empty by the time we arrived. ".repeat(3_000);
+        assert!(far_too_long.chars().count() > max_line_chars());
+
+        let started = std::time::Instant::now();
+        let error = Edge::at("/nonexistent/edge-tts")
+            .speak(
+                &Request {
+                    text: &far_too_long,
+                    voice: DEFAULT_VOICE,
+                    settings: &[],
+                },
+                Path::new("/nonexistent/out.mp3"),
+            )
+            .expect_err("longer than a scene");
+
+        assert!(matches!(error, TtsError::BadRequest { .. }), "{error}");
+        let said = error.to_string();
+        assert!(said.contains("minutes of speech"), "{said}");
+        assert!(said.contains("Split it"), "it says what to do: {said}");
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    /// The limit is derived from the scene cap, not typed in beside it. If
+    /// D-021's hour ever changes, this moves with it.
+    #[test]
+    fn the_line_limit_tracks_the_scene_cap() {
+        let expected =
+            (spoonstill_core::project::MAX_SCENE_SECONDS * SPEECH_CHARS_PER_SECOND) as usize;
+        assert_eq!(max_line_chars(), expected);
+        assert!(
+            max_line_chars() > CHUNK_CHARS * 5,
+            "a scene's worth of narration must be several chunks"
+        );
+    }
+
+    /// A long line that comes back empty is worth asking again; `...` is not.
+    /// Corrected from the author's own `setuptts`, which retries no-audio at
+    /// full size before re-splitting.
+    #[test]
+    fn no_audio_is_permanent_for_a_caption_and_transient_for_a_paragraph() {
+        let error = || spoonstill_media::MediaError::Exit {
+            command: "edge-tts".to_owned(),
+            code: Some(1),
+            stderr: NO_AUDIO.to_owned(),
+        };
+
+        assert!(
+            matches!(
+                interpret(error(), DEFAULT_VOICE, "..."),
+                Failure::Permanent(_)
+            ),
+            "a caption with no words in it will never have any"
+        );
+
+        let paragraph = "The harbour was empty. ".repeat(500);
+        match interpret(error(), DEFAULT_VOICE, &paragraph) {
+            Failure::Transient(reason) => {
+                assert!(
+                    reason.contains(&paragraph.chars().count().to_string()),
+                    "{reason}"
+                );
+            }
+            Failure::Permanent(error) => {
+                panic!("a long payload that returns nothing is worth one more go: {error}")
+            }
         }
     }
 

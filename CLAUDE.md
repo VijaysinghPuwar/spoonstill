@@ -234,6 +234,19 @@ script and runs offline in `make test`; `edge_live.rs` provokes each failure
 against the real service and is `#[ignore]`d behind **`make tts-live`**, which
 is what re-checks the recorded stderr after an `edge-tts` upgrade.
 
+**Long form is split into requests** (D-095). Measured here: 62 000 characters
+— a scene's full hour — is one 245-second all-or-nothing request, and a drop at
+3:59 costs all of it. A line is split at **9 000 characters**, at paragraph then
+sentence then word boundaries, packed so an hour is a handful of requests rather
+than fourteen hundred, and joined by **concatenating the bytes** (MPEG frames
+need no container fixed up; each seam gains ~26 ms, and duration is measured
+anyway — D-021). It is also 2.6× faster than one big request. The 9 000 comes
+from the author's own `setuptts`, which drives this service in production; what
+was *not* copied is its payload limit, which exists because it uses the Python
+library while we use the CLI. And **a line no scene could hold is refused before
+the first request** rather than spoken for eleven minutes and then rejected for
+its measured duration.
+
 **Parallel rendering, in one paragraph.** `--jobs N` sets how many scenes
 encode at once; the default is `available_parallelism() / 2` capped at 4,
 because the speedup curve flattens at three while memory keeps climbing at
@@ -422,7 +435,8 @@ installer or `README.md`, and D-089 before touching a path or a disabled
 control, D-090 before touching a hostile-name fixture, and D-091 before
 touching the live panel or the voice list, D-092 before touching Settings or a
 provider's tooling, and D-093 before touching a log sink, and **D-094 before touching the Edge
-provider, a retry, or the pre-flight check in `film.rs`**. D-054 through D-057 and D-075 through D-082 were added during M2 and
+provider, a retry, or the pre-flight check in `film.rs`, and D-095 before
+touching how a long line is split or joined**. D-054 through D-057 and D-075 through D-082 were added during M2 and
 are all Accepted — read D-056 before touching the import path, D-057 before
 touching concat or transitions, D-076/D-077 before touching the pool, D-078
 before changing what the finished film is asserted against, D-079 before
