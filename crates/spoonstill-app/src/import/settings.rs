@@ -32,17 +32,30 @@ use spoonstill_core::motion::{DEFAULT_AMOUNT, MAX_AMOUNT, MIN_AMOUNT};
 use spoonstill_core::project::{MAX_SCENE_SECONDS, Problem, ProblemKind, ProviderId, VoiceId};
 use spoonstill_core::{Aspect, MANIFEST_FILE, OutputSpec};
 
-/// Default TTS provider (D-023).
+/// Default TTS provider (D-023, D-081).
 ///
 /// D-023 makes this differ by distribution — Edge TTS internally, ElevenLabs
 /// in a sold build, because no reverse-engineered endpoint may be load-bearing
-/// in a shipped product. There is no build flag yet and no provider
-/// implementation at all until M2 slice 4, so the shipped default is named
-/// here and the switch arrives with the trait that needs it.
-pub const DEFAULT_PROVIDER: &str = "elevenlabs";
+/// in a shipped product. There is still no build flag, and `edge` is the only
+/// provider that exists, so the default is the one that works: a project that
+/// says nothing gets the voice service this build can actually reach, rather
+/// than a name that fails on the first spoken scene.
+pub const DEFAULT_PROVIDER: &str = "edge";
 
 /// Default voice, meaning "whatever that provider calls its default".
 pub const DEFAULT_VOICE: &str = "default";
+
+/// Seconds of a provider's leading silence a spoken scene keeps (D-084).
+pub const DEFAULT_TRIM_HEAD: f64 = 0.10;
+
+/// Seconds of its trailing silence to keep.
+pub const DEFAULT_TRIM_TAIL: f64 = 0.25;
+
+/// Longest padding worth keeping, in seconds.
+///
+/// A sanity bound in the shape of D-055's duration check: `trim_tail: 30` is a
+/// typo far more often than it is a request for half a minute of room tone.
+const MAX_TRIM_SECONDS: f64 = 10.0;
 
 /// Default name of the rendered film, inside the project folder.
 pub const DEFAULT_OUTPUT: &str = "out.mp4";
@@ -75,6 +88,10 @@ pub struct Settings {
     pub provider: ProviderId,
     /// Default voice.
     pub voice: VoiceId,
+    /// Seconds of a provider's leading silence to keep (D-084).
+    pub trim_head: f64,
+    /// Seconds of its trailing silence to keep.
+    pub trim_tail: f64,
     /// x264 preset (D-036).
     pub preset: String,
     /// x264 CRF (D-036).
@@ -96,6 +113,8 @@ impl Default for Settings {
             manifest: None,
             provider: ProviderId(DEFAULT_PROVIDER.to_owned()),
             voice: VoiceId(DEFAULT_VOICE.to_owned()),
+            trim_head: DEFAULT_TRIM_HEAD,
+            trim_tail: DEFAULT_TRIM_TAIL,
             preset: "medium".to_owned(),
             crf: 18,
             silent_seconds: DEFAULT_SILENT_SECONDS,
@@ -126,6 +145,8 @@ struct RawSettings {
 struct RawTts {
     provider: Option<String>,
     voice: Option<String>,
+    trim_head: Option<f64>,
+    trim_tail: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -283,6 +304,24 @@ fn resolve(raw: RawSettings) -> (Settings, Vec<Problem>) {
         }
         if let Some(voice) = non_empty(tts.voice) {
             settings.voice = VoiceId(voice);
+        }
+        // A negative number means "keep it all", which is how an operator turns
+        // the trim off without a second boolean to disagree with these two.
+        for (field, value, slot) in [
+            ("tts.trim_head", tts.trim_head, &mut settings.trim_head),
+            ("tts.trim_tail", tts.trim_tail, &mut settings.trim_tail),
+        ] {
+            let Some(seconds) = value else { continue };
+            if !seconds.is_finite() || seconds > MAX_TRIM_SECONDS {
+                problems.push(Problem::in_project(ProblemKind::UnusableSetting {
+                    field,
+                    value: seconds.to_string(),
+                    expected: "a number of seconds no greater than 10, or negative \
+                               to keep the provider's padding as it is",
+                }));
+                continue;
+            }
+            *slot = seconds;
         }
     }
 

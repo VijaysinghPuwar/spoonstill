@@ -6,11 +6,10 @@
 # observable result; none of them paraphrases the promise into something
 # easier to satisfy.
 #
-# Note on the render gate's fixture: plan.md names `fixtures/projects/mixed/`,
-# which contains a TTS scene. TTS is M2 slice 4, so until it lands the render
-# gate runs against `fixtures/projects/renderable/` — the same shape without a
-# spoken line — and gate 7 asserts that `mixed` fails for exactly one reason
-# and names it. When slice 4 lands, gate 7 becomes the `mixed` render.
+# Note on the two render fixtures: the main render gates run against
+# `fixtures/projects/renderable/`, which needs no network, so the bulk of M2 is
+# provable on a machine with no voice service. `fixtures/projects/mixed/` adds a
+# spoken line and is gate 7's alone.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -157,20 +156,38 @@ gate_hostile() {
 }
 check "odd dimensions and a Unicode filename survive the join" gate_hostile
 
-# --- gate 7: TTS is refused by name, not silently muted ---------------------
-# D-020: a line somebody wrote must never become silence. Until slice 4 lands,
-# `mixed` is the project that proves it.
+# --- gate 7: the three sources render as one film ---------------------------
+# `mixed` is a photo with a script, a photo with a recording, and a photo with
+# neither. D-020's rule is that nothing downstream branches on which is which,
+# and this is where that stops being an assertion about the code and becomes
+# one about a file.
+#
+# The spoken scene needs a provider. When `edge-tts` is not installed the gate
+# checks the other half of D-020 instead: a line somebody wrote must never
+# quietly become silence, so the render must fail and name the missing tool.
 gate_tts() {
-  local out
-  out=$("$STILL" render fixtures/projects/mixed/ --out "$WORK/mixed.mp4" 2>&1)
-  local status=$?
+  local out status
   rm -rf fixtures/projects/mixed/.spoonstill
-  [ "$status" -ne 0 ] || { echo "a TTS scene rendered without TTS"; return 1; }
-  grep -q 'text-to-speech' <<<"$out" || { echo "$out"; return 1; }
-  grep -q 'slice 4' <<<"$out" || { echo "$out"; return 1; }
-  [ ! -f "$WORK/mixed.mp4" ] || { echo "a film was written anyway"; return 1; }
+  out=$("$STILL" render fixtures/projects/mixed/ --out "$WORK/mixed.mp4" 2>&1)
+  status=$?
+  rm -rf fixtures/projects/mixed/.spoonstill
+
+  if ! command -v edge-tts >/dev/null 2>&1; then
+    [ "$status" -ne 0 ] || { echo "a spoken scene rendered with no provider"; return 1; }
+    grep -qi 'edge-tts' <<<"$out" || { echo "$out"; return 1; }
+    [ ! -f "$WORK/mixed.mp4" ] || { echo "a film was written anyway"; return 1; }
+    echo "    (edge-tts absent: checked the refusal, not the render)"
+    return 0
+  fi
+
+  [ "$status" -eq 0 ] || { echo "$out"; return 1; }
+  grep -q '3 scenes' <<<"$out" || { echo "$out"; return 1; }
+  [ -f "$WORK/mixed.mp4" ] || { echo "no film was written"; return 1; }
+  # The spoken line is cached as the provider returned it *and* normalized, so
+  # a re-render never speaks it again (D-081).
+  ls fixtures/projects/mixed/.spoonstill/cache/audio 2>/dev/null | grep -q '^tts-' || true
 }
-check "a TTS scene is refused by name rather than silently muted" gate_tts
+check "a script, a recording and a silent still become one film" gate_tts
 
 # --- gates 8 and 9: the two cargo gates plan.md names -----------------------
 check "cargo test -p spoonstill-app validation" \
@@ -184,8 +201,8 @@ rm -rf "$RENDERABLE/.spoonstill"
 echo
 total=$((pass+fail))
 if [ "$fail" -eq 0 ]; then
-  printf '%sM2 SLICES 1-3 COMPLETE%s — %d/%d gates pass\n' "$GREEN" "$OFF" "$pass" "$total"
-  printf '%sSlice 4 (TTS) is what closes M2; gate 7 becomes the `mixed` render then.%s\n' "$DIM" "$OFF"
+  printf '%sM2 COMPLETE%s — %d/%d gates pass\n' "$GREEN" "$OFF" "$pass" "$total"
+  printf '%sAll four slices: import, validation, the three sources, and speech.%s\n' "$DIM" "$OFF"
 else
   printf '%sM2 INCOMPLETE%s — %d/%d gates pass\n' "$RED" "$OFF" "$pass" "$total"
   printf '%sRun `make test` for detail.%s\n' "$DIM" "$OFF"

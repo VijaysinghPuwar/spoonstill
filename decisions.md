@@ -1,8 +1,9 @@
 # decisions.md — single source of truth for `spoonstill`
 
 **Status:** active. This file wins over every other document in the repo.
-**Last updated:** 2026-08-26 (M2 slice 3: D-075 audio cache, D-076 render pool,
-D-077 determinism and the project lock, D-078 what the film is asserted on).
+**Last updated:** 2026-08-26 (M2 slice 4 and the shell: D-080 how a project is
+made and filled, D-081 where the TTS provider sits, D-082 the default provider
+and the voice override, D-083 the window, D-084 loudness and trim).
 
 `plan/PROJECT_BRIEF.md` and `plan/BRIEF_RECONCILIATION.md` both carry a
 "superseded by `decisions.md`" banner. Until now that file did not exist, so
@@ -643,6 +644,67 @@ surprise to appear.
 
 ---
 
+## Brand — added at M2
+
+### D-079 — The mark is three stacked stills, generated from one description · Accepted
+
+The author chose this mark on 2026-08-26 and called it final. It is three
+still frames stacked on a diagonal, the front one carrying the image — the
+product's own sentence, drawn: many stills become one film.
+
+**There is no wordmark.** The mark stands alone; `spoonstill` is set as ordinary
+text beside it when a lockup is needed. Nothing in the identity is a typeface.
+
+**The delivered file is not the asset.** What arrived was a 2048×2048 JPEG:
+lossy, no alpha, ringing on every edge, and the black baked in. It is the
+*reference*. The asset is vector, rebuilt from measurements taken off that
+reference — a 51-unit stroke, a 721×819 still, stills at (0,0), (151,154) and
+(303,307), a tight box of exactly 1024×1126, and an inner image inset two
+stroke widths from the top and right and flush to the left and bottom. The
+delivered steps are (151,154) then (152,153); that one-pixel irregularity is
+kept rather than regularised, because forcing a uniform step would move the
+artwork off the thing the author approved.
+
+**One ink, three opacities — not three greys.** The ink is `#EFE9E0`. The front
+still is 100%, the middle 86%, the back 72%. Each still is an opaque black
+plate *under* a translucent stroke, and the plate covers only that still's
+cavity, never its own stroke. That is what makes the two rear strokes brighten
+to `#E5E1D8` where they cross, and it is the whole reason the stack reads as
+depth. Anyone redrawing this with three flat greys will lose the crossing and
+not know why it looks dead.
+
+**The mark is defined on black and is not background-agnostic.** Those black
+plates are load-bearing, so on any surface that is not near-black they show as
+black rectangles. Every square use therefore carries its own black tile. This
+is a constraint of the design the author picked, recorded here so nobody
+"fixes" it by deleting the plates.
+
+**Generated, not maintained by hand.** `scripts/gen-brand.py` holds the
+geometry once and emits every SVG and every raster — `make brand`. Stdlib only,
+no Pillow, no ImageMagick, no librsvg: the artwork is axis-aligned rectangles,
+so coverage is computed analytically and the 16 px icon is exactly antialiased
+rather than downsampled. Outputs are committed, so no build needs Python.
+`.icns` needs macOS `iconutil` and is skipped elsewhere rather than failing.
+
+Verified against the reference before anything was wired up: of the ~3.0M
+colour channels further than 3 px from any edge, **exactly one** differs by
+more than 6/255. All remaining error sits on edges and is the JPEG's ringing,
+not ours.
+
+The window palette follows the same construction (`apps/desktop/ui/styles.css`):
+the ground is `#000000`, `--paper` is the ink at 100%, and `--grey` / `--dim`
+continue the ink's own series at 68% and 46% instead of being separately
+invented colours. The stylesheet previously named `#f2ede8 / #a29b94 / #6e6862`
+as "the frames" — eyeballed, and describing a three-grey mark that does not
+exist.
+
+**Not done, deliberately:** the icon is a full-bleed black square. macOS Big Sur
+icons want a rounded mask with padding and Windows wants full bleed, and
+`bundle.active` is `false`, so the platform-specific masking is deferred to
+whenever bundling is switched on. Revisit this entry then.
+
+---
+
 ## Input and UX
 
 ### D-050 — Mis-pairing is structurally impossible, not operator-verified · Accepted
@@ -869,6 +931,383 @@ measurement attached, and it does not change anything an operator sees.
 ---
 
 ## Reference repositories
+
+### D-080 — A project is made and filled by the program, not by the operator's file manager · Accepted
+
+Decided 2026-08-26, implemented in `spoonstill_app::ingest`, reachable as
+`still new` / `still add` and as the window's only two verbs.
+
+**The problem this fixes was ours.** D-050 pairs `001.jpg` with `001.wav` by
+stem, and D-056 makes a bare folder of images a valid project. Both are right.
+But the operator's camera produces `IMG_2931.HEIC` and their recorder produces
+`Voice 014.m4a`, so the price of those rules was that they renamed 120 files by
+hand before anything would render — twenty to forty minutes for a sixty-scene
+film. We deleted the timeline and handed back a filing job. Against a video
+editor that is not a 2–3x saving, which is the bar the author set on the day
+this was decided.
+
+So the convention is ours to satisfy. The operator hands over whatever they
+have, in any order, and the program names it:
+
+1. **Photos sort naturally and become `001`, `002`, …** — natural, so `IMG_2`
+   precedes `IMG_10`. Numbering continues from the highest already present, so
+   a second drop appends.
+2. **A recording or a script pairs by stem first, then by position.** If they
+   wrote `IMG_2931.txt` next to `IMG_2931.HEIC` they have already stated the
+   pairing, and guessing again could only get it wrong. Whatever is left over
+   falls into the photos that matched nothing, in order.
+3. **Copy, never move.** The sources are someone's photo library. A tool that
+   empties it because they dropped the wrong folder is a tool they use once.
+4. **Never overwrite.** There is no input to ingest that can destroy a file.
+5. **Nothing unusable is fatal.** A `.DS_Store`, a README, a PDF: skipped and
+   counted, because they dropped a folder, not a curated list.
+6. **Nothing writes `project.yaml`.** An absent settings file is a valid
+   project and every default works (D-056), so writing one would put a file in
+   the folder the operator did not ask for and that the renderer is otherwise
+   forbidden to touch (D-013).
+
+A dropped *folder* contributes the media directly inside it and does not
+recurse: a dropped home directory must not enumerate a hundred thousand files,
+and a photo folder with `thumbnails/` must not import every thumbnail as a
+scene.
+
+**More recordings than photos is reported, not truncated.** It means the
+operator is missing photos, and silently dropping the tail would produce a film
+that ends early with no explanation.
+
+The pairing is a guess, and D-051's grid is where a guess gets caught: every
+row is on screen before a frame is encoded.
+
+### D-081 — TTS sits above the process boundary, and Edge TTS is a subprocess · Accepted
+
+Decided 2026-08-26, implemented in `spoonstill-tts`.
+
+D-010's layering said `media`, `tts` and `state` were peers. That was wrong the
+moment a provider needed to run a program: `spoonstill-tts` would have had to
+grow its own spawn site, and `spoonstill_media::command` is *the one place a
+process is spawned* (D-011) — argument vectors, timeouts, retained stderr, a
+paste-ready command line for the bundle. Duplicating that to preserve a layer
+diagram would have been the diagram winning over the rule it exists to serve.
+
+So `spoonstill-tts` moves to its own layer above `media`, and
+`spoonstill-cli/tests/architecture.rs` enforces the new direction:
+
+```text
+cli -> app -> tts -> {media, state} -> core
+```
+
+`app` still reaches `tts` only through its trait, and the CLI and the shell
+reach it only through `spoonstill_app::tts` — neither may name the crate.
+
+**Edge TTS is the `edge-tts` command line tool, not a Rust client.** D-023
+already decided what Edge TTS *is* here: the internal and development
+provider, never load-bearing in a sold build, because it speaks to a
+reverse-engineered endpoint. That endpoint has an anti-abuse token derived from
+a clock skew and a shared secret, and it moves. Reimplementing it in Rust means
+owning a protocol whose specification is "whatever Edge does this month" and
+shipping a build that stops working on a Tuesday. `edge-tts` tracks those
+changes and is already installed on the machines that want this provider.
+
+**The text goes in a file, never in an argument.** `--file`, never `--text`,
+for three reasons in increasing order of importance: a paragraph can exceed the
+argument length limit; arguments are visible to every process through `ps`; and
+**the command line is logged** (D-016) and lands in the bundle the operator
+sends us. Their script is their content. The only reliable way to keep it out of
+our diagnostics is for it never to be an argument.
+
+A provider that speaks HTTP itself, as ElevenLabs will, implements the same
+trait and needs none of this.
+
+**The provider's raw output is cached beside the normalized artifact.** The key
+is `hash(text, provider, voice, settings, profile)` with every field
+length-prefixed — without that, `voice="ab", text="c"` and `voice="a",
+text="bc"` would hash alike and share one artifact. A normalization profile that
+changes (D-075) must re-normalize every line; it must never re-speak one,
+because with BYOK that is the operator's money.
+
+### D-082 — The default provider is the one that works, and a chosen voice is an override · Accepted
+
+Decided 2026-08-26.
+
+D-023 makes the default differ by distribution — Edge internally, ElevenLabs in
+a sold build. There is still no build flag, and `edge` is the only provider
+that exists, so `DEFAULT_PROVIDER` is `edge`: a project that says nothing gets
+the voice service this build can actually reach, rather than a name that fails
+on its first spoken scene. When ElevenLabs lands, this constant is where the
+distribution switch goes.
+
+**A voice picked in the window is an override for that run.** `project.yaml` is
+an input and the renderer never writes to it (D-013), so `--voice` /
+`--provider` and the window's picker rewrite the loaded model before the cache
+key is computed — switching voices is a cache miss, as it must be, and
+switching back is a hit. An operator who wants it to stick writes it into
+`project.yaml` themselves, which is also the only way it survives into someone
+else's checkout.
+
+### D-083 — The window is five tabs over one review grid, and it can write a scene's words · Accepted
+
+Decided 2026-08-26, against the author's design brief and canvas
+(`~/Downloads/Desktop application redesign`), implemented in `apps/desktop/ui`.
+
+**Shape.** A native title bar with the project name; five tabs — Project,
+Scenes, Render, Runs, Settings — and one primary action. Scenes is the app: a
+dense grid with a sticky header, filter chips that are also counts, a search
+box, and a status bar that never scrolls away. Density over whitespace, because
+the operator is scanning 500 rows and not browsing six cards.
+
+**A scene's narration is editable, in the grid.** This is the one thing the
+window writes into the operator's folder, and it writes `NNN.txt` — their
+words, in their file, because they typed them. It is not the renderer writing
+state; that is what `.spoonstill/` is for (D-013). Emptying the cell removes
+the file and the scene goes back to being silent, which is a real state and not
+an error (D-050). **Manifest mode refuses the edit**: there the CSV is the
+source of truth and a `.txt` written beside it would manufacture exactly the
+two-sources-disagree conflict D-056 rejects.
+
+Without this the window had no way to reach TTS at all — a spoken scene could
+only exist if the operator had already made a `.txt` in a file manager, which
+is the same filing job D-080 exists to delete.
+
+**A duration is a dash until it is measured.** The grid shows a declared length
+for a silent scene and nothing for the other two until the render resolves them
+(D-021). A plausible estimate in that column would be the one number in the
+window that was a guess.
+
+**The palette is copied from the canvas, not interpreted from it.** The token
+block at the top of `styles.css` is the canvas's own, cryptic names and all, so
+that the next revision of the canvas is a paste rather than a translation;
+every rule below it uses a semantic alias and never a raw `--1` or `--l`.
+
+That block records an agreement reached twice independently. The canvas's first
+version set a **blue** accent for the primary action and a blue-grey neutral
+ramp (hue 255). This build shipped the mark's warm ink instead, because D-079
+says the window carries no colour that is not a failure or a warning. The
+author's updated canvas then removed the blue itself — `--a` now equals `--1`,
+and the neutrals moved to hue 60–75, the mark's own grey. Colour in this window
+means a failure, a warning, or money already spent, and nothing else.
+
+**`spoonstill-desktop DIR` opens that folder.** A file manager's "Open With"
+passes a path that way, and it means the window can be driven from a terminal
+like every other part of this program — the useful converse of D-010's rule
+that the CLI must be able to do everything the window can.
+
+**Nothing in the webview names a path to open.** `open_film` and
+`reveal_project` take no arguments and read the paths from Rust-side state. The
+capability file therefore grants no filesystem scope and no opener scope at
+all. This replaced a real bug: `opener:allow-open-path` enables the command
+*without* a scope, so every path was denied and both buttons did nothing,
+silently. Thumbnails work the same way — the asset protocol's scope is empty in
+the config and granted to one directory when a project is opened.
+
+**Not built yet, from the brief:** the scene detail panel with the motion-path
+diagram and single-scene preview (D-053), the pre-render confirmation showing
+cached-versus-billed counts, run history as *runs* rather than log lines
+(M3 owns the state database that makes a run a record), recent projects on the
+launch screen, and grid virtualization — 500 rows of DOM is fine, 5000 is not.
+
+### D-084 — Every scene is levelled, and only a provider's padding is trimmed · Accepted
+
+Decided 2026-08-26 from a full test of a two-scene Edge TTS film, implemented
+in `spoonstill_media::audio`.
+
+**Three defects, found by measuring the output rather than by watching it.**
+
+**1. Nothing set the loudness.** `normalize` resampled to 48 kHz stereo and
+stopped, so a film's level was whatever each source happened to be: the measured
+Edge TTS lines came out at **-23.2 and -25.0 LUFS**, and a phone recording would
+have arrived beside them ten decibels louder. At n=500 that is not polish, it is
+the operator riding a volume knob scene by scene, or re-doing the film.
+
+Every artifact is now brought to **-16 LUFS**, ceiling **-1.5 dBTP**, by a
+**single measured linear gain** — one `loudnorm` analysis pass for the numbers,
+then `volume=NdB`. Not `loudnorm`'s own single-pass mode, which reaches the
+target by compressing: that changes how a voice sounds and makes the result
+depend on FFmpeg's version, and D-077 requires byte-identical reruns.
+
+Linear gain has a consequence worth stating rather than hiding: **a file whose
+peaks are already high cannot reach -16 without clipping, so it does not get
+there.** The recorded lines had a 17 dB crest factor, so the peak ceiling
+allowed +4.88 dB of the +7.22 dB the target wanted, and the film landed at
+-18.8 LUFS. That is the honest ceiling for gain that does not touch a sample's
+shape. Getting the last three decibels means a limiter, which is a V1.1 decision
+with the music bed, not something to smuggle in here.
+
+The gain is clamped to ±24 dB. Without the clamp, a recording made with the
+microphone muted — the classic mistake — arrives as 40 dB of amplified hiss at
+full volume in a film about to be delivered.
+
+**2. Every spoken scene carried the provider's padding.** Edge TTS pads each
+line with about **0.24 s of silence before and 0.35 s after**, so every cut
+landed roughly six tenths of a second after the speech stopped. Over 500 scenes
+that is five minutes of dead air nobody chose.
+
+Synthesized speech is now trimmed to `tts.trim_head` (default 0.10 s) and
+`tts.trim_tail` (default 0.25 s). The settings say how much padding to **keep**,
+so a provider that already pads by less is left alone rather than having silence
+invented for it; a negative value keeps everything.
+
+**A recording the operator supplied is never trimmed.** Their padding is a
+decision and the provider's is an artifact — trimming the former is the "we
+fixed this for you" behaviour plan.md §M2 rules out. Internal pauses are never
+touched by either: only a silence that starts at the beginning or runs to the
+end is padding.
+
+**3. Changing the normalization made us pay to speak the line again.** The raw
+provider output was stored at the normalized artifact's path with a different
+extension, and that path's key included the normalization profile. So bumping
+the profile — or the loudness target, or the trim — moved the raw file's name
+too, the miss went all the way back to the provider, and with BYOK that is the
+operator's money for audio we already had.
+
+There are now **two keys**: `hash(text, provider, voice, settings)` names the
+raw speech, and `hash(that, trim, profile)` names the normalized artifact.
+Proven rather than asserted: changing `tts.trim_tail` and re-rendering wrote two
+new `.wav`s and left both `.spoken` files untouched, timestamps and all.
+
+**What this cost.** Two FFmpeg runs per unique audio instead of one, plus an
+`ffprobe` when trimming — all sub-second, all behind the content cache, so it is
+paid once per line ever rather than once per render.
+
+### D-085 — The window's navigation is a rail, and the two render decisions are screens of their own · Accepted
+
+Decided 2026-08-26, from the author's report on the D-083 window, implemented
+in `apps/desktop`. It supersedes D-083's tab row and its Settings tab; the rest
+of D-083 stands.
+
+**Three complaints, one cause.** The report was: *"where can I change the voice
+like a different voice of Edge"*, *"there is no option to see where to save the
+file and what folder and what name"*, and *"why can I see Scenes Render Runs
+and Settings [like that] — it is difficult to navigate around"*. All three are
+the same defect. The window presented itself as a **viewer of a folder** when
+the operator uses it as a **maker of a film**, and the two questions that get
+asked before every single render — *in whose voice* and *to what file* — had no
+home. One was a bare text box on the fifth tab that wanted `en-GB-RyanNeural`
+typed from memory; the other was nowhere at all, because `project.yaml`'s
+`output:` was displayed as a fact and never as a control.
+
+**A vertical rail, and every destination at full ink.** The pill row put five
+unselected tabs at `--2` on a dark ground, and it was read as five disabled
+buttons beside one live one. Selection is now carried by a filled ground, a
+left bar and weight; contrast is not spent on it. The rail also has room for
+what the pill row had none of: a label per destination, the two standing
+answers under them, and the primary action at the foot of the same column, so
+setting up a render and starting one are one object.
+
+**Voice is a screen.** Provider status, the whole catalogue, a language filter,
+a gender filter, a search box, and the chosen voice said once and said large.
+Every row auditions on click. **An audition is not a render**: it speaks one
+short line through the same cache and the same normalization a scene gets
+(D-084), so it sounds like the film will sound and hearing it twice costs
+nothing — which is the difference between comparing six voices and settling for
+the first one that worked. `spoonstill_app::audio::preview` is that call, and
+it is in the app crate rather than the shell, because the shell owns no
+business logic (D-010).
+
+**Output is a screen.** A file name, a folder, a Browse button, and the joined
+absolute path shown live. **The join happens in Rust** (`resolve_output`),
+because a webview that concatenates a folder and a name is a webview that can
+be made to concatenate `../..` — the same reasoning as D-052 and D-054. It
+refuses a name carrying a separator, a leading dot or a `..`, refuses a folder
+that is not there, and adds `.mp4` to a bare name because a film is an MP4
+(D-078) and the operator who typed `holiday` did not mean a file their player
+will not open. Refusal happens as the box is typed in, not forty minutes into a
+render (D-002).
+
+**Both are overrides for one run.** `project.yaml` is an input and this program
+never writes to it (D-013). The window's own choices live in the window's own
+storage, keyed by project folder, so they survive a reload without becoming a
+fact about the project — an operator who wants a voice to stick writes it into
+`project.yaml`, which is also the only way it survives into someone else's
+checkout (D-082).
+
+**One CSP line was load-bearing.** The audition plays through the asset
+protocol, and `media-src` was absent from the policy — so it fell back to
+`default-src 'self'` and every audition would have been blocked silently. The
+artifact is also granted to the webview file by file rather than by directory:
+it is a file the command just produced inside `.spoonstill/`, not a path the
+frontend named.
+
+**And one CSS bug that read as a broken button.** `button:hover:not(:disabled)`
+outranks `button.primary` on specificity, so the primary action turned dark
+grey under the pointer — it looked disabled at the exact moment it was being
+aimed at. Restated explicitly. This shipped in D-083 and nobody saw it, which is
+the argument for driving the real HTML in a browser rather than reading it.
+
+**Settings is gone.** Everything it held was either a control that belongs on
+Voice or Output, or a fact that belongs on Project. A tab whose content is
+"things we could not place" is a tab that gets opened by accident.
+
+### D-086 — Home is the operator's projects; a project is the rail · Accepted
+
+Decided 2026-08-26 from a second round of the author's own use of the D-085
+window, implemented in `apps/desktop`. It supersedes D-085's Project tab and
+D-083's start screen.
+
+**What was reported, verbatim in substance.** *"Here I cannot click on
+project"*; *"if this is the home screen there is no need for render button,
+Scenes, Output and all — this is not what we needed"*; *"create a proper home
+screen where all the projects are there, and then inside the project we have
+voice, settings, scenes and render"*; and, of the language filter, *"this is not
+clear which is why it is hard to navigate around"*.
+
+**The window had one level where the operator has two.** It was built as a
+viewer of *one folder*: it opened on a start screen with two verbs, and the only
+route to a project made yesterday was the folder dialog and the operator's own
+memory of where they put it. So the Project tab tried to be a home screen from
+inside a project, and failed at it — it restated the folder, the film, the
+geometry and the voice, all of which the title bar, the rail and Output already
+say, and not one line of it did anything when clicked.
+
+**Home is now the projects.** Every folder that has been opened, newest first,
+with the path written `~/Downloads/test` and how long ago. Clicking one opens
+it. The list is Rust's, kept in the OS config directory — *which projects has
+this person opened* is not a fact about any one of them, so it does not go under
+a `.spoonstill/` (D-013 governs machine state **for a project**; this is machine
+state for the operator). It is written inside `validate_project` rather than by
+its own command, so there is no way to open a project and have it not appear.
+
+**A project that has moved is shown and marked, never dropped.** Struck through,
+labelled "moved or deleted", with a Forget button. A list that silently loses a
+row is a program that appears to have lost the work; forgetting is the
+operator's verb, and it removes a line from a list and never a folder from a
+disk.
+
+**Settings is app-level and lives on home.** Whether the voice service is
+reachable and how to install it if not (D-002), which voice it falls back to,
+the theme, and what the program is. The per-project Settings tab D-083 shipped
+is gone: everything in it was either a control that belongs on Voice or Output
+(D-085) or a fact that belongs beside the thing it describes. A tab whose
+contents are "what we could not place" gets opened by accident and never on
+purpose.
+
+**"default" is not an answer to "whose voice will I hear".** `tts.voice`
+defaults to the literal string `default`, and the window showed that word.
+`Provider` gains `default_voice()`, Edge returns its named default, and every
+surface now resolves it — the rail, the Voice screen and Settings all say
+"Ava · English (United States)". This is a trait method rather than a constant
+read in the shell because the shell must not know a provider's internals
+(D-010), and because ElevenLabs will answer it differently.
+
+**A locale code is not a language.** The filter listed `af-ZA, am-ET, ar-AE, …`
+in the provider's own order, so the screen opened on Afrikaans and the operator
+auditioned `af-ZA-WillemNeural` while looking for English. Names now come from
+the platform's `Intl.DisplayNames` — no shipped table to go stale — and they are
+built **from the tag's parts**, not from the whole tag. Asked for `en-GB` whole,
+the platform answers "British English", which files the English voices under A,
+B and I; built from its parts it reads "English (United Kingdom)", and every
+English sits together. The list is sorted by that name, the code stays visible
+beside it because it is what goes in `project.yaml`, and the filter **opens on a
+language the operator can read** — the project's own voice decides it, failing
+that the one this machine is set to.
+
+Every voice row now reads `Ryan · English (United Kingdom) · Male ·
+en-GB-RyanNeural`, in that order: the name they choose by, the language they
+filter by, and the id the renderer needs, last.
+
+**What this cost, and what it did not.** Three commands (`recent_projects`,
+`forget_project`, and the `default_voice` the status already carried) and one
+screen. It did not cost a state database: the list is a JSON file of at most
+thirty entries, and M3's `state.db` is per project and stays that way.
 
 ### D-060 — `editly` reviewed: reject the architecture, adopt three specifics · Accepted
 

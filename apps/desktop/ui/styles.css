@@ -1,0 +1,779 @@
+/* A dense, calm desktop tool — the design brief's reference points are Linear,
+   Transmit and Sublime Merge, and the rule that follows from them is
+   information density over whitespace. The operator is scanning 500 rows, not
+   browsing six cards.
+
+   ## The palette is the canvas's, copied rather than interpreted
+
+   The block below is lifted verbatim from `Spoonstill Desktop.dc.html`, cryptic
+   names and all, so that the next update to the canvas is a paste and not a
+   translation. Everything after it is a semantic alias, and no rule in this
+   file may use a raw `--1` or `--l` — that indirection is what makes the paste
+   safe.
+
+   Two things worth knowing about the values. The neutrals are warm (hue 60–75)
+   rather than blue, which is the mark's own grey (D-079). And **the accent is
+   the ink**: `--a` equals `--1`, so the primary action is off-white on black in
+   the dark theme and black on off-white in the light one. The canvas's first
+   version used a blue here; the author's update removed it, which is the same
+   conclusion D-079 reached — colour in this window means a failure, a warning,
+   or money already spent, and nothing else.
+
+   ## Two corrections to the canvas, made on evidence
+
+   The canvas's navigation was a pill group with unselected items at `--2`.
+   Rendered on this display it reads as five disabled buttons beside one live
+   one, which is what it was reported as. **Every destination is now full ink**
+   and the current one is marked by a filled ground and a bar, not by being the
+   only legible word in the row. Weight and background carry the selection;
+   contrast is not spent on it.
+
+   And the canvas had one level where the operator has two. Home is *their
+   projects*; a project is the rail. The Project tab that used to sit in the
+   rail restated the title bar and did nothing you could click, and there was
+   no route back to a folder opened yesterday. Both are gone.
+
+   Light and dark are both first-class: this runs all day. `data-theme` on
+   <html> chooses, and dark is the default because that is what the mark is
+   drawn on. */
+
+:root {
+  --b: oklch(0.145 0.002 60); --p: oklch(0.178 0.002 60); --r: oklch(0.205 0.002 60);
+  --g: oklch(0.158 0.002 60); --l: oklch(0.285 0.003 70); --h: oklch(0.196 0.002 60);
+  --1: oklch(0.945 0.006 75); --2: oklch(0.70 0.005 75); --3: oklch(0.545 0.005 75);
+  --a: oklch(0.945 0.006 75); --af: oklch(0.145 0.002 60); --ab: oklch(0.265 0.004 75); --al: oklch(0.46 0.006 75);
+  --ok: oklch(0.74 0.09 155); --w: oklch(0.80 0.11 80); --e: oklch(0.72 0.14 28);
+  --eb: oklch(0.225 0.035 28); --el: oklch(0.38 0.07 28); --s: oklch(0.255 0.004 75);
+  --c: oklch(0.118 0.002 60); --cf: oklch(0.82 0.02 80); --in: oklch(0.135 0.002 60);
+}
+
+html[data-theme="light"] {
+  --b: oklch(0.962 0.005 75); --p: oklch(0.995 0.002 75); --r: oklch(0.978 0.004 75);
+  --g: oklch(1 0 0); --l: oklch(0.882 0.006 75); --h: oklch(0.938 0.005 75);
+  --1: oklch(0.225 0.004 60); --2: oklch(0.455 0.005 75); --3: oklch(0.605 0.006 75);
+  --a: oklch(0.265 0.004 60); --af: oklch(0.965 0.006 75); --ab: oklch(0.912 0.006 75); --al: oklch(0.70 0.008 75);
+  --ok: oklch(0.52 0.11 155); --w: oklch(0.56 0.12 70); --e: oklch(0.52 0.17 28);
+  --eb: oklch(0.952 0.022 28); --el: oklch(0.85 0.06 28); --s: oklch(0.922 0.007 75);
+  --c: oklch(0.972 0.004 75); --cf: oklch(0.34 0.02 80); --in: oklch(0.985 0.003 75);
+}
+
+/* --- what those mean, for everything below ------------------------------- */
+:root, html[data-theme="light"] {
+  --ground:  var(--b);   /* the window's floor */
+  --panel:   var(--p);   /* cards, chrome strips */
+  --raise:   var(--r);   /* title bar, sticky grid header */
+  --grid:    var(--g);
+  --hover:   var(--h);
+  --line:    var(--l);
+  --line-2:  var(--l);
+  --input:   var(--in);
+
+  --ink:     var(--1);
+  --ink-2:   var(--2);
+  --ink-3:   var(--3);
+
+  --accent:      var(--a);
+  --on-accent:   var(--af);
+  --accent-soft: var(--ab);   /* the selected chip, the TTS badge */
+  --accent-line: var(--al);
+
+  --warn: var(--w);
+  --bad:  var(--e);
+  --bad-line: var(--el);
+  --cached: var(--cf);        /* "this cost nothing this time" */
+
+  --radius: 7px;
+  --rail: 194px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; margin: 0; }
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--ground);
+  color: var(--ink);
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+.mono, code { font-family: var(--mono); }
+.wrap { overflow-wrap: anywhere; }
+[hidden] { display: none !important; }
+
+/* ---------------------------------------------------------------- titlebar */
+
+/* The traffic lights are the system's, overlaid — hence the 82px. Dragging the
+   window works anywhere on this strip except the controls. */
+.titlebar {
+  flex: none;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px 0 82px;
+  background: var(--raise);
+  border-bottom: 1px solid var(--line);
+  -webkit-app-region: drag;
+}
+
+.titlebar button, .titlebar input { -webkit-app-region: no-drag; }
+
+.title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8px;
+}
+
+/* The mark, three stacked stills, drawn from the same measurements as the icon
+   (D-079). Drawn rather than an <img> so it follows the theme: the icon file
+   carries its own black tile and would sit as a dark square on a light bar.
+   Also the way back: there is one project open at a time, and clicking the
+   mark closes it. */
+.bar-mark {
+  position: relative;
+  width: 19px;
+  height: 19px;
+  flex: none;
+  padding: 0;
+  border: none;
+  background: transparent;
+  border-radius: 3px;
+  opacity: 0.9;
+}
+
+.bar-mark:hover:not(:disabled) { background: transparent; opacity: 1; }
+.bar-mark:disabled { opacity: 0.4; }
+.bar-mark i { position: absolute; width: 13px; height: 15px; border: 1.5px solid; }
+.bar-mark i:nth-child(1) { left: 0; top: 0; border-color: var(--ink-3); background: var(--panel); }
+.bar-mark i:nth-child(2) { left: 3px; top: 2px; border-color: var(--ink-2); background: var(--panel); }
+.bar-mark i:nth-child(3) { left: 6px; top: 4px; border-color: var(--ink); background: var(--ink); }
+
+#t-name { font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; }
+
+.path {
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.theme {
+  flex: none;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--input);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.theme button {
+  border: none;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.theme button:hover { color: var(--ink); }
+.theme button.on { background: var(--hover); color: var(--ink); font-weight: 600; }
+
+/* ------------------------------------------------------------------- rail */
+
+#app { flex: 1; min-height: 0; display: flex; }
+
+.rail {
+  flex: none;
+  width: var(--rail);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 10px 12px;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.rail-back {
+  width: 100%;
+  padding: 5px 9px;
+  text-align: left;
+  font-size: 12px;
+  color: var(--ink-2);
+  background: transparent;
+  border-color: transparent;
+}
+
+.rail-back:hover:not(:disabled) { background: var(--hover); color: var(--ink); }
+
+.nav { display: flex; flex-direction: column; gap: 1px; }
+
+/* Full ink at rest. See the note at the top of this file: a destination the
+   operator cannot read is not a destination. */
+.nav button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 6px 9px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nav button svg {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: var(--ink-3);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.nav button span { flex: 1; min-width: 0; }
+.nav button:hover { background: var(--hover); }
+
+.nav button.on {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.nav button.on svg { stroke: var(--ink); }
+
+/* A count, or a silent red dot when a tab holds something broken. */
+.pip {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-style: normal;
+  color: var(--ink-3);
+}
+
+.pip.attention { color: var(--bad); font-weight: 600; }
+.nav button.on .pip { color: var(--ink-2); }
+
+/* The two standing answers: which voice, and where it lands. */
+.rail-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 2px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+}
+
+.rail-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  padding: 5px 9px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rail-fact:hover { background: var(--hover); }
+.rail-fact .k { font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
+
+.rail-fact .v {
+  font-size: 11.5px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.rail-fact .v.mono { font-size: 11px; }
+
+.rail-go { margin-top: auto; display: flex; flex-direction: column; gap: 8px; }
+.rail-rev { font-family: var(--mono); font-size: 10px; color: var(--ink-3); text-align: center; }
+button.wide { width: 100%; padding: 7px 12px; }
+
+/* ------------------------------------------------------------ home screen */
+
+/* Home and Settings are full-window screens, not panes: there is no rail at
+   this level, because there is nothing yet to navigate within. */
+.screen {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.projects { margin: 0; padding: 0; list-style: none; }
+
+.projects li {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding: 11px 18px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.projects li:hover { background: var(--hover); }
+.projects .p-name { flex: none; width: 210px; font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.projects .p-path { flex: 1; min-width: 0; font-size: 11px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.projects .p-when { flex: none; color: var(--ink-3); font-size: 12px; white-space: nowrap; }
+.projects .p-forget { flex: none; padding: 2px 10px; font-size: 11px; opacity: 0; }
+.projects li:hover .p-forget { opacity: 1; }
+
+/* Moved or deleted. Shown and marked rather than dropped: a project that
+   silently vanishes from this list is a program that appears to have lost it. */
+.projects li.gone { cursor: default; }
+.projects li.gone .p-name, .projects li.gone .p-path { color: var(--ink-3); text-decoration: line-through; }
+.projects li.gone .p-when { color: var(--warn); }
+.projects li.gone .p-forget { opacity: 1; }
+
+.nothing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 64px 20px;
+  color: var(--ink-3);
+  text-align: center;
+}
+
+button.link { border-color: transparent; background: transparent; color: var(--ink-3); }
+button.link:hover:not(:disabled) { background: transparent; color: var(--ink); }
+
+/* The mark and the name, on Settings. Sized explicitly: an <img> with no
+   width in a flex card is an <img> at its intrinsic size, which for a 512px
+   icon is a card the width of the window. */
+.about { display: flex; align-items: center; gap: 11px; margin-bottom: 12px; }
+.about img { width: 42px; height: 42px; flex: none; display: block; border-radius: 8px; }
+.about .who-name { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; }
+.about .who-rev { margin-top: 1px; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); }
+
+.theme.wide-theme { display: inline-flex; margin-bottom: 4px; }
+.theme.wide-theme button { padding: 4px 16px; font-size: 12px; }
+
+/* --------------------------------------------------------------- buttons */
+
+button {
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s, opacity 0.1s;
+}
+
+button:hover:not(:disabled) { background: var(--hover); }
+button:disabled { opacity: 0.4; cursor: default; }
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+/* The background has to be restated: `button:hover:not(:disabled)` outranks
+   `button.primary` on specificity, so without this the primary action turns
+   into a dark grey rectangle under the pointer — which reads as disabled at
+   the exact moment it is being aimed at. */
+button.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); }
+button.danger { border-color: var(--bad); color: var(--bad); background: transparent; }
+button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
+
+/* ------------------------------------------------- the two centred screens */
+
+.centred {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.stack { display: flex; flex-direction: column; align-items: center; gap: 11px; }
+.stack h2 { margin: 0 0 6px; font-size: 19px; font-weight: 600; }
+.hero-mark { width: 56px; height: 56px; margin-bottom: 14px; border-radius: 10px; }
+
+.whisper { margin: 6px 0 0; color: var(--ink-3); font-size: 12px; text-align: center; max-width: 46ch; }
+.whisper.left { text-align: left; max-width: 66ch; }
+.whisper code, .state code, .sub code { color: var(--ink-2); font-size: 11px; }
+
+/* ------------------------------------------------------------------ panes */
+
+.work { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+.pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.pane.scroll { overflow: auto; }
+
+/* Every pane says what it is and what it is for, in the same place. That
+   sentence is the navigation aid the pill row never had room for. */
+.pane-head {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 16px 11px;
+  border-bottom: 1px solid var(--line);
+}
+
+.pane-head.thin { padding: 9px 16px; align-items: center; }
+.pane-head h2 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+.pane-head .sub { margin: 3px 0 0; color: var(--ink-3); font-size: 12px; max-width: 78ch; }
+.pane-tools { flex: none; display: flex; align-items: center; gap: 8px; }
+
+.body { padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; }
+.body.scroll { flex: 1; min-height: 0; overflow: auto; }
+
+.cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.card h3 { margin: 0 0 10px; font-size: 12px; font-weight: 600; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.06em; }
+
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 5px 16px; margin: 0; }
+.facts dt { color: var(--ink-3); }
+.facts dd { margin: 0; }
+
+.field { display: flex; flex-direction: column; gap: 5px; color: var(--ink-3); margin-bottom: 11px; }
+
+.field input, .search, .select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--input);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: 6px 9px;
+}
+
+.field input:focus, .search:focus, .select:focus { outline: none; border-color: var(--ink-3); }
+.select { max-width: 260px; }
+#voice-count { flex: none; white-space: nowrap; }
+.field input.bad { border-color: var(--bad); }
+
+.with-button { display: flex; gap: 8px; }
+.with-button input { flex: 1; min-width: 0; }
+.with-button button { flex: none; }
+
+.resolved-path {
+  display: flex;
+  gap: 12px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--input);
+}
+
+.resolved-path .k { flex: none; color: var(--ink-3); }
+.resolved-path .v { color: var(--ink); }
+
+.state { flex: none; margin: 0; padding: 9px 16px; font-size: 12px; border-bottom: 1px solid var(--line); }
+.state.ready { color: var(--ok); }
+.state.missing { color: var(--warn); }
+.card .state { padding: 0; margin: 0 0 10px; border: none; }
+
+.tally { margin: 0; padding: 0; list-style: none; }
+.tally li { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.tally li:last-child { border-bottom: none; }
+.tally .n { font-family: var(--mono); }
+
+.log-dir { flex: none; margin: 0; padding: 8px 16px; font-size: 11px; color: var(--ink-3); border-bottom: 1px solid var(--line); }
+
+/* ---------------------------------------------------------------- filters */
+
+.filters {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* Everything wrong with the folder, above the rows it is wrong about. */
+.problem-strip {
+  flex: none;
+  max-height: 30vh;
+  overflow: auto;
+  padding: 4px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink);
+  padding: 3px 11px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chip:hover { background: var(--hover); }
+.chip.on { font-weight: 600; border-color: var(--accent-line); background: var(--accent-soft); }
+.chip .n { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+.chip.on .n { color: var(--ink-2); }
+.chip.attention .n { color: var(--warn); }
+
+.search { width: 210px; }
+
+/* ------------------------------------------------------------------- grid */
+
+.grid-wrap { flex: 1; min-height: 0; overflow: auto; background: var(--grid); }
+
+.grid { width: 100%; border-collapse: collapse; }
+
+.grid thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: left;
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  background: var(--raise);
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.grid td { padding: 6px 16px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.grid tbody tr:hover td { background: var(--hover); }
+
+.c-scene    { width: 62px; }
+.c-still    { width: 62px; }
+.c-audio    { width: 84px; }
+.c-resolved { width: 132px; text-align: right; }
+.c-when     { width: 186px; }
+.c-sev      { width: 62px; }
+.c-scope    { width: 92px; }
+
+.grid td.c-scene { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+.grid td.c-when, .grid td.c-sev, .grid td.c-scope { white-space: nowrap; }
+.grid td.c-resolved { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.grid .frames { color: var(--ink-3); font-size: 11px; margin-left: 5px; }
+
+.thumb {
+  width: 44px;
+  height: 25px;
+  object-fit: cover;
+  display: block;
+  background: var(--line);
+  border-radius: 3px;
+  border: 1px solid var(--line-2);
+}
+
+.thumb.portrait { width: 25px; height: 44px; }
+.thumb.square   { width: 34px; height: 34px; }
+
+.file { font-family: var(--mono); font-size: 11px; color: var(--ink-2); margin-right: 9px; white-space: nowrap; }
+
+.source-cell { display: flex; align-items: center; min-width: 0; }
+
+.narration {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 2px 6px;
+  margin: -2px -6px;
+  cursor: text;
+}
+
+.narration:hover { border-color: var(--line-2); }
+.narration.blank { color: var(--ink-3); font-style: italic; }
+
+/* The same cell, mid-edit. Editing is one row at a time, on purpose: this is a
+   review grid (D-051), not a spreadsheet. */
+.narration-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: var(--ink);
+  background: var(--input);
+  border: 1px solid var(--accent-line);
+  border-radius: 5px;
+  padding: 2px 6px;
+  margin: -2px -6px;
+}
+
+.narration-input:focus { outline: none; }
+
+.badge {
+  display: inline-block;
+  min-width: 56px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--ink-2);
+}
+
+/* The one filled badge. A spoken scene is the one that can cost money, so it
+   is the one the eye lands on first. */
+.badge.tts    { color: var(--ink); border-color: var(--accent-line); background: var(--accent-soft); }
+.badge.file   { color: var(--ink-2); }
+.badge.silent { color: var(--ink-3); }
+
+.grid tr.running td { background: var(--raise); }
+.grid tr.done  td.c-resolved { color: var(--ok); }
+.grid tr.reused td.c-resolved { color: var(--cached); }
+.grid tr.failed td { color: var(--bad); background: var(--eb); }
+.grid tr.problem td { background: var(--eb); }
+.grid tr.problem td.c-scene { box-shadow: inset 2px 0 0 var(--bad-line); }
+
+.empty-note { color: var(--ink-3); padding: 22px 16px; margin: 0; }
+
+/* ----------------------------------------------------------------- voices */
+
+/* The chosen voice, said once and said large. Everything under it is the act
+   of changing it; this line is the answer to "what will I hear". */
+.chosen {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.chosen-who { flex: 1; min-width: 0; }
+.chosen-name { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+.chosen-id { margin-top: 1px; font-size: 11px; color: var(--ink-3); }
+
+.voices { margin: 0; padding: 0; list-style: none; }
+
+.voices li {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.voices li:hover { background: var(--hover); }
+.voices li.on { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+.voices .v-name   { flex: none; width: 168px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.voices li.on .v-name { font-weight: 600; }
+.voices .v-lang   { flex: none; width: 190px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.voices .v-gender { flex: none; width: 64px; color: var(--ink-3); font-size: 12px; }
+.voices .v-note   { flex: 1; min-width: 0; color: var(--ink-2); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.voices .v-id     { flex: none; width: 210px; font-size: 10.5px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+.voices .v-play   { flex: none; padding: 1px 9px; font-size: 11px; }
+
+/* A language name is the point of this list, so it is the last thing to go. */
+@media (max-width: 1320px) { .voices .v-note { display: none; } }
+@media (max-width: 1080px) { .voices .v-id { display: none; } }
+
+/* --------------------------------------------------------------- problems */
+
+.problems { margin: 0; padding: 0; list-style: none; }
+.problems li { display: flex; gap: 11px; padding: 5px 0; border-bottom: 1px solid var(--line); }
+.problems li:last-child { border-bottom: none; }
+.problems .sev { flex: none; min-width: 46px; font-family: var(--mono); font-size: 11px; color: var(--warn); }
+.problems li.error .sev { color: var(--bad); }
+
+/* ---------------------------------------------------------------- render */
+
+.progress { height: 4px; background: var(--line); border-radius: 3px; overflow: hidden; margin-bottom: 10px; }
+.bar { height: 100%; width: 0; background: var(--accent); transition: width 0.2s; }
+
+.live { margin: 0; padding: 0; list-style: none; font-family: var(--mono); font-size: 11px; max-height: 320px; overflow: auto; }
+.live li { padding: 3px 0; border-bottom: 1px solid var(--line); color: var(--ink-2); }
+.live li:last-child { border-bottom: none; }
+.live li.bad { color: var(--bad); }
+
+/* ------------------------------------------------------------- drop layer */
+
+.drop {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--ground) 88%, transparent);
+  border: 2px dashed var(--ink-3);
+  font-size: 16px;
+  z-index: 20;
+}
+
+/* ------------------------------------------------------------- status bar */
+
+.status-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 6px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink-3);
+  font-size: 11px;
+  min-height: 28px;
+}
+
+#status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.counts { flex: none; color: var(--ink-3); }
+.counts .attention { color: var(--warn); }
+
+/* At the stated 1100x700 minimum the path in the title bar and the rail's
+   width are the first things that can go. Nothing reflows into a mobile
+   layout, because there is no mobile. */
+@media (max-width: 1180px) {
+  .path { display: none; }
+  :root { --rail: 166px; }
+  .search { width: 150px; }
+  .projects .p-name { width: 150px; }
+}

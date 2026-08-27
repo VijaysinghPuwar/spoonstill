@@ -13,7 +13,7 @@ were underway.
 
 | | |
 |---|---|
-| Application code written | M0, M1, and M2 slices 1-3 — run `make gates` |
+| Application code written | M0, M1, M2, and M4's shell ahead of M3 — run `make gates` |
 | Rust toolchain on this machine | **installed** — rustc/cargo 1.94.0, clippy, rustfmt (2026-08-26) |
 | Version control | **initialised** 2026-08-26; planning docs committed before code |
 | `plan/` contents | 10 read-only reference checkouts (~1.7 GB) + 3 retired planning docs |
@@ -280,15 +280,14 @@ ls /tmp/s.mp4        # absent, or present and marked partial — never a valid-l
 
 ---
 
-## M2 — Project model and the three audio sources · IN PROGRESS (3 of 4 slices)
+## M2 — Project model and the three audio sources · COMPLETE
 
 **Goal.** `still render ./project/` renders a three-scene project — one TTS
 scene, one supplied-audio scene, one silent-duration scene — from a folder an
 operator could have produced by hand.
 
-**Where it stands:** the command exists and renders supplied-audio and silent
-scenes, several at a time. The TTS scene is slice 4, and it is the only thing
-between here and the goal as stated.
+**Where it stands:** done, 2026-08-26. `still render fixtures/projects/mixed/`
+renders all three sources into one film, and that is gate 7.
 
 ### Progress
 
@@ -300,7 +299,8 @@ own decisions. Where a slice is done, the exit gate it satisfies is named.
 | **1. The pure domain** | `spoonstill_core::path_safety` + `spoonstill_core::project`: containment, the scene model, and every validation rule that needs no disk. D-054, D-055. | ✅ 2026-08-26 — satisfies `cargo test -p spoonstill-core path_safety` |
 | **2. Import and `still validate`** | `project.yaml` and the CSV manifest, convention-mode stem pairing, path resolution and media probing merged into one problem list, `still validate` printing it. D-056. | ✅ 2026-08-26 — satisfies `still validate fixtures/projects/mixed/` |
 | **3. The three audio sources, and `still render`** | `AudioSource::resolve()` → `(normalized_path, Duration)`: ingest normalization to 48 kHz stereo, `ffprobe` on the normalized artifact, generated silence. Then `still render DIR` over a whole project — **parallel**, with two bounded pools. D-075, D-076, D-077, D-078. | ✅ 2026-08-26 — `make gates-m2` is 9/9 |
-| **4. TTS behind a trait** | Provider trait, typed settings and errors, ElevenLabs BYOK against a recorded fixture. **This is what closes M2.** | next |
+| **4. Speech behind a trait** | `spoonstill-tts`: the `Provider` trait, typed settings and errors, and the `edge` implementation — `edge-tts` through the one process boundary, cached under `hash(text, provider, voice, settings, profile)`. `still voices`, `--voice`. D-081, D-082. ElevenLabs is deferred, not cancelled. | ✅ 2026-08-26 — gate 7 renders `mixed/` |
+| **+ Getting media in** | Not in the original four. `spoonstill_app::ingest`, `still new`, `still add`: the operator drops what they have and the program names and pairs it. D-080. | ✅ 2026-08-26 |
 
 Slice 1 notes, for whoever picks this up:
 
@@ -400,10 +400,31 @@ Slice 3 notes:
 - Every referenced file exists, is readable, and probes as the media type it
   claims to be. Extensions are a hint, not evidence.
 
+Slice 4 notes:
+
+- **Edge TTS is the `edge-tts` command line tool, not a Rust client** (D-081).
+  The endpoint is reverse-engineered and moves; the Python implementation
+  tracks it. It is spawned through `spoonstill_media::command` — the one place
+  a process is spawned — so it inherits argument vectors, a timeout, retained
+  stderr, and a paste-ready command line, and `spoonstill-tts` moves to its own
+  layer above `spoonstill-media` to make that legal. The architecture test
+  enforces the new direction.
+- **The script goes in a file, never in an argument.** The command line is
+  logged (D-016) and lands in the bundle the operator sends us. Their words are
+  their content.
+- **A cache miss is the operator's money** once ElevenLabs lands, so the
+  provider's raw output is kept beside the normalized artifact: changing the
+  normalization profile re-normalizes without re-speaking. The key's fields are
+  length-prefixed, so no boundary can be moved without changing it.
+- **A voice chosen at the command line or in the window is an override for one
+  run** (D-082). Nothing writes `project.yaml`.
+- **Still owed from this slice: ElevenLabs.** `providers()` is one line plus a
+  module, and the recorded-fixture discipline in the risks below still stands.
+
 ### Exit gates
 
-`make gates-m2` runs all of these. **9/9 pass as of 2026-08-26**, with slice 4
-still to come.
+`make gates-m2` runs all of these. **9/9 pass as of 2026-08-26**, slice 4
+included.
 
 ```bash
 still validate fixtures/projects/mixed/     # 3 scenes, 3 sources, 0 warnings
@@ -421,12 +442,13 @@ cargo test -p spoonstill-core path_safety    # ../ traversal rejected; no existe
 Two amendments this milestone made to its own gates, both recorded rather than
 quietly applied:
 
-- **The render gate runs against `fixtures/projects/renderable/`, not
-  `mixed/`.** `mixed` contains a TTS scene and TTS is slice 4, so until it
-  lands, a gate against `mixed` could not pass. `renderable` is the same shape
-  without a spoken line; gate 7 asserts that `mixed` fails for exactly one
-  reason and names it. **When slice 4 lands, gate 7 becomes the `mixed`
-  render** and this note goes away.
+- **The bulk of the render gates run against `fixtures/projects/renderable/`,
+  not `mixed/`.** `renderable` is the same shape without a spoken line, so most
+  of M2 is provable on a machine with no network and no voice service. `mixed`
+  is gate 7's alone, and gate 7 now renders it. Where `edge-tts` is absent that
+  gate asserts the other half of D-020 instead: the render must fail and name
+  the missing tool, because a line somebody wrote must never quietly become
+  silence.
 - **The duration gate is asserted on the video stream** (D-078).
 
 Four gates that slice 3 added, because parallel rendering makes four new
@@ -440,13 +462,15 @@ shasum -a 256 a.mp4 b.mp4          # identical
 # 4. a second run reuses every narration and every segment (D-043, D-075)
 # 5. a second render of one project is refused, and says --force (D-077)
 # 6. odd dimensions and a Unicode filename survive the join (D-033, D-052)
-# 7. a TTS scene is refused by name rather than silently muted (D-020)
+# 7. a script, a recording and a silent still become one film (D-020)
 ```
 
 Secrets check — grep the run output, the manifest, the state DB, the cache
 keys, and the logged command lines for the API key. Zero hits, and a test that
-keeps it that way. **Belongs to slice 4**: there is no key in the product
-until the TTS provider lands.
+keeps it that way. **Still owed**: `edge` is BYOK-free, so there is no key in
+the product yet. It becomes real with ElevenLabs. The discipline is already in
+place, though — `edge` passes the operator's script through a *file* rather
+than an argument precisely because the command line is logged (D-081).
 
 ### Risks
 

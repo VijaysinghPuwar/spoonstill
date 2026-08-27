@@ -1,0 +1,29 @@
+[package]
+name = "spoonstill-desktop"
+description = "Tauri 2 shell: the review grid over spoonstill-app. Owns no business logic (D-010)."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+authors.workspace      = true
+publish.workspace      = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# D-010: the shell reaches spoonstill-app and stops there. It may not depend on
+# spoonstill-media or spoonstill-state, exactly like the CLI — enforced by
+# crates/spoonstill-cli/tests/architecture.rs.
+spoonstill-app  = { workspace = true }
+spoonstill-core = { workspace = true }
+# `protocol-asset` is what lets the grid show a real thumbnail. The scope
+# is empty here and granted per project at runtime (see main.rs), so opening
+# a folder is what makes its stills readable and nothing else ever is.
+tauri               = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true

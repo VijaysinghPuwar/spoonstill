@@ -69,6 +69,16 @@ pub struct RenderProjectOptions {
     pub audio_jobs: usize,
     /// Take the lock even if another run appears to hold it.
     pub force: bool,
+    /// Speak every spoken scene in this voice instead of the project's own.
+    ///
+    /// `project.yaml` is an input and the renderer never writes to it (D-013),
+    /// so a voice chosen in the window — or on the command line — is an
+    /// override for **this run**, not a change to the project. An operator who
+    /// wants it to stick writes it into `project.yaml` themselves, which is
+    /// also the only way it survives into someone else's checkout.
+    pub voice: Option<String>,
+    /// The same, for the provider.
+    pub provider: Option<String>,
 }
 
 impl RenderProjectOptions {
@@ -86,6 +96,8 @@ impl RenderProjectOptions {
             // number (D-023) — which is exactly why it is a separate one.
             audio_jobs: pool::default_jobs().saturating_mul(2).max(1),
             force: false,
+            voice: None,
+            provider: None,
         }
     }
 }
@@ -323,8 +335,9 @@ pub fn render_project(
     cancel: &Cancel,
     on_event: &(dyn Fn(FilmEvent) + Sync),
 ) -> Result<RenderedFilm, FilmError> {
-    let project =
+    let mut project =
         crate::import::load(&options.root, &ProbeCheck::from_env()).map_err(FilmError::Import)?;
+    apply_voice_override(&mut project, options);
 
     let errors = project.errors().count();
     if errors > 0 {
@@ -447,7 +460,45 @@ pub fn render_project(
 /// wherever it points. The `output:` setting is *manifest data* and is held to
 /// D-054 like every other path in the file — a project that renders itself
 /// into `../../etc` is the thing containment exists to prevent.
-fn destination(project: &Project, options: &RenderProjectOptions) -> Result<PathBuf, FilmError> {
+/// Point every spoken scene at the voice this run asked for.
+///
+/// Applied to the loaded model rather than to the file, and applied before the
+/// cache key is computed — so switching voices is a cache miss, as it must be,
+/// and switching back is a hit (D-043).
+fn apply_voice_override(project: &mut crate::import::Project, options: &RenderProjectOptions) {
+    if options.voice.is_none() && options.provider.is_none() {
+        return;
+    }
+    for scene in &mut project.scenes {
+        if let spoonstill_core::AudioSource::Tts {
+            provider, voice, ..
+        } = &mut scene.spec.source
+        {
+            if let Some(chosen) = &options.voice {
+                *voice = spoonstill_core::project::VoiceId(chosen.clone());
+            }
+            if let Some(chosen) = &options.provider {
+                *provider = spoonstill_core::project::ProviderId(chosen.clone());
+            }
+        }
+    }
+}
+
+/// Where this run's film will be written.
+///
+/// Public because the window has to be able to *show* the operator the file
+/// before they press Render — "no option to see where it saves" was a real
+/// complaint, and the honest answer is one the renderer already computes.
+/// Resolving it in two places would be two answers; this is the one.
+///
+/// # Errors
+///
+/// [`FilmError::OutputOutsideProject`] when `project.yaml`'s own `output`
+/// setting escapes the project root and no explicit `out` overrides it.
+pub fn destination(
+    project: &Project,
+    options: &RenderProjectOptions,
+) -> Result<PathBuf, FilmError> {
     if let Some(out) = &options.out {
         return Ok(out.clone());
     }
@@ -475,6 +526,12 @@ fn resolve_audio(
     on_event: &(dyn Fn(FilmEvent) + Sync),
 ) -> Result<Vec<ResolvedAudio>, FilmError> {
     let cache = AudioCache::in_project(&project.root);
+    let policy = &crate::audio::AudioPolicy {
+        trim: spoonstill_media::audio::Trim {
+            head_seconds: project.settings.trim_head,
+            tail_seconds: project.settings.trim_tail,
+        },
+    };
 
     let outcomes = pool::run(
         &project.scenes,
@@ -486,6 +543,7 @@ fn resolve_audio(
                 tools,
                 &scene.spec.source,
                 scene.audio.as_deref(),
+                policy,
                 log,
             );
             match &resolved {

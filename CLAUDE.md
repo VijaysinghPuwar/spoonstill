@@ -6,15 +6,16 @@ narration boundaries. It is **not a video editor** — no timeline, no scrubber.
 
 ## Ground truth, in 30 seconds
 
-- **M0 and M1 are complete; M2 is three slices of four.** There *is* rendering
-  code now, and it renders whole projects: the filter graph, the FFmpeg process
-  boundary, the segment profile and its assertion, `still render-scene`, the
-  project model and `still validate`, and — as of slice 3 — audio
+- **M0, M1 and M2 are complete. M4's shell exists ahead of M3.** It renders
+  whole projects: the filter graph, the FFmpeg process boundary, the segment
+  profile and its assertion, the project model and `still validate`, audio
   normalization, generated silence, a content-addressed cache, a **bounded
-  parallel render pool**, the concat join, and `still render DIR`. There is
-  still **no TTS and no state database**; if a document describes those as
-  existing, it is describing an intended system. Run `make gates` to see
-  exactly where things stand.
+  parallel render pool**, the concat join, `still render DIR` — and, as of
+  slice 4, **speech**: `spoonstill-tts` with the Edge provider, wired through
+  the same cache. There is also a **drop-in importer** (`still new` / `still
+  add`, D-080) and a **Tauri window** in `apps/desktop`. There is still **no
+  state database** (M3) and **no ElevenLabs provider**; if a document describes
+  those as existing, it is describing an intended system. Run `make gates`.
 - **Rust 1.94.0 is installed**, pinned by `rust-toolchain.toml`. Homebrew's
   rustup keeps its shims in `/opt/homebrew/opt/rustup/bin`, **not**
   `~/.cargo/bin` — that path is on `PATH` via `~/.zshrc` and is re-exported by
@@ -122,7 +123,8 @@ what any document claims:
 
 ```bash
 make gates          # M0 8/8, M1 8/8, M2 9/9 = intact.
-                    # Also: make gates-m1 | gates-m2 | test | lint | fixtures | help
+                    # Also: make gates-m1 | gates-m2 | test | lint | fixtures
+                    #       | brand | help
 git log --oneline   # planning corpus, then M0, then M1, then M2 slice by slice
 ```
 
@@ -147,15 +149,30 @@ cargo build --release -p spoonstill-cli
 # re-encodes nothing (D-043, D-075) and takes about a seventh of the time.
 ./target/release/still render fixtures/projects/renderable/ --out /tmp/film.mp4 --jobs 4
 
+# A project the way an operator makes one: a folder, then whatever they have.
+# Nothing is renamed by hand and nothing is moved out of the source folder.
+./target/release/still new /tmp/demo fixtures/generated/*.jpg fixtures/generated/n.wav
+./target/release/still render /tmp/demo --out /tmp/demo.mp4
+
+# Speech. `mixed` has a .txt beside a photo, which is a line to be spoken.
+./target/release/still voices en-US            # needs `edge-tts` on PATH
+./target/release/still render fixtures/projects/mixed/ --out /tmp/mixed.mp4 \
+  --voice en-GB-RyanNeural
+
 ./target/release/still diagnostics export --project /tmp --out /tmp/bundle.txt
+
+# The window. Three screens: make or open, fill, review.
+cargo run --release -p spoonstill-desktop
 ```
 
 ### State as of 2026-08-26
 
-**M0 and M1 are complete. M2 is three slices of four.** `make gates` is 8/8 for
-M0, 8/8 for M1 and 9/9 for M2. The M2 gates cover slices 1–3; slice 4 (TTS) is
-what closes the milestone, and gate 7 currently asserts that a TTS scene is
-*refused by name* rather than rendered.
+**M0, M1 and M2 are complete.** `make gates` is 8/8 for M0, 8/8 for M1 and 9/9
+for M2 — 25 gates, all green. M2's gate 7 now renders
+`fixtures/projects/mixed/`: a photo with a script, a photo with a recording,
+and a photo with neither, joined into one film. On a machine with no `edge-tts`
+that gate checks the other half of D-020 instead — the render must fail and
+name the missing tool, never quietly substitute silence for a written line.
 
 M1 delivered the whole product in miniature: `still render-scene --image X
 --audio Y --out seg.mp4` measures the narration, derives an exact frame count,
@@ -171,12 +188,42 @@ root (D-054), probes every file, and prints **every problem at once**.
 **several at a time**, and joins the validated segments with a stream copy.
 Detail and the four-slice table: `plan.md` §M2.
 
+**Getting media into a project is the program's job, not the operator's**
+(D-080). `still new DIR [FILE...]`, `still add DIR FILE...`, and the window's
+drop target all reach `spoonstill_app::ingest`, which copies photos in as
+`001`, `002`, … in natural order and pairs each with a recording or a `.txt`
+script — **by stem first, then by position**. It never moves an original, never
+overwrites, never writes `project.yaml`, and reports junk rather than refusing
+a folder. This exists because the pairing convention was costing the operator
+twenty to forty minutes of renaming per film, which was most of the time the
+tool claimed to save.
+
+**Audio is levelled, and provider padding is trimmed** (D-084). Every
+artifact — spoken, supplied or silent — is brought to -16 LUFS by one measured
+linear gain, so a TTS line and a phone recording sit at the same level in one
+film. Synthesized speech is trimmed to `tts.trim_head` / `tts.trim_tail`
+(0.10 s / 0.25 s); **a supplied recording is never trimmed**, because their
+padding is a decision and a provider's is an artifact. Normalization costs two
+FFmpeg passes per unique source, both behind the content cache.
+
+**Speech, in one paragraph.** `spoonstill-tts` is the provider trait; `edge` is
+the only implementation and it **spawns the `edge-tts` command line tool**
+through `spoonstill_media::command` rather than reimplementing a
+reverse-engineered protocol (D-081). The text goes in a file, never in an
+argument, because the command line is logged (D-016) and the script is the
+operator's content. The cache key is
+`hash(text, provider, voice, settings)` — **no normalization in it** — and the
+raw output is kept under that key, so changing the profile, the loudness target
+or the trim re-normalizes every line and re-speaks none (D-084). The normalized
+artifact has its own key on top of it. Every field is length-prefixed. `still voices [FILTER]` lists what a provider offers; `--voice`
+overrides for one run without touching `project.yaml` (D-082).
+
 **Parallel rendering, in one paragraph.** `--jobs N` sets how many scenes
 encode at once; the default is `available_parallelism() / 2` capped at 4,
 because the speedup curve flattens at three while memory keeps climbing at
 780 MB per worker (measured: `ffmpeg-findings.md` §10, D-076). `--audio-jobs`
 sizes the other pool, which exists separately because ingest is I/O-bound and
-becomes a TTS rate limit at slice 4 (D-044). **Concurrency changes the timing
+is the TTS provider's rate limit (D-044). **Concurrency changes the timing
 and nothing else** — `--jobs 1` and `--jobs 4` produce byte-identical films,
 and that is gate 3, not a comment (D-077). Two renders of one project are
 refused by `.spoonstill/render.lock`; two renders of *different* projects share
@@ -195,42 +242,102 @@ What exists now, by crate:
   `atomic` (write-beside-then-rename, shared by all of them).
 - `spoonstill-state` — `logs`: the JSON Lines sink and the bundle export.
   **Still no SQLite** — that is M3.
+- `spoonstill-tts` — the `Provider` trait, `Request`/`Voice`/`TtsError`, and
+  `edge`. **Sits above `spoonstill-media`** (D-081), because a provider that
+  shells out uses the one process boundary rather than growing a second one.
 - `spoonstill-app` — `import` (`settings`, `rows`, and the resolution stage),
-  `audio` (the cache and `AudioSource` resolution), `pool` (the bounded worker
-  pool), `film` (`still render`: two pools, the lock, the join), `render`
-  (one scene), `diagnostics`, and `surface`. Owns `serde_yaml_ng` and `csv`;
-  the domain model does not know what a file format is.
-- `spoonstill-cli` — `still validate`, `still render`, `still render-scene`,
-  `still diagnostics export|where`.
+  `ingest` (making a project and filling it), `audio` (the cache and
+  `AudioSource` resolution, speech included), `pool` (the bounded worker pool),
+  `film` (`still render`: two pools, the lock, the join), `render` (one scene),
+  `diagnostics`, `tts` (the re-export the control surfaces use), and `surface`.
+  Owns `serde_yaml_ng` and `csv`; the domain model does not know what a file
+  format is.
+- `spoonstill-cli` — `still new`, `still add`, `still validate`, `still render`,
+  `still render-scene`, `still voices`, `still diagnostics export|where`.
+- `apps/desktop` — the Tauri 2 window (D-051's review grid, D-083's shape,
+  D-085 and D-086's navigation). **Two levels: home is the operator's projects
+  plus app-level Settings; a project is a left rail over one dense grid —
+  Scenes, Voice, Output, Render, Runs.** Sixteen commands, all translation. The
+  design brief and canvas it was built against are in
+  `~/Downloads/Desktop application redesign` — read D-083 for what was followed
+  and the one thing that was not, then D-085 and D-086 for what the author's own
+  use of it changed. **Built ahead of M3**, which M4's entry condition says it
+  should not have been; it is a shell over M2 and gains M3's resumability for
+  free when M3 lands.
 
-**Next task is M2 slice 4** — TTS behind a trait, which is what closes M2.
-Read `plan.md` §M2 and D-023 first. In rough order:
+**The window has two levels, and the first one is the operator's projects**
+(D-086). Home lists every folder ever opened — newest first, path written
+`~/Downloads/test`, a moved project struck through with a Forget button rather
+than silently dropped — plus **Settings**, which is app-level: whether the voice
+service is reachable, which voice it falls back to, and the theme. The list is
+Rust's, in the OS config directory, written inside `validate_project` so there
+is no way to open a project and have it not appear. *Which projects has this
+person opened* is not a fact about any one of them, so it is not under a
+`.spoonstill/`. Inside a project there is no Project tab and no Settings tab:
+both were screens that restated facts the rail and the title bar already carry.
 
-1. The provider trait in `spoonstill-tts`, with typed settings and errors. One
-   `provider` module per implementation; a giant `match` on a provider name is
-   the `MoneyPrinterTurbo/app/services/voice.py` mistake.
-2. ElevenLabs, BYOK via `keyring-rs` (D-014), against a **recorded fixture**
-   from the first commit. The live key belongs in one integration test that is
-   skipped by default.
-3. Wire it into `spoonstill_app::audio::resolve`, whose `Tts` arm is currently
-   one typed `AudioError::TtsNotAvailable`. The cache key is
-   `hash(text, provider, voice, settings, profile)` — D-043, and with BYOK a
-   miss costs the operator money.
-4. Then `still render fixtures/projects/mixed/` renders, and m2-gates gate 7
-   changes from "TTS is refused by name" to that render.
-5. The secrets check plan.md §M2 asks for becomes real at that point: grep the
-   run output, the manifest, the cache keys and the logged command lines for
-   the key. Zero hits, and a test that keeps it that way.
+**Choosing a voice and a destination is the window's job, not `project.yaml`'s**
+(D-085). The rail carries the two standing answers — which voice, and what file
+— and each is a screen: **Voice** lists the provider's whole catalogue with a
+language filter, a gender filter and a search box, and auditions any row on
+click through `spoonstill_app::audio::preview`, which is the same cache and the
+same normalization a real scene gets (D-084), so it costs nothing the second
+time. **Output** is a file name, a folder and a Browse button, with the joined
+absolute path shown live; the join and every refusal happen in Rust
+(`resolve_output`), because a webview that concatenates paths is a webview that
+can be made to concatenate `../..`. Both are overrides for one run — nothing
+here writes to `project.yaml` (D-013).
 
-`.spoonstill/state.db` and RAM-derived pool sizing (D-044, D-076) are **M3**.
-The audio and segment caches are already on disk as content-named directories
-(D-075) — M3 gives them an index, not a home.
+**A locale code is not a language and `default` is not a voice** (D-086). Voice
+rows and the language filter read `English (United Kingdom)`, built from the
+tag's *parts* via `Intl.DisplayNames` — asked for `en-GB` whole the platform
+answers "British English", which files the English voices under A, B and I. The
+filter opens on a language the operator can read rather than on whatever sorts
+first. And `Provider::default_voice()` resolves `tts.voice: default` to a real
+name everywhere it is shown, because "default" does not answer "whose voice will
+I hear".
 
-**Open decisions:** only D-072 (captions) remains, and it does not block M2.
-D-054 through D-057 and D-075 through D-078 were added during M2 and are all
-Accepted — read D-056 before touching the import path, D-057 before touching
-concat or transitions, D-076/D-077 before touching the pool, and D-078 before
-changing what the finished film is asserted against.
+**Next task is M3** — `.spoonstill/state.db`, the resumable queue, and
+RAM-derived pool sizing (D-013, D-044, D-076). Read `plan.md` §M3 first. The
+audio and segment caches are already on disk as content-named directories
+(D-075); M3 gives them an index, not a home.
+
+Two things M2 deliberately left for later, in rough priority order:
+
+1. **ElevenLabs**, BYOK via `keyring-rs` (D-014), against a recorded fixture.
+   The trait and the cache are already shaped for it — `providers()` in
+   `spoonstill-tts` is one line plus a module. The live key belongs in one
+   integration test that is skipped by default, and the secrets check plan.md
+   §M2 asks for becomes real then: grep the run output, the manifest, the cache
+   keys and the logged command lines for the key. Zero hits, and a test that
+   keeps it that way. `edge` already keeps the *script* out of the logs, which
+   is the same discipline (D-081).
+2. **One long narration split on silence.** The author records one continuous
+   voiceover as often as one clip per scene; `ingest` pairs positionally today,
+   so a single long recording becomes scene 1 and nothing else. Splitting it on
+   silence into as many pieces as there are photos is the biggest remaining
+   saving in the whole tool.
+
+**The logo, in one paragraph.** The mark is final as of 2026-08-26 (D-079):
+three stacked stills, the front one carrying the image. It is **one ink at
+three opacities**, not three greys — each still is an opaque black plate under
+a translucent stroke, which is why the two rear strokes brighten where they
+cross. It is **defined on black** and is not background-agnostic; the black
+plates are load-bearing, so every square use carries its own black tile. Do not
+hand-edit any SVG or icon: the geometry lives once in `scripts/gen-brand.py`
+and `make brand` emits all of them, stdlib only. The JPEG in
+`assets/brand/reference/` is provenance, not an asset. The window palette in
+`apps/desktop/ui/styles.css` continues the same ink series and should not
+acquire a colour that is not a failure or a warning.
+
+**Open decisions:** only D-072 (captions) remains, and it does not block
+anything. D-054 through D-057 and D-075 through D-082 were added during M2 and
+are all Accepted — read D-056 before touching the import path, D-057 before
+touching concat or transitions, D-076/D-077 before touching the pool, D-078
+before changing what the finished film is asserted against, D-079 before
+touching anything with the logo in it, D-080 before touching `ingest`, and
+D-081/D-082 before touching a provider, D-083, D-085 and D-086 before touching
+the window, and D-084 before touching anything in the audio path.
 
 **Do not re-derive these** — they cost measurement time and are already settled
 in code with tests: the exact filter string, the 90 kHz time base, the H.264

@@ -14,12 +14,14 @@ pub mod audio;
 pub mod diagnostics;
 pub mod film;
 pub mod import;
+pub mod ingest;
 pub mod pool;
 pub mod render;
 
 pub use audio::{AudioCache, AudioError, ResolvedAudio};
 pub use film::{FilmError, FilmEvent, RenderProjectOptions, RenderedFilm, render_project};
 pub use import::{ImportError, MediaCheck, Mode, ProbeCheck, Project, ResolvedScene, Role};
+pub use ingest::{IngestError, Ingested, add_media, create_project};
 pub use render::{RenderError, RenderSceneOptions, render_scene};
 
 /// The types the control surface needs, re-exported through the layer it is
@@ -30,6 +32,20 @@ pub use render::{RenderError, RenderSceneOptions, render_scene};
 /// `spoonstill-cli/tests/architecture.rs` enforces it. That rule is the reason
 /// the Tauri shell at M4 will not have to re-derive any of this: whatever the
 /// CLI can reach, the shell can reach, through the same door.
+/// The voice services, re-exported through the layer the control surface is
+/// allowed to depend on (D-010).
+///
+/// The CLI and the shell both need to *list* voices and to report a provider
+/// that is not installed. Neither may reach `spoonstill-tts` directly — that
+/// is the same rule that keeps the FFmpeg boundary out of both of them, and
+/// `spoonstill-cli/tests/architecture.rs` enforces it.
+pub mod tts {
+    pub use spoonstill_tts::{
+        Availability, Provider, TtsError, Voice, opening, provider, providers,
+    };
+}
+
+/// Types the control surface needs from the infrastructure layer.
 pub mod surface {
     pub use spoonstill_media::Progress;
     pub use spoonstill_media::scene::{Cancel, EncodeSettings, RenderedScene};

@@ -7,14 +7,14 @@
 //! ```text
 //! AudioSource::File   -> normalize the operator's recording into the cache
 //! AudioSource::Silent -> generate a silent track of an exact sample count
-//! AudioSource::Tts    -> synthesize, then normalize   [M2 slice 4]
+//! AudioSource::Tts    -> synthesize with a provider, then normalize
 //!         all three -> ffprobe the artifact -> (path, duration)
 //! ```
 //!
 //! The renderer never learns which branch a scene took. That is D-020's actual
-//! test — "adding a fourth source must not touch the renderer" — and it is why
-//! the TTS arm being unimplemented shows up here as one typed error rather
-//! than as a hole somewhere downstream.
+//! test — "adding a fourth source must not touch the renderer" — and slice 4
+//! is the proof: speaking a line was added here, and nothing downstream of
+//! `(path, duration)` was touched to make it work.
 //!
 //! ## The cache is content-addressed, and that is a correctness requirement
 //!
@@ -29,7 +29,13 @@
 //! |---|---|
 //! | `File` | `hash(file bytes, profile)` |
 //! | `Silent` | `hash("silent", sample count, profile)` |
-//! | `Tts` | `hash(text, provider, voice, settings, profile)` — slice 4 |
+//! | `Tts` | `hash(text, provider, voice, settings, profile)` |
+//!
+//! The TTS key is the one that matters most: with BYOK a miss costs the
+//! operator money, so it must hit for a line that has not changed even when the
+//! project has been renamed, moved, or re-imported. Nothing in it is a path.
+//! The provider's own raw output is kept beside the normalized artifact for the
+//! same reason — re-normalizing must never mean speaking the line again.
 //!
 //! ## What lives here and what waits for M3
 //!
@@ -47,11 +53,52 @@ use spoonstill_core::diagnostics::Diagnostics;
 use spoonstill_core::hash::{Fnv1a, fnv1a_fields};
 use spoonstill_core::project::MAX_SCENE_SECONDS;
 use spoonstill_core::{AudioSource, SAMPLE_RATE, STATE_DIR};
-use spoonstill_media::audio::{self, NORMALIZED_EXT, NORMALIZED_PROFILE};
+use spoonstill_media::audio::{self, NORMALIZED_EXT, NORMALIZED_PROFILE, Shape, Trim};
 use spoonstill_media::{MediaError, Tools};
+use spoonstill_tts::TtsError;
 
 /// Where normalized audio lives, under [`STATE_DIR`].
 pub const AUDIO_CACHE_DIR: &str = "cache/audio";
+
+/// How much provider padding a spoken scene keeps, and the fact that a
+/// supplied recording keeps all of its own.
+///
+/// This is the project's policy, resolved once and passed down, rather than a
+/// constant read inside the resolver — the values are settings (`tts.trim_head`
+/// and `tts.trim_tail`) and they are part of the cache key, so they have to
+/// travel with the request that uses them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AudioPolicy {
+    /// Applied to synthesized speech only.
+    pub trim: Trim,
+}
+
+/// Seconds of a provider's leading silence to keep (D-084).
+pub const DEFAULT_TRIM_HEAD: f64 = 0.10;
+
+/// Seconds of its trailing silence to keep.
+///
+/// Not zero: a cut landing on the final consonant sounds like a dropped frame.
+/// A quarter of a beat reads as punctuation.
+pub const DEFAULT_TRIM_TAIL: f64 = 0.25;
+
+impl Default for AudioPolicy {
+    fn default() -> Self {
+        AudioPolicy {
+            trim: Trim {
+                head_seconds: DEFAULT_TRIM_HEAD,
+                tail_seconds: DEFAULT_TRIM_TAIL,
+            },
+        }
+    }
+}
+
+/// Extension for a provider's raw output, before normalization.
+///
+/// Deliberately not `.mp3`: providers differ, and FFmpeg picks a demuxer by
+/// sniffing content rather than by reading an extension, so a name that claims
+/// a format would be a lie with no upside.
+const SPOKEN_EXT: &str = "spoken";
 
 /// Chunk size for hashing a source file.
 ///
@@ -75,17 +122,12 @@ pub struct ResolvedAudio {
 /// Why a scene's narration could not be resolved.
 #[derive(Debug)]
 pub enum AudioError {
-    /// The scene needs TTS, which arrives in M2 slice 4.
+    /// The line could not be spoken.
     ///
     /// A named, typed refusal rather than a panic or a silent silent-scene:
     /// substituting silence for a line somebody wrote would produce a film
-    /// that looks finished and is not.
-    TtsNotAvailable {
-        /// Which provider the scene asked for.
-        provider: String,
-        /// The opening of the line, to identify the row.
-        text: String,
-    },
+    /// that looks finished and is not (D-020).
+    Tts(Box<TtsError>),
     /// A `File` scene reached this layer without a resolved path. A bug, not
     /// operator error — import returns one for every `File` scene it keeps.
     NoResolvedPath,
@@ -108,12 +150,7 @@ pub enum AudioError {
 impl std::fmt::Display for AudioError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AudioError::TtsNotAvailable { provider, text } => write!(
-                f,
-                "needs text-to-speech ({provider}) for {text:?}, which is not built yet \
-                 — M2 slice 4. Give the scene an `audio_file` or a `duration` to render \
-                 it today."
-            ),
+            AudioError::Tts(e) => write!(f, "cannot speak its line — {e}"),
             AudioError::NoResolvedPath => {
                 f.write_str("has a supplied narration whose path was never resolved")
             }
@@ -130,7 +167,22 @@ impl std::fmt::Display for AudioError {
     }
 }
 
-impl std::error::Error for AudioError {}
+impl std::error::Error for AudioError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            AudioError::Tts(e) => Some(e),
+            AudioError::Media(e) => Some(e),
+            AudioError::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+impl From<TtsError> for AudioError {
+    fn from(e: TtsError) -> Self {
+        AudioError::Tts(Box::new(e))
+    }
+}
 
 impl From<MediaError> for AudioError {
     fn from(e: MediaError) -> Self {
@@ -165,6 +217,91 @@ impl AudioCache {
         self.directory
             .join(format!("{kind}-{key:016x}.{NORMALIZED_EXT}"))
     }
+
+    /// Where a provider's raw output lives.
+    ///
+    /// **Keyed on the words, not on the normalization.** This is the whole
+    /// point of keeping it: changing the normalization profile, or the trim, or
+    /// the loudness target must re-*normalize* every line and re-*speak* none
+    /// of them. With BYOK the difference is the operator's money; with any
+    /// provider it is their afternoon.
+    #[must_use]
+    pub fn spoken_path(&self, key: u64) -> PathBuf {
+        self.directory
+            .join(format!("spoken-{key:016x}.{SPOKEN_EXT}"))
+    }
+}
+
+/// The sample line a voice audition speaks when the operator has not written
+/// one of their own.
+///
+/// Short on purpose: an audition is a decision about timbre, and a long line
+/// is a long wait for the same decision.
+pub const PREVIEW_LINE: &str = "This is how this voice will read your narration.";
+
+/// Speak one line in a voice the operator is considering, and hand back the
+/// artifact to play.
+///
+/// This is an **audition**, not a render: nothing about the project changes,
+/// `project.yaml` is not written (D-013), and no scene is bound to the voice.
+/// It exists because choosing a voice by reading `en-GB-RyanNeural` off a list
+/// is not choosing a voice.
+///
+/// It goes through the same cache and the same normalization as a real scene
+/// (D-084), for two reasons. The audition sounds like the film will sound,
+/// levelled and trimmed the same way — an audition at a different loudness is
+/// a lie about the result. And auditioning the same voice twice costs nothing,
+/// which is the difference between comparing six voices and settling for the
+/// first one that works.
+///
+/// # Errors
+///
+/// [`AudioError`] — an unreachable provider, an unknown voice, an empty line.
+pub fn preview(
+    root: &Path,
+    provider: &str,
+    voice: &str,
+    text: &str,
+) -> Result<ResolvedAudio, AudioError> {
+    // The trim is the project's, read from its own settings, so that the
+    // audition is trimmed exactly as the render would trim it. A project whose
+    // settings will not parse still auditions — with the defaults, and with the
+    // problem left for `validate` to report, because a broken `fps` is not a
+    // reason to refuse to play a voice.
+    let settings = crate::import::settings::load(root)
+        .map(|(settings, _)| settings)
+        .unwrap_or_default();
+    let policy = AudioPolicy {
+        trim: Trim {
+            head_seconds: settings.trim_head,
+            tail_seconds: settings.trim_tail,
+        },
+    };
+
+    let source = AudioSource::Tts {
+        text: text.trim().to_owned(),
+        provider: spoonstill_core::project::ProviderId(provider.to_owned()),
+        voice: spoonstill_core::project::VoiceId(voice.to_owned()),
+        settings: spoonstill_core::project::TtsSettings::default(),
+    };
+
+    // The log is opened before the work, like a render's is (D-016): an
+    // audition that fails is exactly as diagnosable as a scene that fails.
+    let log = spoonstill_state::FileLog::open(root).ok();
+    let sink: &dyn Diagnostics = log
+        .as_ref()
+        .map_or(&spoonstill_core::diagnostics::Noop, |l| {
+            l as &dyn Diagnostics
+        });
+
+    resolve(
+        &AudioCache::in_project(root),
+        &Tools::from_env(),
+        &source,
+        None,
+        &policy,
+        sink,
+    )
 }
 
 /// Resolve one scene's narration.
@@ -182,6 +319,7 @@ pub fn resolve(
     tools: &Tools,
     source: &AudioSource,
     file: Option<&Path>,
+    policy: &AudioPolicy,
     log: &dyn Diagnostics,
 ) -> Result<ResolvedAudio, AudioError> {
     let kind = source.kind();
@@ -202,11 +340,34 @@ pub fn resolve(
             let samples = samples_for(seconds);
             (key_for_silence(samples), Work::Silence(samples))
         }
-        AudioSource::Tts { text, provider, .. } => {
-            return Err(AudioError::TtsNotAvailable {
-                provider: provider.to_string(),
-                text: opening(text),
-            });
+        AudioSource::Tts {
+            text,
+            provider,
+            voice,
+            settings,
+        } => {
+            if text.trim().is_empty() {
+                return Err(AudioError::Tts(Box::new(TtsError::BadRequest {
+                    provider: provider.to_string(),
+                    detail: "the line is empty".to_owned(),
+                })));
+            }
+            // Sorted, so that two projects that spell the same settings in a
+            // different order share one cache entry rather than paying twice.
+            let settings = settings.sorted();
+            let speech = key_for_speech(text, &provider.0, &voice.0, &settings);
+            (
+                // Two keys, deliberately. The words decide what is spoken; the
+                // words *and* the normalization decide what is rendered.
+                key_for_normalized_speech(speech, &policy.trim),
+                Work::Speak {
+                    speech,
+                    text,
+                    provider: &provider.0,
+                    voice: &voice.0,
+                    settings,
+                },
+            )
         }
     };
 
@@ -228,18 +389,75 @@ pub fn resolve(
     }
 
     let made = match work {
-        Work::Normalize(original) => audio::normalize(tools, &original, &path, log)?,
+        Work::Normalize(original) => {
+            // `as_supplied`: the operator's own recording keeps its own ends.
+            // Trimming it would be the "we fixed this for you" behaviour
+            // plan.md §M2 rules out — their padding is a decision, a
+            // provider's is an artifact.
+            audio::normalize(tools, &original, &path, &Shape::as_supplied(), log)?
+        }
         Work::Silence(samples) => audio::silence(tools, samples, &path, log)?,
+        Work::Speak {
+            speech,
+            text,
+            provider,
+            voice,
+            settings,
+        } => {
+            let spoken = cache.spoken_path(speech);
+            if !spoken.exists() {
+                // The provider is found before anything is written: a project
+                // that names one this build does not have must say so, not
+                // create a cache directory first (D-002).
+                let engine = spoonstill_tts::provider(provider)?;
+                std::fs::create_dir_all(cache.directory()).map_err(|source| AudioError::Io {
+                    path: cache.directory().to_path_buf(),
+                    source,
+                })?;
+                let request = spoonstill_tts::Request {
+                    text,
+                    voice,
+                    settings: &settings.values,
+                };
+                let said = engine.speak(&request, &spoken)?;
+                log.record(
+                    &spoonstill_core::diagnostics::Event::info("tts", "spoke one line")
+                        .with("provider", provider)
+                        .with("voice", voice)
+                        .with("bytes", said.bytes.to_string())
+                        // The command, not the words: the script is the
+                        // operator's content and never enters a bundle (D-016).
+                        .with("command", said.how),
+                );
+            }
+            audio::normalize(tools, &spoken, &path, &Shape::spoken(policy.trim), log)?
+        }
     };
     finish(kind, made.path, made.duration, false)
 }
 
 /// What resolving this source will take, once the cache has been asked.
-enum Work {
+///
+/// Borrowed from the [`AudioSource`] rather than cloned: at n=500 the lines are
+/// already in memory once and there is no reason for them to be there twice.
+enum Work<'a> {
     /// Normalize the operator's own recording (D-021).
     Normalize(PathBuf),
     /// Generate this many samples of silence (D-020).
     Silence(u64),
+    /// Say a line, then normalize what came back (D-023).
+    Speak {
+        /// Key of the raw output, which depends on the words and nothing else.
+        speech: u64,
+        /// The words.
+        text: &'a str,
+        /// Which provider says them.
+        provider: &'a str,
+        /// In which voice.
+        voice: &'a str,
+        /// The provider's knobs, already in canonical order.
+        settings: spoonstill_core::project::TtsSettings,
+    },
 }
 
 fn finish(
@@ -308,15 +526,50 @@ fn key_for_silence(samples: u64) -> u64 {
     ])
 }
 
-/// The first few words of a line, for a message that has to identify a row
-/// without printing a paragraph into a terminal.
-fn opening(text: &str) -> String {
-    let trimmed = text.trim();
-    let mut out: String = trimmed.chars().take(48).collect();
-    if trimmed.chars().count() > 48 {
-        out.push('…');
+/// `hash(text, provider, voice, settings, profile)` (D-043).
+///
+/// Every field that changes the audio is in it and nothing else is — no path,
+/// no scene id, no project name. Two scenes with the same line in the same
+/// voice are one cache entry, in one project or in twenty.
+///
+/// The fields are length-prefixed rather than concatenated: without that,
+/// `voice="ab", text="c"` and `voice="a", text="bc"` would hash alike, and the
+/// second render would quietly reuse the first one's audio.
+fn key_for_speech(
+    text: &str,
+    provider: &str,
+    voice: &str,
+    settings: &spoonstill_core::project::TtsSettings,
+) -> u64 {
+    let mut hash = Fnv1a::new();
+    let mut field = |bytes: &[u8]| {
+        hash.write(&(bytes.len() as u64).to_be_bytes());
+        hash.write(bytes);
+    };
+    field(b"tts");
+    field(text.as_bytes());
+    field(provider.as_bytes());
+    field(voice.as_bytes());
+    for (name, value) in &settings.values {
+        field(name.as_bytes());
+        field(value.as_bytes());
     }
-    out
+    hash.finish()
+}
+
+/// The normalized artifact's key: the speech, plus everything done to it after.
+///
+/// Separate from [`key_for_speech`] so that a change to the normalization —
+/// the profile, the loudness target, the trim — misses this cache and hits the
+/// other one. That is the property the raw file exists for.
+fn key_for_normalized_speech(speech: u64, trim: &Trim) -> u64 {
+    fnv1a_fields(&[
+        b"tts-normalized",
+        &speech.to_be_bytes(),
+        &trim.head_seconds.to_bits().to_be_bytes(),
+        &trim.tail_seconds.to_bits().to_be_bytes(),
+        NORMALIZED_PROFILE.as_bytes(),
+    ])
 }
 
 #[cfg(test)]
@@ -363,31 +616,108 @@ mod tests {
         assert_eq!(name, "file-ffffffffffffffff.wav");
     }
 
-    /// D-020, made visible: TTS is not silently swapped for silence. A scene
-    /// with a line nobody can speak yet must fail loudly and name the reason.
-    #[test]
-    fn a_tts_scene_is_refused_by_name_rather_than_silently_muted() {
-        let source = AudioSource::Tts {
-            text: "A line to be spoken over the opening still.".to_owned(),
-            provider: ProviderId("elevenlabs".to_owned()),
-            voice: VoiceId("default".to_owned()),
+    fn spoken(text: &str, provider: &str, voice: &str) -> AudioSource {
+        AudioSource::Tts {
+            text: text.to_owned(),
+            provider: ProviderId(provider.to_owned()),
+            voice: VoiceId(voice.to_owned()),
             settings: TtsSettings::default(),
-        };
+        }
+    }
+
+    /// D-020, made visible: TTS is not silently swapped for silence. A scene
+    /// whose provider this build does not have must fail loudly, name the
+    /// reason, and say what does exist.
+    #[test]
+    fn a_line_no_provider_can_speak_is_refused_by_name_rather_than_muted() {
         let error = resolve(
             &cache(),
             &tools(),
-            &source,
+            &spoken("A line over the opening still.", "elevenlabs", "default"),
             None,
+            &AudioPolicy::default(),
             &spoonstill_core::diagnostics::Noop,
         )
-        .expect_err("TTS is slice 4");
+        .expect_err("elevenlabs is not built yet");
 
-        assert!(matches!(error, AudioError::TtsNotAvailable { .. }));
+        assert!(matches!(error, AudioError::Tts(_)), "{error}");
         let message = error.to_string();
         assert!(message.contains("elevenlabs"), "{message}");
-        assert!(message.contains("A line to be spoken"), "{message}");
-        // And it says what an operator can do instead, right now.
-        assert!(message.contains("audio_file"), "{message}");
+        assert!(
+            message.contains("edge"),
+            "it names what does exist: {message}"
+        );
+    }
+
+    /// An empty line stops here rather than becoming a zero-length artifact
+    /// that the concat would then join without complaint (D-041's shape).
+    #[test]
+    fn an_empty_line_is_refused_before_any_provider_is_asked() {
+        let error = resolve(
+            &cache(),
+            &tools(),
+            &spoken("   \n  ", "edge", "en-US-AvaNeural"),
+            None,
+            &AudioPolicy::default(),
+            &spoonstill_core::diagnostics::Noop,
+        )
+        .expect_err("an empty line");
+        assert!(error.to_string().contains("empty"), "{error}");
+    }
+
+    /// D-043: the key is the content and nothing else. These are the four
+    /// changes that must move it, and the two that must not.
+    #[test]
+    fn the_tts_key_moves_with_everything_that_changes_the_audio() {
+        let settings = TtsSettings::default();
+        let base = key_for_speech("the words", "edge", "en-US-AvaNeural", &settings);
+
+        for (what, key) in [
+            (
+                "text",
+                key_for_speech("other words", "edge", "en-US-AvaNeural", &settings),
+            ),
+            (
+                "provider",
+                key_for_speech("the words", "other", "en-US-AvaNeural", &settings),
+            ),
+            (
+                "voice",
+                key_for_speech("the words", "edge", "en-GB-RyanNeural", &settings),
+            ),
+            (
+                "settings",
+                key_for_speech(
+                    "the words",
+                    "edge",
+                    "en-US-AvaNeural",
+                    &TtsSettings {
+                        values: vec![("rate".to_owned(), "+10%".to_owned())],
+                    },
+                ),
+            ),
+        ] {
+            assert_ne!(base, key, "changing the {what} must change the key");
+        }
+
+        // The same line asked for twice is one entry, whatever project it is
+        // in — there is no path in the key.
+        assert_eq!(
+            base,
+            key_for_speech("the words", "edge", "en-US-AvaNeural", &settings)
+        );
+    }
+
+    /// Fields are length-prefixed, so a boundary cannot be moved without
+    /// changing the key. Without this, `voice="ab", text="c"` and
+    /// `voice="a", text="bc"` would silently share one artifact.
+    #[test]
+    fn the_tts_key_cannot_be_confused_by_moving_a_field_boundary() {
+        let settings = TtsSettings::default();
+        assert_ne!(
+            key_for_speech("c", "edge", "ab", &settings),
+            key_for_speech("bc", "edge", "a", &settings)
+        );
     }
 
     /// A declared duration that cannot be rendered is refused before FFmpeg is
@@ -400,6 +730,7 @@ mod tests {
                 &tools(),
                 &AudioSource::Silent { seconds },
                 None,
+                &AudioPolicy::default(),
                 &spoonstill_core::diagnostics::Noop,
             )
             .expect_err("refused");
@@ -422,6 +753,7 @@ mod tests {
             &tools(),
             &source,
             None,
+            &AudioPolicy::default(),
             &spoonstill_core::diagnostics::Noop,
         )
         .expect_err("no path");
@@ -503,12 +835,20 @@ mod tests {
     }
 
     /// The message identifies a row without printing an essay into a terminal.
+    /// The shortening itself now belongs to `spoonstill_tts::opening`, which
+    /// tests it; this asserts that the *scene error* still uses it.
     #[test]
-    fn a_long_line_is_shortened_for_the_message() {
+    fn a_long_line_is_shortened_in_the_error() {
         let long = "word ".repeat(40);
-        let shown = opening(&long);
-        assert!(shown.chars().count() <= 49, "{shown}");
-        assert!(shown.ends_with('…'));
-        assert_eq!(opening("  short line  "), "short line");
+        let error = resolve(
+            &cache(),
+            &tools(),
+            &spoken(&long, "nosuchprovider", "default"),
+            None,
+            &AudioPolicy::default(),
+            &spoonstill_core::diagnostics::Noop,
+        )
+        .expect_err("no such provider");
+        assert!(error.to_string().len() < long.len(), "{error}");
     }
 }

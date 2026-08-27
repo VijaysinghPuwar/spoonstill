@@ -25,9 +25,14 @@ use std::path::{Path, PathBuf};
 fn layer(crate_name: &str) -> Option<u8> {
     Some(match crate_name {
         "spoonstill-core" => 0,
-        "spoonstill-media" | "spoonstill-tts" | "spoonstill-state" => 1,
-        "spoonstill-app" => 2,
-        "spoonstill-cli" => 3,
+        "spoonstill-media" | "spoonstill-state" => 1,
+        // D-081: TTS sits above the process boundary, because a provider that
+        // shells out must use `spoonstill_media::command` rather than teach a
+        // second crate to spawn. It is still infrastructure — nothing here may
+        // reach `spoonstill-app`.
+        "spoonstill-tts" => 2,
+        "spoonstill-app" => 3,
+        "spoonstill-cli" => 4,
         _ => return None,
     })
 }
@@ -151,7 +156,7 @@ fn dependencies_only_point_downward() {
     assert!(
         violations.is_empty(),
         "D-010: dependencies must point strictly downward.\n  {}\n\n\
-         Direction is:\n    cli -> app -> {{media, tts, state}} -> core",
+         Direction is:\n    cli -> app -> tts -> {{media, state}} -> core",
         violations.join("\n  ")
     );
 }

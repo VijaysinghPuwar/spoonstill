@@ -57,7 +57,99 @@ pub const NORMALIZED_EXT: &str = "wav";
 /// Part of every audio cache key (D-043): changing the profile must miss the
 /// cache rather than silently reuse artifacts made under the old one. Bump the
 /// version suffix whenever anything above changes.
-pub const NORMALIZED_PROFILE: &str = "pcm_s16le/48000/2/v1";
+pub const NORMALIZED_PROFILE: &str = "pcm_s16le/48000/2/-16lufs/v2";
+
+/// Programme loudness every scene is brought to, in LUFS (EBU R128).
+///
+/// **Why this exists at all.** Without it a film's loudness is whatever each
+/// source happened to be: Edge TTS lands around -24 LUFS, a phone recording
+/// around -12, and a project that mixes them makes the operator ride the volume
+/// knob scene by scene. At n=500 that is not a polish issue, it is the
+/// difference between a deliverable and a re-do.
+///
+/// -16 is the streaming convention for stereo speech — quiet enough to leave
+/// headroom, loud enough to sit beside anything else on a phone.
+pub const LOUDNESS_TARGET_LUFS: f64 = -16.0;
+
+/// True-peak ceiling in dBTP. The gain is reduced if reaching the loudness
+/// target would push the peak past this.
+pub const TRUE_PEAK_CEILING_DBTP: f64 = -1.5;
+
+/// Most gain we will apply, in dB.
+///
+/// A cap rather than a preference: without it, a track that is *almost* silent
+/// — a recording made with the microphone muted, the classic operator mistake —
+/// gets 40 dB of gain and arrives as a wall of hiss at full volume. Clamped, it
+/// arrives quiet, which is what it is.
+pub const MAX_GAIN_DB: f64 = 24.0;
+
+/// Level below which audio counts as silence when trimming, in dB.
+const SILENCE_FLOOR_DB: f64 = -45.0;
+
+/// Shortest run that counts as silence when trimming, in seconds.
+const SILENCE_MIN_SECONDS: f64 = 0.05;
+
+/// How much of a provider's leading and trailing silence to keep.
+///
+/// Applied **only** to synthesized speech, never to a recording the operator
+/// supplied — trimming someone's own file is the "we fixed this for you"
+/// behaviour that plan.md §M2 rules out. A provider's padding is not content;
+/// the operator did not choose it and usually cannot turn it off.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Trim {
+    /// Seconds of silence to keep before the first word.
+    pub head_seconds: f64,
+    /// Seconds to keep after the last — a beat, so the cut does not clip the
+    /// final consonant.
+    pub tail_seconds: f64,
+}
+
+impl Trim {
+    /// Whether these values would change anything.
+    #[must_use]
+    pub fn is_noop(&self) -> bool {
+        !self.head_seconds.is_finite()
+            || !self.tail_seconds.is_finite()
+            || (self.head_seconds < 0.0 && self.tail_seconds < 0.0)
+    }
+}
+
+/// What to do to a source on the way to a normalized artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Shape {
+    /// Trim provider padding. `None` for anything the operator supplied.
+    pub trim: Option<Trim>,
+}
+
+impl Shape {
+    /// Leave the ends exactly as they are — a supplied recording.
+    #[must_use]
+    pub fn as_supplied() -> Self {
+        Shape { trim: None }
+    }
+
+    /// Trim a provider's padding down to `trim`.
+    #[must_use]
+    pub fn spoken(trim: Trim) -> Self {
+        Shape { trim: Some(trim) }
+    }
+}
+
+/// What the analysis pass found out about a source.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Analysis {
+    /// Integrated loudness in LUFS, or `None` when the file is silent enough
+    /// that the measurement is meaningless.
+    loudness: Option<f64>,
+    /// True peak in dBTP.
+    peak: Option<f64>,
+    /// Where the first sound starts, in seconds.
+    speech_starts: f64,
+    /// Where the last sound ends, in seconds. `None` means "at the end".
+    speech_ends: Option<f64>,
+    /// The source's own length, when it was measured.
+    duration: Option<f64>,
+}
 
 /// Ceiling for one normalization or silence generation.
 ///
@@ -95,10 +187,18 @@ pub fn normalize(
     tools: &Tools,
     source: &Path,
     dest: &Path,
+    shape: &Shape,
     log: &dyn Diagnostics,
 ) -> Result<Normalized, MediaError> {
     ensure_parent(dest)?;
     let temporary = partial_path(dest);
+
+    // One pass to find out what this file is, one to write what it should be.
+    // Both are sub-second on realistic input and the result is cached forever
+    // under a content key (D-043), so the second pass is paid once per source
+    // and the first is what makes the third — the operator's ears — unnecessary.
+    let analysis = analyse(tools, source, shape, log)?;
+    let filters = filter_chain(&analysis, shape);
 
     let mut command = FfmpegCommand::new(tools.ffmpeg());
     command
@@ -107,7 +207,11 @@ pub fn normalize(
         // Only the first audio stream, and no video: an MP3 with cover art has
         // a video stream, and copying it into the normalized artifact would
         // make every later probe of this file ambiguous about what it is.
-        .args(["-map", "0:a:0", "-vn"])
+        .args(["-map", "0:a:0", "-vn"]);
+    if !filters.is_empty() {
+        command.arg("-af").arg(&filters);
+    }
+    command
         .arg("-ar")
         .arg(SAMPLE_RATE.to_string())
         .arg("-ac")
@@ -121,6 +225,189 @@ pub fn normalize(
 
     run(&command, log, &temporary)?;
     finish(tools, &temporary, dest, log, "normalize")
+}
+
+/// The filter chain that turns `source` into the artifact, given what it is.
+///
+/// Built as a pure function of the analysis so that it can be tested without a
+/// process, and pinned by a test — the same discipline D-030's filter string
+/// gets, for the same reason.
+///
+/// **Gain is linear.** `loudnorm`'s single-pass mode would also hit the target,
+/// by compressing, which changes how the speech sounds and makes the result
+/// depend on FFmpeg's version. A measured constant through `volume` moves every
+/// sample by the same amount, sounds like the original, and is byte-identical
+/// run to run — which D-077 requires.
+fn filter_chain(analysis: &Analysis, shape: &Shape) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(trim) = shape.trim.filter(|trim| !trim.is_noop()) {
+        // The settings say how much padding to *keep*, not where to cut, so
+        // each edge moves toward the speech by whatever it has to spare. A
+        // provider that already pads by less than we would keep is left alone
+        // on that edge rather than having silence invented for it.
+        let start = (analysis.speech_starts - trim.head_seconds.max(0.0)).max(0.0);
+        let end = analysis.speech_ends.map(|end| {
+            let padded = end + trim.tail_seconds.max(0.0);
+            analysis.duration.map_or(padded, |whole| padded.min(whole))
+        });
+
+        let cuts_head = start > 0.0005;
+        let cuts_tail = end
+            .zip(analysis.duration)
+            .is_some_and(|(end, whole)| end < whole - 0.0005);
+        match (cuts_head, cuts_tail, end) {
+            (_, true, Some(end)) => parts.push(format!("atrim=start={start:.3}:end={end:.3}")),
+            (true, _, _) => parts.push(format!("atrim=start={start:.3}")),
+            _ => {}
+        }
+        if !parts.is_empty() {
+            // Without this the trimmed stream keeps the timestamps it had
+            // inside the original, and the artifact starts at 0.14 rather than
+            // at 0 — which every later measurement would then inherit.
+            parts.push("asetpts=N/SR/TB".to_owned());
+        }
+    }
+
+    if let Some(gain) = gain_db(analysis) {
+        parts.push(format!("volume={gain:.2}dB"));
+    }
+
+    parts.join(",")
+}
+
+/// How much to move this file, in dB, or `None` when it is already right.
+///
+/// The smaller of "what the loudness target asks for" and "what the peak
+/// ceiling allows", so a track that is quiet *and* already peaking is brought
+/// up only as far as it can go without clipping.
+fn gain_db(analysis: &Analysis) -> Option<f64> {
+    let loudness = analysis.loudness?;
+    let wanted = LOUDNESS_TARGET_LUFS - loudness;
+    let allowed = analysis
+        .peak
+        .map_or(f64::INFINITY, |peak| TRUE_PEAK_CEILING_DBTP - peak);
+    let gain = wanted.min(allowed).clamp(-MAX_GAIN_DB, MAX_GAIN_DB);
+
+    // A twentieth of a decibel is inaudible, and skipping it keeps the filter
+    // chain — and therefore the command line in the log — empty for a file that
+    // is already where it should be.
+    (gain.abs() >= 0.05).then_some(gain)
+}
+
+/// Measure a source: how loud it is, and where its sound actually starts and
+/// stops.
+///
+/// One process, decoding to nowhere. `silencedetect` passes audio through
+/// unchanged, so `loudnorm`'s analysis sees exactly the same samples it would
+/// have seen alone — and R128 gating already ignores the silence, so measuring
+/// before the trim gives the same answer as measuring after it.
+fn analyse(
+    tools: &Tools,
+    source: &Path,
+    shape: &Shape,
+    log: &dyn Diagnostics,
+) -> Result<Analysis, MediaError> {
+    let mut chain = format!(
+        "loudnorm=I={LOUDNESS_TARGET_LUFS}:TP={TRUE_PEAK_CEILING_DBTP}:LRA=11:print_format=json"
+    );
+    if shape.trim.is_some() {
+        chain.push_str(&format!(
+            ",silencedetect=n={SILENCE_FLOOR_DB}dB:d={SILENCE_MIN_SECONDS}"
+        ));
+    }
+
+    let mut command = FfmpegCommand::new(tools.ffmpeg());
+    command
+        // `info` rather than `warning`: both measurements are printed at info
+        // level, so quietening this would silently remove the whole point.
+        .args(["-hide_banner", "-nostats", "-loglevel", "info"])
+        .input(source)
+        .args(["-map", "0:a:0", "-vn"])
+        .arg("-af")
+        .arg(&chain)
+        .args(["-f", "null", "-"]);
+
+    let display = command.display();
+    log.record(&Event::info("ffmpeg", "measuring audio").with("command", display.clone()));
+    let finished = command
+        .spawn()?
+        .wait_until(NORMALIZE_TIMEOUT)?
+        .ok()
+        .inspect_err(|_| {
+            // A source FFmpeg cannot decode fails here rather than producing a
+            // silent artifact two steps later.
+            log.record(&Event::error("ffmpeg", "could not measure audio").with("command", display));
+        })?;
+
+    let duration = if shape.trim.is_some() {
+        probe::probe(tools, source, DEFAULT_PROBE_TIMEOUT)?
+            .audio()
+            .and_then(|a| a.duration)
+    } else {
+        None
+    };
+
+    Ok(read_analysis(&finished.stderr, duration))
+}
+
+/// Pull the four numbers out of FFmpeg's stderr.
+///
+/// A hand-written reader rather than a JSON dependency: `spoonstill-media` has
+/// none, `loudnorm`'s report is five flat string fields, and the alternative is
+/// a crate in the dependency tree of a renderer for the sake of one object.
+/// Anything unreadable comes back as `None` and the file is left alone, which
+/// is the safe direction — an unmeasured file is quiet, not clipped.
+fn read_analysis(stderr: &str, duration: Option<f64>) -> Analysis {
+    let mut silences: Vec<(f64, Option<f64>)> = Vec::new();
+    for line in stderr.lines() {
+        if let Some(value) = after(line, "silence_start:") {
+            silences.push((value, None));
+        } else if let Some(value) = after(line, "silence_end:")
+            && let Some(last) = silences.last_mut()
+            && last.1.is_none()
+        {
+            last.1 = Some(value);
+        }
+    }
+
+    // A leading silence is one that starts at the very beginning.
+    let speech_starts = silences
+        .first()
+        .filter(|(start, _)| *start <= SILENCE_MIN_SECONDS)
+        .and_then(|(_, end)| *end)
+        .unwrap_or(0.0);
+
+    // A trailing one is the last silence that runs to the end of the file.
+    let speech_ends = duration.and_then(|duration| {
+        silences
+            .last()
+            .filter(|(start, _)| *start > speech_starts)
+            .filter(|(_, end)| end.is_none_or(|end| end >= duration - SILENCE_MIN_SECONDS))
+            .map(|(start, _)| *start)
+    });
+
+    Analysis {
+        loudness: json_number(stderr, "input_i"),
+        peak: json_number(stderr, "input_tp"),
+        speech_starts,
+        speech_ends,
+        duration,
+    }
+}
+
+/// `key: 1.234` at the end of a line.
+fn after(line: &str, key: &str) -> Option<f64> {
+    let rest = line.split(key).nth(1)?;
+    rest.split_whitespace().next()?.parse().ok()
+}
+
+/// `"key" : "-23.4"` from loudnorm's report. `-inf` and `nan` read as absent,
+/// which is what they mean: there was nothing here to measure.
+fn json_number(stderr: &str, key: &str) -> Option<f64> {
+    let rest = stderr.split(&format!("\"{key}\"")).nth(1)?;
+    let value = rest.split('"').nth(1)?;
+    value.parse::<f64>().ok().filter(|n| n.is_finite())
 }
 
 /// Write a silent track of exactly `samples` samples into `dest`.
@@ -310,6 +597,145 @@ fn finish(
 
 #[cfg(test)]
 mod tests {
+    /// A real `loudnorm` report and a real `silencedetect` run, recorded from
+    /// this machine on 2026-08-26 against an Edge TTS line. Recorded rather
+    /// than described: FFmpeg's report format is not ours to assume, and a
+    /// change to it must fail here rather than become a film with no gain
+    /// applied and nobody the wiser.
+    const RECORDED_STDERR: &str = r#"
+[Parsed_silencedetect_1 @ 0x600002] silence_start: 0
+[Parsed_silencedetect_1 @ 0x600002] silence_end: 0.235187 | silence_duration: 0.235187
+[Parsed_silencedetect_1 @ 0x600002] silence_start: 8.944187
+[Parsed_silencedetect_1 @ 0x600002] silence_end: 9.288 | silence_duration: 0.343812
+[Parsed_loudnorm_0 @ 0x600003]
+{
+	"input_i" : "-23.22",
+	"input_tp" : "-6.38",
+	"input_lra" : "5.30",
+	"input_thresh" : "-33.94",
+	"output_i" : "-16.00",
+	"normalization_type" : "dynamic",
+	"target_offset" : "0.00"
+}
+"#;
+
+    fn spoken_trim() -> Shape {
+        Shape::spoken(Trim {
+            head_seconds: 0.10,
+            tail_seconds: 0.25,
+        })
+    }
+
+    #[test]
+    fn the_recorded_report_yields_the_measurements_it_contains() {
+        let analysis = read_analysis(RECORDED_STDERR, Some(9.288));
+
+        assert_eq!(analysis.loudness, Some(-23.22));
+        assert_eq!(analysis.peak, Some(-6.38));
+        assert!((analysis.speech_starts - 0.235187).abs() < 1e-6);
+        assert_eq!(analysis.speech_ends, Some(8.944187));
+    }
+
+    /// The bug this whole path exists to fix: Edge TTS pads every line, so
+    /// every cut landed about six tenths of a second after the speech stopped.
+    #[test]
+    fn a_provider_padded_line_is_trimmed_to_the_padding_we_asked_for() {
+        let analysis = read_analysis(RECORDED_STDERR, Some(9.288));
+        let chain = filter_chain(&analysis, &spoken_trim());
+
+        // 0.235 of lead, of which we keep 0.100 -> cut at 0.135; the tail
+        // ends at 8.944 and keeps 0.250 -> 9.194, inside the 9.288 file.
+        assert!(chain.starts_with("atrim=start=0.135:end=9.194"), "{chain}");
+        assert!(chain.contains("asetpts=N/SR/TB"), "{chain}");
+    }
+
+    /// D-084: a recording the operator made is theirs, ends included.
+    #[test]
+    fn a_supplied_recording_is_never_trimmed() {
+        let analysis = read_analysis(RECORDED_STDERR, Some(9.288));
+        let chain = filter_chain(&analysis, &Shape::as_supplied());
+
+        assert!(!chain.contains("atrim"), "{chain}");
+        assert!(chain.contains("volume="), "it is still levelled: {chain}");
+    }
+
+    #[test]
+    fn the_gain_brings_the_recorded_line_to_the_target() {
+        let analysis = read_analysis(RECORDED_STDERR, Some(9.288));
+
+        // -23.22 LUFS wants +7.22 dB; the peak at -6.38 dBTP allows +4.88
+        // before -1.5 dBTP. The peak wins.
+        let gain = gain_db(&analysis).expect("a gain");
+        assert!((gain - 4.88).abs() < 0.01, "{gain}");
+    }
+
+    #[test]
+    fn a_file_already_at_the_target_is_left_alone() {
+        let analysis = Analysis {
+            loudness: Some(LOUDNESS_TARGET_LUFS),
+            peak: Some(-6.0),
+            speech_starts: 0.0,
+            speech_ends: None,
+            duration: None,
+        };
+        assert_eq!(gain_db(&analysis), None);
+        assert!(filter_chain(&analysis, &Shape::as_supplied()).is_empty());
+    }
+
+    /// The muted-microphone case. Without the clamp this becomes 40 dB of
+    /// amplified hiss at full volume, in a film someone is about to deliver.
+    #[test]
+    fn a_nearly_silent_file_is_not_amplified_without_limit() {
+        let analysis = Analysis {
+            loudness: Some(-70.0),
+            peak: Some(-60.0),
+            speech_starts: 0.0,
+            speech_ends: None,
+            duration: None,
+        };
+        assert_eq!(gain_db(&analysis), Some(MAX_GAIN_DB));
+    }
+
+    /// Digital silence measures as `-inf`, which is not a number and not a
+    /// reason to do anything.
+    #[test]
+    fn an_unmeasurable_file_is_passed_through_untouched() {
+        let analysis = read_analysis(
+            "{ \"input_i\" : \"-inf\", \"input_tp\" : \"-inf\" }",
+            Some(3.0),
+        );
+        assert_eq!(analysis.loudness, None);
+        assert_eq!(gain_db(&analysis), None);
+        assert!(filter_chain(&analysis, &spoken_trim()).is_empty());
+    }
+
+    /// A silence in the middle of a line is a pause between sentences. Trimming
+    /// it would rewrite the delivery.
+    #[test]
+    fn an_internal_pause_is_not_a_trailing_silence() {
+        let stderr = "silence_start: 0\nsilence_end: 0.20\n\
+                      silence_start: 4.00\nsilence_end: 4.30\n";
+        let analysis = read_analysis(stderr, Some(9.0));
+
+        assert!((analysis.speech_starts - 0.20).abs() < 1e-9);
+        assert_eq!(
+            analysis.speech_ends, None,
+            "the last silence ends well before the file does"
+        );
+    }
+
+    /// A line that starts talking immediately has no leading silence to remove,
+    /// and must not have its first syllable removed instead.
+    #[test]
+    fn a_line_with_no_leading_silence_keeps_its_first_syllable() {
+        let stderr = "silence_start: 7.50\nsilence_end: 8.00\n";
+        let analysis = read_analysis(stderr, Some(8.0));
+
+        assert_eq!(analysis.speech_starts, 0.0);
+        assert_eq!(analysis.speech_ends, Some(7.50));
+        assert!(filter_chain(&analysis, &spoken_trim()).starts_with("atrim=start=0.000:end=7.750"),);
+    }
+
     use super::*;
 
     /// D-043: the profile string reaches the cache key, so it has to change

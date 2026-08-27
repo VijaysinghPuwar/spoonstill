@@ -9,6 +9,11 @@ publish.workspace      = true
 
 [dependencies]
 spoonstill-core = { workspace = true }
+# D-081: a provider that shells out uses the one process boundary rather than
+# growing a second one. `edge` spawns `edge-tts` through
+# `spoonstill_media::command`, which is where argument vectors, timeouts,
+# retained stderr and the paste-ready command line already live (D-011).
+spoonstill-media = { workspace = true }
 
 [lints]
 workspace = true

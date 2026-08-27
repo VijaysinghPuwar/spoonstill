@@ -12,7 +12,7 @@ export PATH := /opt/homebrew/opt/rustup/bin:$(PATH)
 CARGO ?= cargo
 
 .DEFAULT_GOAL := help
-.PHONY: help test lint fmt fixtures check clean gates gates-m0 gates-m1 gates-m2
+.PHONY: help test lint fmt fixtures brand check clean gates gates-m0 gates-m1 gates-m2
 
 help: ## Show available targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -27,6 +27,9 @@ lint: ## clippy with warnings denied, plus a formatting check
 
 fmt: ## Reformat the workspace in place
 	$(CARGO) fmt --all
+
+brand: ## Regenerate every logo asset from its one description (D-079)
+	@python3 scripts/gen-brand.py
 
 fixtures: ## Generate the synthetic test fixtures (see scripts/gen-fixtures.sh)
 	@bash scripts/gen-fixtures.sh

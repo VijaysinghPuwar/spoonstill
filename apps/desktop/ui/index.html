@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>spoonstill</title>
+  <link rel="icon" href="icon.svg" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!--
+    Desktop chrome, not web chrome. The title bar is the real one — traffic
+    lights are the system's, overlaid on the strip below, which is why that
+    strip starts 82px in.
+
+    ## Two levels, and only two
+
+    **Home** is the operator's projects and the settings that are not about any
+    one of them. **A project** is the rail: Scenes, Voice, Output, Render, Runs.
+    Nothing else exists.
+
+    That split was reported rather than designed. The first version had a
+    Project tab that repeated what the title bar and the rail already said and
+    did nothing you could click, and it had no way to reach a project you made
+    yesterday short of the folder dialog. Both are the same mistake: the window
+    presented itself as a viewer of one folder when the operator has many, and
+    then spent a whole screen on facts instead of on getting into one.
+  -->
+
+  <header class="titlebar">
+    <button id="home" class="bar-mark" title="All projects">
+      <i></i><i></i><i></i>
+    </button>
+    <div class="title">
+      <span id="t-name">spoonstill</span>
+      <span id="t-path" class="path"></span>
+    </div>
+    <div class="theme" id="theme">
+      <button data-theme="dark" class="on">Dark</button>
+      <button data-theme="light">Light</button>
+    </div>
+  </header>
+
+  <!-- ------------------------------------------------------------- home -->
+  <section id="start" class="screen" hidden>
+    <div class="pane-head">
+      <div>
+        <h2>Your projects</h2>
+        <p class="sub">A project is a folder of photos. Open one to write it, hear it and render it.</p>
+      </div>
+      <div class="pane-tools">
+        <button id="settings-open">Settings</button>
+        <button id="open-project">Open a folder…</button>
+        <button id="new-project" class="primary">New project</button>
+      </div>
+    </div>
+
+    <div class="grid-wrap">
+      <ul class="projects" id="project-list"></ul>
+      <div id="no-projects" class="nothing" hidden>
+        <img class="hero-mark" src="icon.svg" alt="" />
+        <p>Nothing here yet. Make a project, or drop a folder of photos into this window.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- --------------------------------------------------------- settings -->
+  <section id="settings" class="screen" hidden>
+    <div class="pane-head">
+      <div>
+        <h2>Settings</h2>
+        <p class="sub">This machine, not any one project. A project's own settings live in its <code>project.yaml</code>.</p>
+      </div>
+      <div class="pane-tools">
+        <button id="settings-back">← All projects</button>
+      </div>
+    </div>
+
+    <div class="body scroll">
+      <div class="cols">
+        <section class="card">
+          <h3>Voice service</h3>
+          <p id="app-provider-state" class="state">Checking…</p>
+          <dl class="facts">
+            <dt>Provider</dt><dd id="app-provider" class="mono">edge</dd>
+            <dt>Its default voice</dt><dd id="app-default-voice" class="mono">—</dd>
+          </dl>
+          <div class="row-actions">
+            <button id="app-provider-recheck">Check again</button>
+          </div>
+          <p class="whisper left">
+            Edge TTS is a command line tool this program runs; it is free and it
+            needs no key. If it is missing, install it with
+            <code>pip install edge-tts</code> and check again.
+          </p>
+        </section>
+
+        <section class="card">
+          <h3>Appearance</h3>
+          <div class="theme wide-theme" id="theme-2">
+            <button data-theme="dark">Dark</button>
+            <button data-theme="light">Light</button>
+          </div>
+          <p class="whisper left">Dark is the default, because the mark is drawn on black.</p>
+        </section>
+
+        <section class="card">
+          <div class="about">
+            <img src="icon.svg" alt="" />
+            <div>
+              <div class="who-name">spoonstill</div>
+              <div class="who-rev">still · local only</div>
+            </div>
+          </div>
+          <p class="whisper left">
+            Photos and narration in, one MP4 out. Everything happens on this
+            machine; nothing is uploaded except the lines you ask a voice
+            service to speak.
+          </p>
+        </section>
+      </div>
+    </div>
+  </section>
+
+  <!-- A project with nothing in it yet. -->
+  <section id="fill" class="centred" hidden>
+    <div class="stack">
+      <h2 id="fill-name">—</h2>
+      <button id="choose-media" class="primary big">Choose photos…</button>
+      <p class="whisper">
+        Drop them here instead if you like. Recordings and <code>.txt</code>
+        scripts can come in the same drop, and anything you do not supply
+        becomes a silent scene you can write narration for.
+      </p>
+      <button id="fill-back" class="link">← All projects</button>
+    </div>
+  </section>
+
+  <!-- ---------------------------------------------------------- project -->
+  <section id="app" hidden>
+
+    <aside class="rail">
+      <button id="rail-home" class="rail-back">← All projects</button>
+
+      <nav class="nav" id="tabs">
+        <button data-tab="scenes" class="on">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="4.5" width="9" height="7" rx="1"/><path d="M4 2.5h9.3a1.2 1.2 0 0 1 1.2 1.2V11"/></svg>
+          <span>Scenes</span>
+          <em class="pip" id="pip-scenes"></em>
+        </button>
+        <button data-tab="voice">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.6" y="1.5" width="4.8" height="8" rx="2.4"/><path d="M3.2 7.6a4.8 4.8 0 0 0 9.6 0M8 12.4v2.1"/></svg>
+          <span>Voice</span>
+        </button>
+        <button data-tab="output">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8v8.4M4.8 7l3.2 3.2L11.2 7M2 11.2v1.8a1.2 1.2 0 0 0 1.2 1.2h9.6a1.2 1.2 0 0 0 1.2-1.2v-1.8"/></svg>
+          <span>Output</span>
+        </button>
+        <button data-tab="render">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 2.6 13 8l-8.8 5.4z"/></svg>
+          <span>Render</span>
+        </button>
+        <button data-tab="runs">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 4.4V8l2.6 1.7"/></svg>
+          <span>Runs</span>
+        </button>
+      </nav>
+
+      <!--
+        The two standing answers. Not decoration: they are what the operator
+        wants to know at the moment they reach for Render, and clicking either
+        goes to the screen that changes it.
+      -->
+      <div class="rail-facts">
+        <button class="rail-fact" data-tab="voice" id="go-voice">
+          <span class="k">Voice</span>
+          <span class="v" id="rail-voice">project default</span>
+        </button>
+        <button class="rail-fact" data-tab="output" id="go-output">
+          <span class="k">Saves to</span>
+          <span class="v mono" id="rail-output">—</span>
+        </button>
+      </div>
+
+      <div class="rail-go">
+        <button id="render" class="primary wide">Render</button>
+        <button id="cancel" class="danger wide" hidden>Stop</button>
+      </div>
+    </aside>
+
+    <main class="work">
+
+    <!-- ---------------------------------------------------------- scenes -->
+    <div class="pane" id="pane-scenes">
+      <div class="pane-head">
+        <div>
+          <h2>Scenes</h2>
+          <p class="sub">Click a line to write what the scene says. Leave it empty and the scene is silent.</p>
+        </div>
+        <div class="pane-tools">
+          <button id="add">Add photos…</button>
+          <button id="reveal">Show in Finder</button>
+          <button id="recheck">Re-check</button>
+        </div>
+      </div>
+
+      <div class="filters">
+        <div class="chips" id="chips"></div>
+        <input id="search" class="search" placeholder="Filter scenes" spellcheck="false" />
+      </div>
+
+      <div class="problem-strip" id="problems" hidden>
+        <ul id="problem-list" class="problems"></ul>
+      </div>
+
+      <div class="grid-wrap">
+        <table class="grid">
+          <thead>
+            <tr>
+              <th class="c-scene">Scene</th>
+              <th class="c-still">Still</th>
+              <th class="c-source">Source &amp; narration</th>
+              <th class="c-audio">Audio</th>
+              <th class="c-resolved">Resolved</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <p id="grid-empty" class="empty-note" hidden>No scene matches that filter.</p>
+      </div>
+    </div>
+
+    <!-- ----------------------------------------------------------- voice -->
+    <div class="pane" id="pane-voice" hidden>
+      <div class="pane-head">
+        <div>
+          <h2>Voice</h2>
+          <p class="sub">
+            Who reads every written line. An override for the next render —
+            <code>project.yaml</code> is an input and nothing here writes to it.
+          </p>
+        </div>
+        <div class="pane-tools">
+          <button id="voice-default">Use the project default</button>
+        </div>
+      </div>
+
+      <div class="chosen">
+        <div class="chosen-who">
+          <div class="chosen-name" id="chosen-name">Project default</div>
+          <div class="chosen-id mono" id="chosen-id">—</div>
+        </div>
+        <button id="preview" class="primary">▶ Preview this voice</button>
+        <audio id="player" hidden></audio>
+      </div>
+      <p id="provider-state" class="state"></p>
+
+      <div class="filters">
+        <div class="pane-tools">
+          <select id="locale" class="select"><option value="">Every language</option></select>
+          <select id="gender" class="select">
+            <option value="">Any gender</option>
+            <option value="Female">Female</option>
+            <option value="Male">Male</option>
+          </select>
+          <input id="voice-search" class="search" placeholder="Search by name" spellcheck="false" />
+        </div>
+        <span class="mono whisper" id="voice-count"></span>
+      </div>
+
+      <div class="grid-wrap">
+        <ul class="voices" id="voice-rows"></ul>
+        <p id="voice-empty" class="empty-note" hidden>No voice matches that.</p>
+      </div>
+    </div>
+
+    <!-- ---------------------------------------------------------- output -->
+    <div class="pane scroll" id="pane-output" hidden>
+      <div class="pane-head">
+        <div>
+          <h2>Output</h2>
+          <p class="sub">Where the film lands, and what it is called.</p>
+        </div>
+        <div class="pane-tools">
+          <button id="out-default">Use the project default</button>
+        </div>
+      </div>
+
+      <div class="body">
+        <div class="cols">
+          <section class="card">
+            <h3>Save the film as</h3>
+            <label class="field">
+              File name
+              <input id="out-name" spellcheck="false" placeholder="out.mp4" />
+            </label>
+            <label class="field">
+              Folder
+              <span class="with-button">
+                <input id="out-dir" spellcheck="false" placeholder="the project folder" />
+                <button id="out-browse">Browse…</button>
+              </span>
+            </label>
+            <div class="resolved-path">
+              <span class="k">Saves to</span>
+              <span class="v mono wrap" id="out-full">—</span>
+            </div>
+            <p id="out-problem" class="state missing" hidden></p>
+            <p class="whisper left">
+              A destination for the next render. The project's own
+              <code>output:</code> setting is left alone — change it in
+              <code>project.yaml</code> to make a new default.
+            </p>
+          </section>
+
+          <section class="card">
+            <h3>What comes out</h3>
+            <dl class="facts">
+              <dt>Geometry</dt><dd id="s-geometry" class="mono"></dd>
+              <dt>Scenes</dt><dd id="s-scenes" class="mono"></dd>
+              <dt>Scenes from</dt><dd id="s-mode"></dd>
+              <dt>Project folder</dt><dd id="s-root" class="mono wrap"></dd>
+              <dt>Project default</dt><dd id="s-output" class="mono wrap"></dd>
+            </dl>
+            <p class="whisper left">
+              One MP4, H.264 and AAC, cut on the narration. Change
+              <code>aspect</code>, <code>short_edge</code> or <code>fps</code>
+              in <code>project.yaml</code> and re-check.
+            </p>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---------------------------------------------------------- render -->
+    <div class="pane scroll" id="pane-render" hidden>
+      <div class="pane-head">
+        <div>
+          <h2>Render</h2>
+          <p class="sub">Every scene, then the join. A second run re-encodes only what changed.</p>
+        </div>
+        <div class="pane-tools">
+          <button id="play" hidden>Play the film</button>
+          <button id="reveal-2" hidden>Show in Finder</button>
+        </div>
+      </div>
+
+      <div class="body">
+        <section class="card">
+          <div class="progress"><div id="bar" class="bar"></div></div>
+          <p id="progress-line" class="whisper left">Nothing has been rendered in this window yet.</p>
+          <dl class="facts">
+            <dt>Voice</dt><dd id="r-voice" class="mono"></dd>
+            <dt>Film</dt><dd id="r-out" class="mono wrap"></dd>
+          </dl>
+        </section>
+        <section class="card">
+          <h3>Live</h3>
+          <ul id="live" class="live"></ul>
+        </section>
+      </div>
+    </div>
+
+    <!-- ------------------------------------------------------------ runs -->
+    <div class="pane" id="pane-runs" hidden>
+      <div class="pane-head">
+        <div>
+          <h2>Runs</h2>
+          <p class="sub">
+            Every run is recorded, successful or not — the interesting failures
+            are the ones where the render succeeded and the output was wrong.
+          </p>
+        </div>
+        <div class="pane-tools">
+          <button id="refresh-runs">Refresh</button>
+        </div>
+      </div>
+      <p class="log-dir mono" id="log-dir"></p>
+      <div class="grid-wrap">
+        <table class="grid">
+          <thead>
+            <tr>
+              <th class="c-when">When</th>
+              <th class="c-sev">Level</th>
+              <th class="c-scope">Scope</th>
+              <th>What happened</th>
+            </tr>
+          </thead>
+          <tbody id="run-rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    </main>
+  </section>
+
+  <div id="drop" class="drop" hidden><span>Drop to add</span></div>
+
+  <footer class="status-bar">
+    <span id="status"></span>
+    <span id="counts" class="counts mono"></span>
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

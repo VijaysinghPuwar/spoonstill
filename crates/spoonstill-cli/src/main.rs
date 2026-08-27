@@ -33,15 +33,46 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Make a new project folder, and optionally fill it in one go.
+    New(NewArgs),
+    /// Copy photos and recordings into a project, numbered and paired.
+    Add(AddArgs),
     /// Check a project folder and report every problem at once.
     Validate(ValidateArgs),
     /// Render a whole project folder to one film.
     Render(RenderArgs),
     /// Render a single scene to one segment.
     RenderScene(RenderSceneArgs),
+    /// List the voices a text-to-speech provider offers.
+    Voices(VoicesArgs),
     /// Diagnostics: logs and the bundle to send when something goes wrong.
     #[command(subcommand)]
     Diagnostics(DiagnosticsCommand),
+}
+
+#[derive(Debug, Args)]
+struct NewArgs {
+    /// Where the project folder goes. Created if it is not there.
+    #[arg(value_name = "DIR")]
+    project: PathBuf,
+
+    /// Photos and recordings to fill it with, in any order (D-080).
+    ///
+    /// Folders contribute the media directly inside them, so this accepts a
+    /// camera's export folder as readily as a list of files.
+    #[arg(value_name = "FILE")]
+    media: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct AddArgs {
+    /// The project folder to add to.
+    #[arg(value_name = "DIR")]
+    project: PathBuf,
+
+    /// Photos and recordings, or folders of them.
+    #[arg(value_name = "FILE", required = true)]
+    media: Vec<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -95,6 +126,29 @@ struct RenderArgs {
     /// the same time would interleave segments into one film.
     #[arg(long)]
     force: bool,
+
+    /// Speak every spoken scene in this voice, for this run only.
+    ///
+    /// An override, not an edit: `project.yaml` is an input and nothing here
+    /// writes to it (D-013). `still voices` lists what a provider offers.
+    #[arg(long, value_name = "VOICE")]
+    voice: Option<String>,
+
+    /// Use this TTS provider for this run only.
+    #[arg(long, value_name = "NAME")]
+    provider: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct VoicesArgs {
+    /// Which provider to ask. Defaults to the one a project with no settings
+    /// would use.
+    #[arg(long, value_name = "NAME", default_value = spoonstill_app::import::settings::DEFAULT_PROVIDER)]
+    provider: String,
+
+    /// Show only voices whose name or locale contains this, case-insensitively.
+    #[arg(value_name = "FILTER")]
+    filter: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -213,7 +267,10 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
+        Command::New(args) => new_project(args),
+        Command::Add(args) => add_media(&args.project, &args.media),
         Command::Validate(args) => validate(args),
+        Command::Voices(args) => list_voices(&args),
         Command::Render(args) => render_project(args),
         Command::RenderScene(args) => render_scene(args),
         Command::Diagnostics(DiagnosticsCommand::Export { out, project }) => {
@@ -221,6 +278,122 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         Command::Diagnostics(DiagnosticsCommand::Where { project }) => show_log_location(project),
     }
+}
+
+/// `still new DIR [FILE...]` — the first command anyone runs.
+///
+/// D-080: a project is a folder, so making one is making a folder. The media
+/// arguments are optional because the operator may prefer to drag files in
+/// themselves, and mandatory in spirit because a folder with nothing in it is
+/// not yet a film.
+fn new_project(args: NewArgs) -> Result<(), String> {
+    let root = spoonstill_app::create_project(&args.project).map_err(|e| e.to_string())?;
+    println!("{}", root.display());
+    if args.media.is_empty() {
+        println!(
+            "  empty — add photos with `still add {} FILE...`",
+            args.project.display()
+        );
+        return Ok(());
+    }
+    add_media(&root, &args.media)
+}
+
+/// `still add DIR FILE...` — copy media in under names the renderer pairs.
+///
+/// Prints what each file became, because renaming someone's files for them is
+/// only acceptable if they can see exactly what happened (D-080).
+fn add_media(root: &std::path::Path, media: &[PathBuf]) -> Result<(), String> {
+    let report = spoonstill_app::add_media(root, media).map_err(|e| e.to_string())?;
+
+    for image in &report.images {
+        let narration = match (report.narration_for(image), report.script_for(image)) {
+            (Some(audio), _) => name_of(&audio.source),
+            (None, Some(script)) => format!("{} (spoken)", name_of(&script.source)),
+            (None, None) => "silent".to_owned(),
+        };
+        println!(
+            "  {:<12} {}  +  {}",
+            image.name,
+            name_of(&image.source),
+            narration
+        );
+    }
+    for skipped in &report.skipped {
+        println!(
+            "  {:<12} {} — {}",
+            "skipped",
+            name_of(&skipped.source),
+            skipped.reason
+        );
+    }
+
+    if report.is_empty() {
+        return Err(format!(
+            "nothing usable in those {} argument{}",
+            media.len(),
+            if media.len() == 1 { "" } else { "s" }
+        ));
+    }
+    println!("  {}", report.summary());
+
+    if report.audio_without_image > 0 {
+        println!(
+            "  note: {} recording{} had no photo left to pair with and {} not copied",
+            report.audio_without_image,
+            if report.audio_without_image == 1 {
+                ""
+            } else {
+                "s"
+            },
+            if report.audio_without_image == 1 {
+                "was"
+            } else {
+                "were"
+            }
+        );
+    }
+    Ok(())
+}
+
+/// A file's own name, for a report that lines up.
+fn name_of(path: &std::path::Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// `still voices` — what can this build actually say a line in.
+///
+/// D-002: the operator finds out that a provider is unreachable here, in one
+/// second, rather than at scene 340 of 500.
+fn list_voices(args: &VoicesArgs) -> Result<(), String> {
+    let provider = spoonstill_app::tts::provider(&args.provider).map_err(|e| e.to_string())?;
+
+    if let spoonstill_app::tts::Availability::Missing(detail) = provider.availability() {
+        return Err(detail);
+    }
+
+    let wanted = args.filter.as_deref().map(str::to_lowercase);
+    let voices = provider.voices().map_err(|e| e.to_string())?;
+    let mut shown = 0;
+    for voice in &voices {
+        if let Some(filter) = &wanted
+            && !voice.id.to_lowercase().contains(filter)
+            && !voice.locale.to_lowercase().contains(filter)
+        {
+            continue;
+        }
+        shown += 1;
+        println!("  {:<34} {:<8} {}", voice.id, voice.gender, voice.note);
+    }
+    println!(
+        "  {shown} of {} voices from {}",
+        voices.len(),
+        provider.id()
+    );
+    Ok(())
 }
 
 /// How many scenes are worth listing without being asked.
@@ -348,6 +521,8 @@ fn render_project(args: RenderArgs) -> Result<(), String> {
         jobs: args.jobs.unwrap_or(defaults.jobs).max(1),
         audio_jobs: args.audio_jobs.unwrap_or(defaults.audio_jobs).max(1),
         force: args.force,
+        voice: args.voice.clone(),
+        provider: args.provider.clone(),
         ..defaults
     };
 

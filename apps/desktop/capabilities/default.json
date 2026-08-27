@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The main window, and nothing else. Every permission below is justified in one line, per plan.md M4's capability audit. Note what is NOT here: no filesystem scope, and no opener scope \u2014 opening a file or a folder is a Rust command that takes no path (see main.rs), so the webview cannot name one.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open"
+  ]
+}
