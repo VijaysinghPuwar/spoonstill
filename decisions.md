@@ -1111,6 +1111,44 @@ concrete place where "both" means "differently".
 
 ---
 
+### D-091 — Progress is shown in the film's order, and a selection says the word · Accepted
+
+Decided 2026-08-26, from two screens the author could not read.
+
+**The live panel.** `still render` renders several scenes at once (D-076) and
+logged each one as it finished, newest first. On an eleven-scene project that
+produced `011, 010, 009, 008, 007, 006, 003, 005, 002, 004, 001` — which reads
+as a film assembled in the wrong order. It is not: `pool::run` writes each
+result into `results[index]`, so what comes back is input order whatever order
+the workers finished in, and `results_come_back_in_input_order` pins that with
+a reverse-sleep so completion order is the *opposite* of input order. The film
+was right and the screen was wrong.
+
+So the panel is now the film's own order: every scene present from the moment
+the render starts, each row updating in place from `waiting` to
+`narration ready` to `rendered`. A pool that finishes 003 before 002 can no
+longer read as a film that plays them that way, and the panel gained something
+the log never had — you can see at a glance which scenes have *not* been done.
+The subtitle says it in words too, because a correct picture that needs
+explaining is only half a fix.
+
+**The voice list.** A row was highlighted when its ID matched the *effective*
+voice — which is the operator's override if they made one, and `project.yaml`'s
+voice if they did not. Those are different facts and they looked identical, so
+a voice appeared selected before anything had been selected, and clicking a row
+changed nothing an operator could see. Each row now says which it is in a word,
+`✓ Selected` or `Project default`, the header carries the same distinction as a
+tag, clicking sets the status line to
+`Andrew Multilingual will read every written line.`, and the current row is
+scrolled into view rather than hunted for. The subtitle says that clicking
+chooses, which nothing on the screen had ever said.
+
+The rule behind both: **a screen that shows a true thing in a misleading order,
+or marks a state without naming it, is a defect of the same kind as a wrong
+number.** D-089 is the same rule applied to a disabled button.
+
+---
+
 ## Reference repositories
 
 ### D-080 — A project is made and filled by the program, not by the operator's file manager · Accepted

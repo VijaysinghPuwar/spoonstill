@@ -628,26 +628,42 @@ function drawVoices() {
 
   for (const voice of shown) {
     const li = document.createElement("li");
-    if (voice.id === current) li.classList.add("on");
+    // A highlight alone could not tell "you picked this" from "this is what
+    // project.yaml already said", which are different facts and looked
+    // identical. Each one now says which it is, in a word (D-091).
+    const isCurrent = voice.id === current;
+    if (isCurrent) li.classList.add(chosenVoice ? "on" : "is-default");
     li.innerHTML =
-      `<span class="v-name"></span><span class="v-lang"></span>` +
+      `<span class="v-name"></span><span class="v-mark"></span>` +
+      `<span class="v-lang"></span>` +
       `<span class="v-gender"></span><span class="v-note"></span>` +
       `<span class="v-id mono"></span><button class="v-play">▶</button>`;
     li.children[0].textContent = voiceName(voice);
-    li.children[1].textContent = languageOf(voice.locale);
-    li.children[2].textContent = voice.gender;
-    li.children[3].textContent = voice.note;
-    li.children[3].title = voice.note;
-    li.children[4].textContent = voice.id;
-    li.children[5].title = "Hear this voice";
+    li.children[1].textContent = isCurrent
+      ? (chosenVoice ? "✓ Selected" : "Project default")
+      : "";
+    li.children[2].textContent = languageOf(voice.locale);
+    li.children[3].textContent = voice.gender;
+    li.children[4].textContent = voice.note;
+    li.children[4].title = voice.note;
+    li.children[5].textContent = voice.id;
+    li.children[6].title = "Hear this voice";
+    li.setAttribute("aria-selected", String(isCurrent));
+    li.title = isCurrent && chosenVoice
+      ? "This voice reads every written line"
+      : `Use ${voiceName(voice)} for the next render`;
 
     li.addEventListener("click", () => chooseVoice(voice.id));
-    li.children[5].addEventListener("click", (event) => {
+    li.children[6].addEventListener("click", (event) => {
       event.stopPropagation();
       preview(voice.id);
     });
     list.appendChild(li);
   }
+
+  // Whatever is current is worth seeing without hunting for it.
+  const marked = list.querySelector("li.on, li.is-default");
+  if (marked) marked.scrollIntoView({ block: "nearest" });
 }
 
 function chooseVoice(id) {
@@ -655,6 +671,15 @@ function chooseVoice(id) {
   rememberChoices();
   drawVoiceChoice();
   drawVoices();
+  // Clicking used to change nothing an operator could see: the row that was
+  // already highlighted stayed highlighted, because it had been highlighted as
+  // the project's default all along (D-091).
+  const voice = voices.find((v) => v.id === effectiveVoice());
+  setStatus(
+    chosenVoice
+      ? `${voice ? voiceName(voice) : chosenVoice} will read every written line.`
+      : `Back to the voice named in project.yaml — ${project?.voice || "default"}.`,
+  );
 }
 
 function drawVoiceChoice() {
@@ -663,8 +688,7 @@ function drawVoiceChoice() {
 
   if (voice) {
     el("chosen-name").textContent = `${voiceName(voice)} — ${languageOf(voice.locale)}`;
-    el("chosen-id").textContent =
-      `${voice.gender} · ${voice.id}${chosenVoice ? "" : "   (the project's default)"}`;
+    el("chosen-id").textContent = `${voice.gender} · ${voice.id}`;
   } else if (current) {
     el("chosen-name").textContent = describe(current);
     el("chosen-id").textContent = current;
@@ -672,6 +696,10 @@ function drawVoiceChoice() {
     el("chosen-name").textContent = "The project's own voice";
     el("chosen-id").textContent = `${project?.voice || "default"} · ${project?.provider || ""}`;
   }
+
+  const tag = el("chosen-tag");
+  tag.textContent = chosenVoice ? "✓ Selected for this render" : "From project.yaml";
+  tag.className = "chosen-tag" + (chosenVoice ? " on" : "");
 
   el("voice-default").disabled = !chosenVoice;
   el("rail-voice").textContent = voice
@@ -850,7 +878,8 @@ async function render() {
   el("cancel").hidden = false;
   el("play").hidden = true;
   el("reveal-2").hidden = true;
-  el("live").innerHTML = "";
+  buildLive();
+  el("live-note").textContent = "";
   el("bar").style.width = "0";
   el("r-voice").textContent = effectiveVoice() || project.voice || "default";
   el("r-out").textContent = outFull;
@@ -871,17 +900,22 @@ async function render() {
     }
     const current = live.get(event.index) ?? {};
     if (event.kind === "audio") {
-      live.set(event.index, { ...current, seconds: event.duration });
-      note(`${event.id}  ${event.source}  ${event.duration.toFixed(3)}s${event.reused ? "  cached" : ""}`);
+      live.set(event.index, { ...current, seconds: event.duration, cached: event.reused });
     } else if (event.kind === "segment") {
       done += 1;
-      live.set(event.index, { seconds: event.duration, frames: event.frames, reused: event.reused });
-      note(`${event.id}  ${event.frames}f  ${event.duration.toFixed(3)}s${event.reused ? "  reused" : ""}`);
+      live.set(event.index, {
+        ...current,
+        seconds: event.duration,
+        frames: event.frames,
+        reused: event.reused,
+      });
       el("bar").style.width = `${(done / project.scenes.length) * 100}%`;
       el("progress-line").textContent = `${done} of ${project.scenes.length}`;
     } else if (event.kind === "failed") {
-      note(`${event.id}  failed — ${event.detail}`, true);
+      live.set(event.index, { ...current, failed: event.detail });
+      note(`${event.id} failed — ${event.detail}`, true);
     }
+    updateLive(event.index);
     markRow(event.index);
   };
 
@@ -929,11 +963,62 @@ function markRow(index) {
   if (scene) row.querySelector(".c-resolved").innerHTML = resolved(scene);
 }
 
+// The pool renders several scenes at once and they finish in whatever order
+// the workers free up (D-076). The film is still joined in *scene* order:
+// `pool::run` returns results indexed by input position, pinned by
+// `results_come_back_in_input_order`, which reverse-sleeps so completion order
+// is the opposite of input order. A completion-ordered log made a correct film
+// look scrambled, so this list is the film's own order — every scene present
+// from the start, each row updating in place (D-091).
+function buildLive() {
+  const list = el("live");
+  list.innerHTML = "";
+  project.scenes.forEach((scene, index) => {
+    const li = document.createElement("li");
+    li.id = "live-" + index;
+    li.className = "waiting";
+    li.innerHTML =
+      `<span class="l-id mono"></span><span class="l-state"></span>` +
+      `<span class="l-detail mono"></span>`;
+    li.children[0].textContent = scene.id;
+    li.children[1].textContent = "waiting";
+    list.appendChild(li);
+  });
+}
+
+function updateLive(index) {
+  const li = el("live-" + index);
+  if (!li) return;
+  const s = live.get(index) ?? {};
+  let state = "waiting";
+  let cls = "waiting";
+  let detail = "";
+
+  if (s.failed) {
+    state = "failed";
+    cls = "bad";
+    detail = s.failed;
+  } else if (s.frames) {
+    state = s.reused ? "reused" : "rendered";
+    cls = "done";
+    detail = `${s.frames}f · ${s.seconds.toFixed(3)}s`;
+  } else if (s.seconds !== undefined) {
+    state = "narration ready";
+    cls = "running";
+    detail = `${s.seconds.toFixed(3)}s${s.cached ? " · cached" : ""}`;
+  }
+
+  li.className = cls;
+  li.children[1].textContent = state;
+  li.children[2].textContent = detail;
+}
+
+// Everything that is not about one scene — the plan, the join, a failure.
 function note(text, bad = false) {
-  const li = document.createElement("li");
-  if (bad) li.className = "bad";
-  li.textContent = text;
-  el("live").prepend(li);
+  const line = el("live-note");
+  if (!line) return;
+  line.textContent = text;
+  line.classList.toggle("bad", bad);
 }
 
 async function cancel() {

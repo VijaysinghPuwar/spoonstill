@@ -702,6 +702,21 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 .chosen-name { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
 .chosen-id { margin-top: 1px; font-size: 11px; color: var(--ink-3); }
 
+/* Says which kind of answer the big name above is. D-091. */
+.chosen-tag {
+  flex: none;
+  align-self: center;
+  margin-right: 12px;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.chosen-tag.on { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent); }
+
 .voices { margin: 0; padding: 0; list-style: none; }
 
 .voices li {
@@ -714,9 +729,25 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 }
 
 .voices li:hover { background: var(--hover); }
-.voices li.on { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+
+/* Two different facts, two different looks: the voice you picked, and the one
+   project.yaml already named. They used to be the same highlight, so clicking
+   a row changed nothing visible. D-091. */
+.voices li.on { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.voices li.is-default { box-shadow: inset 3px 0 0 var(--ink-3); }
+
+.voices .v-mark {
+  flex: none;
+  width: 112px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--ink-3);
+}
+.voices li.on .v-mark { color: var(--accent); }
 .voices .v-name   { flex: none; width: 168px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .voices li.on .v-name { font-weight: 600; }
+.voices li.is-default .v-name { font-weight: 600; }
 .voices .v-lang   { flex: none; width: 190px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .voices .v-gender { flex: none; width: 64px; color: var(--ink-3); font-size: 12px; }
 .voices .v-note   { flex: 1; min-width: 0; color: var(--ink-2); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -725,6 +756,7 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 
 /* A language name is the point of this list, so it is the last thing to go. */
 @media (max-width: 1320px) { .voices .v-note { display: none; } }
+@media (max-width: 900px)  { .voices .v-mark { width: 24px; font-size: 0; } }
 @media (max-width: 1080px) { .voices .v-id { display: none; } }
 
 /* --------------------------------------------------------------- problems */
@@ -740,10 +772,31 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 .progress { height: 4px; background: var(--line); border-radius: 3px; overflow: hidden; margin-bottom: 10px; }
 .bar { height: 100%; width: 0; background: var(--accent); transition: width 0.2s; }
 
-.live { margin: 0; padding: 0; list-style: none; font-family: var(--mono); font-size: 11px; max-height: 320px; overflow: auto; }
-.live li { padding: 3px 0; border-bottom: 1px solid var(--line); color: var(--ink-2); }
+/* The film's order, not the workers'. Every scene is present from the start
+   and its row updates in place, so a pool that finishes 003 before 002 cannot
+   read as a film that plays them that way. D-091. */
+.live { margin: 0; padding: 0; list-style: none; font-size: 11.5px; max-height: 340px; overflow: auto; }
+.live li {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-2);
+}
 .live li:last-child { border-bottom: none; }
-.live li.bad { color: var(--bad); }
+.live .l-id     { flex: none; width: 64px; font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+.live .l-state  { flex: none; width: 130px; }
+.live .l-detail { flex: 1; min-width: 0; font-family: var(--mono); font-size: 11px; color: var(--ink-3);
+                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.live li.waiting { color: var(--ink-3); }
+.live li.running .l-state { color: var(--ink); font-weight: 600; }
+.live li.done    { color: var(--ink); }
+.live li.done .l-state { color: var(--accent); font-weight: 600; }
+.live li.bad, .live li.bad .l-state, .live li.bad .l-detail { color: var(--bad); }
+
+.sub.tight { margin: -2px 0 10px; }
 
 /* ------------------------------------------------------------- drop layer */
 

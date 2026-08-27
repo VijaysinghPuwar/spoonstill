@@ -237,8 +237,10 @@
         <div>
           <h2>Voice</h2>
           <p class="sub">
-            Who reads every written line. An override for the next render —
-            <code>project.yaml</code> is an input and nothing here writes to it.
+            Who reads every written line. <strong>Click any voice to use it</strong>
+            — <span class="mono">▶</span> hears it first. An override for the next
+            render: <code>project.yaml</code> is an input and nothing here writes
+            to it.
           </p>
         </div>
         <div class="pane-tools">
@@ -251,6 +253,8 @@
           <div class="chosen-name" id="chosen-name">Project default</div>
           <div class="chosen-id mono" id="chosen-id">—</div>
         </div>
+        <!-- Whether this is your pick or the project's, in words. D-091. -->
+        <span class="chosen-tag" id="chosen-tag"></span>
         <button id="preview" class="primary">▶ Preview this voice</button>
         <audio id="player" hidden></audio>
       </div>
@@ -356,8 +360,18 @@
           </dl>
         </section>
         <section class="card">
+          <!--
+            In the film's order, always — not the order the workers happen to
+            finish in. The pool renders several scenes at once (D-076) and a
+            completion-ordered log read as a scrambled film. D-091.
+          -->
           <h3>Live</h3>
+          <p class="sub tight">
+            Every scene, in the order it appears in the film. Several render at
+            once, so they finish out of order — the join does not.
+          </p>
           <ul id="live" class="live"></ul>
+          <p id="live-note" class="whisper left"></p>
         </section>
       </div>
     </div>

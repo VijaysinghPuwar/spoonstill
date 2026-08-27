@@ -348,6 +348,18 @@ hostile fixture list in `segment_integrity.rs` is split accordingly, and macOS
 coverage is unchanged. This is the first concrete place where D-071's "both
 platforms" means "differently".
 
+**Progress is shown in the film's order, and a selection says the word**
+(D-091). The render pool finishes scenes in whatever order workers free up, and
+the live panel used to log them that way — which read as a scrambled film. It is
+now one row per scene in film order, updating in place; the join was always
+correct (`pool::run` returns input order, pinned by
+`results_come_back_in_input_order`). On the Voice screen a row's highlight had
+meant *effective* voice, so the project's default looked selected and clicking
+changed nothing visible; rows now say `✓ Selected` or `Project default` outright.
+Both follow one rule: **a screen that shows a true thing in a misleading order,
+or marks a state without naming it, is a defect of the same kind as a wrong
+number.**
+
 **The logo, in one paragraph.** The mark is final as of 2026-08-26 (D-079):
 three stacked stills, the front one carrying the image. It is **one ink at
 three opacities**, not three greys — each still is an opaque black plate under
@@ -372,7 +384,8 @@ clicked before it is called done.
 **Open decisions:** only D-072 (captions) remains, and it does not block
 anything. D-087 was added after M2: read it before touching a workflow, an
 installer or `README.md`, and D-089 before touching a path or a disabled
-control, and D-090 before touching a hostile-name fixture. D-054 through D-057 and D-075 through D-082 were added during M2 and
+control, D-090 before touching a hostile-name fixture, and D-091 before
+touching the live panel or the voice list. D-054 through D-057 and D-075 through D-082 were added during M2 and
 are all Accepted — read D-056 before touching the import path, D-057 before
 touching concat or transitions, D-076/D-077 before touching the pool, D-078
 before changing what the finished film is asserted against, D-079 before
