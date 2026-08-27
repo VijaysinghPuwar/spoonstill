@@ -705,6 +705,8 @@ async fn voices(provider: String) -> Result<Vec<VoiceView>, String> {
 /// than discovered forty minutes into a render.
 #[tauri::command]
 fn resolve_output(dir: String, name: String) -> Result<String, String> {
+    // A file *name* is typed by a person into a box, so surrounding whitespace
+    // is a slip and trimming it is a courtesy.
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err("the film needs a file name".to_owned());
@@ -718,12 +720,19 @@ fn resolve_output(dir: String, name: String) -> Result<String, String> {
         return Err(format!("{trimmed:?} is not a file name"));
     }
 
-    let folder = PathBuf::from(dir.trim());
-    if folder.as_os_str().is_empty() {
+    // A *folder* is not typed text, it is a path — from the picker, or from
+    // the project's own root. It is never trimmed. `~/Downloads/RANDOM vidoe `
+    // is a directory that genuinely exists on macOS, and trimming it named a
+    // folder that does not, which greyed out Render with the only explanation
+    // sitting on a screen the operator was not looking at. D-089.
+    if dir.is_empty() {
         return Err("choose a folder to save the film into".to_owned());
     }
+    let folder = PathBuf::from(&dir);
     if !folder.is_dir() {
-        return Err(format!("{} is not a folder", folder.display()));
+        // Quoted, so a name that ends in a space is something the operator can
+        // see rather than a sentence that reads as if it should have worked.
+        return Err(format!("{dir:?} is not a folder"));
     }
 
     // A film is an MP4 (D-078 asserts the finished file against that profile),
@@ -1054,6 +1063,43 @@ mod tests {
                 "{name:?} should not be accepted as a file name"
             );
         }
+    }
+
+    /// A path is never trimmed (D-089).
+    ///
+    /// `~/Downloads/RANDOM vidoe ` — trailing space and all — is a folder a
+    /// file manager will make and macOS will keep. Trimming it named a folder
+    /// that does not exist, so `resolve_output` failed, so Render greyed out,
+    /// on a real project with five valid scenes and nothing wrong with it.
+    #[test]
+    fn a_folder_whose_name_ends_in_a_space_is_still_that_folder() {
+        let base = std::env::temp_dir().join(format!("spoonstill-d088-{}", std::process::id()));
+        for folder in ["RANDOM vidoe ", " leading", "  both  "] {
+            let dir = base.join(folder);
+            std::fs::create_dir_all(&dir).expect("create the awkwardly named folder");
+
+            let resolved = resolve_output(dir.display().to_string(), "film".to_owned())
+                .unwrap_or_else(|e| panic!("{folder:?} should resolve, got {e}"));
+
+            assert_eq!(
+                PathBuf::from(&resolved),
+                dir.join("film.mp4"),
+                "the folder the operator chose is the folder the film lands in"
+            );
+        }
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The folder is not there, and the message has to make that *visible* —
+    /// an unquoted path ending in a space reads like a path that should work.
+    #[test]
+    fn a_missing_folder_is_quoted_so_invisible_characters_are_visible() {
+        let missing = std::env::temp_dir().join("spoonstill-no-such-folder ");
+        std::fs::remove_dir_all(&missing).ok();
+        let error = resolve_output(missing.display().to_string(), "film.mp4".to_owned())
+            .expect_err("a folder that is not there cannot resolve");
+        assert!(error.contains('"'), "{error}");
+        assert!(error.ends_with("is not a folder"), "{error}");
     }
 
     /// A film is an MP4 and the operator who typed `holiday` meant

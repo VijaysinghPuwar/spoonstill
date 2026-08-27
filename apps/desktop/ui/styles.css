@@ -297,6 +297,16 @@ body {
 }
 
 .rail-fact:hover { background: var(--hover); }
+.rail-fact.bad { border-color: var(--bad); }
+.rail-fact.bad .v { color: var(--bad); }
+
+/* The reason Render cannot run, said where Render is. */
+.rail-why {
+  margin: 0 0 8px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--bad);
+}
 .rail-fact .k { font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
 
 .rail-fact .v {

@@ -4,7 +4,8 @@
 **Last updated:** 2026-08-26 (M2 slice 4 and the shell: D-080 how a project is
 made and filled, D-081 where the TTS provider sits, D-082 the default provider
 and the voice override, D-083 the window, D-084 loudness and trim; then D-087,
-how a build reaches someone who is not the author).
+how a build reaches someone who is not the author, and D-089, the folder
+whose name ends in a space).
 
 `plan/PROJECT_BRIEF.md` and `plan/BRIEF_RECONCILIATION.md` both carry a
 "superseded by `decisions.md`" banner. Until now that file did not exist, so
@@ -1037,6 +1038,47 @@ stands.
 unknown CSS property, and an ACL that denies a command quietly, will together
 let a control surface *look* implemented indefinitely. Anything in the window
 that cannot be asserted by a test has to be clicked before it is called done.
+
+---
+
+### D-089 — A path is never trimmed, and a disabled button says why · Accepted
+
+Decided 2026-08-26, from a real project that could not be rendered:
+`~/Downloads/RANDOM vidoe ` — five valid scenes, zero problems, five lines of
+narration ready to speak, and a Render button greyed out with no explanation
+anywhere on screen.
+
+The folder's name ends in a space. Finder makes such a folder without comment
+and macOS keeps it. `resolve_output` did `PathBuf::from(dir.trim())`, which
+named a folder that does not exist, so `is_dir()` was false, so the command
+returned an error, so Render was disabled.
+
+Two rules come out of it, and the second matters more than the first:
+
+- **A path is never trimmed.** Whitespace at either end of a path is part of
+  the name, not formatting around it. The only `.trim()` in the workspace that
+  had ever touched a path was this one — every other one trims a scene ID, a
+  voice, a probe value or a line of text, all of which are typed or parsed
+  content. A *file name* the operator types into a box is still trimmed, and
+  that is the deliberate exception: a trailing space there is a slip, and the
+  box is the only place a person types one. The folder comes from the picker or
+  from the project root and is used verbatim.
+- **A disabled control explains itself where it is.** The reason existed — the
+  Output screen would have shown `... is not a folder`. But nothing on Scenes
+  said so, and Render is on Scenes. One function now decides whether a render
+  can start and the same function writes the reason next to the button, so the
+  three copies of `has_errors || outError` cannot drift and cannot go quiet.
+  A control that refuses without saying why is indistinguishable from a broken
+  program, which is what this one looked like.
+
+A third, smaller one: **a path in an error message is quoted**, so
+`"…/RANDOM vidoe " is not a folder` shows the operator the space. Unquoted, it
+reads like a sentence that should have worked.
+
+The regression test creates folders named `RANDOM vidoe `, ` leading` and
+`  both  ` and resolves a film into each. It was run against the old code
+first and fails there — a test for a hazard that has never failed is a test of
+nothing (`ffmpeg-findings.md` §8b).
 
 ---
 

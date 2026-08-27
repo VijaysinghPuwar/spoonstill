@@ -279,7 +279,7 @@ function draw() {
   drawStatus();
 
   el("pip-scenes").textContent = String(project.scenes.length);
-  el("render").disabled = Boolean(project.has_errors || outError);
+  updateRender();
 }
 
 const count = (kind) => project.scenes.filter((s) => s.source === kind).length;
@@ -712,6 +712,32 @@ async function preview(id) {
   }
 }
 
+// One place decides whether Render can run, and the same place says why. It
+// used to be three copies of the same boolean, and the reason a disabled
+// button was disabled lived on the Output screen — so a project with five
+// good scenes and a folder whose name ends in a space looked simply broken
+// (D-089).
+function renderBlocker() {
+  if (!project) return "Open a project first.";
+  if (project.has_errors) {
+    const n = attention();
+    return `${n} scene${n === 1 ? "" : "s"} need attention — see the list on Scenes.`;
+  }
+  if (outError) return outError;
+  return "";
+}
+
+function updateRender() {
+  const why = renderBlocker();
+  const button = el("render");
+  button.disabled = Boolean(why) || rendering;
+  button.title = why || (outFull ? `Renders to ${outFull}` : "");
+  const note = el("rail-why");
+  note.textContent = why;
+  note.hidden = !why;
+  el("go-output").classList.toggle("bad", Boolean(outError));
+}
+
 // ------------------------------------------------------------------- output
 
 function resetOutput() {
@@ -739,7 +765,7 @@ async function refreshOutput() {
   el("out-name").classList.toggle("bad", Boolean(outError));
   el("rail-output").textContent = outFull ? outFull.split(/[\\/]/).pop() : "—";
   el("go-output").title = outFull || outError;
-  el("render").disabled = Boolean(project.has_errors || outError || rendering);
+  updateRender();
   rememberChoices();
 }
 
@@ -888,7 +914,7 @@ async function render() {
     rendering = false;
     el("render").hidden = false;
     el("cancel").hidden = true;
-    el("render").disabled = Boolean(project.has_errors || outError);
+    updateRender();
   }
 }
 

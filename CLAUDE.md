@@ -330,6 +330,15 @@ these builds are unsigned, un-notarized, have no updater and bundle no FFmpeg,
 and the README says so in as many words. Do not delete an M5 deliverable
 because a release exists.
 
+**A path is never trimmed** (D-089). Whitespace at either end of a path is part
+of the name — `~/Downloads/RANDOM vidoe ` is a folder Finder makes and macOS
+keeps. Trimming it in `resolve_output` greyed out Render on a project with five
+valid scenes and nothing wrong with it. A *file name* typed into a box is still
+trimmed; that is the one exception and it is written down. The second half of
+that decision is the one to remember: **a disabled control explains itself where
+it is.** `updateRender()` in `apps/desktop/ui/app.js` is the only thing that
+decides whether a render can start, and it writes the reason next to the button.
+
 **The logo, in one paragraph.** The mark is final as of 2026-08-26 (D-079):
 three stacked stills, the front one carrying the image. It is **one ink at
 three opacities**, not three greys — each still is an opaque black plate under
@@ -353,7 +362,8 @@ clicked before it is called done.
 
 **Open decisions:** only D-072 (captions) remains, and it does not block
 anything. D-087 was added after M2: read it before touching a workflow, an
-installer or `README.md`. D-054 through D-057 and D-075 through D-082 were added during M2 and
+installer or `README.md`, and D-089 before touching a path or a disabled
+control. D-054 through D-057 and D-075 through D-082 were added during M2 and
 are all Accepted — read D-056 before touching the import path, D-057 before
 touching concat or transitions, D-076/D-077 before touching the pool, D-078
 before changing what the finished film is asserted against, D-079 before
