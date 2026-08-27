@@ -1387,9 +1387,19 @@ protocol.**
 took 66 s — 2.4 ms/char against 6.4 ms/char unsplit, a 2.6× speed-up. That was
 not the goal and it is not the reason; it is why there is no trade-off to weigh.
 
-**A line no scene could hold is refused before the first request.** At 17.3
-characters per second of speech (measured), a scene's hour is about 62 000
-characters. Today a 100 000-character script is spoken for eleven minutes,
+**A line no scene could hold is refused before the first request.** At the
+fastest speaking rate observed here — 17.3 characters per second — a scene's
+hour is about 62 000 characters.
+
+The rate is not a constant, and the spread matters: 20 000 characters of
+flowing prose read at 17.3 chars/s, while **25 000 characters of short
+sentences read at 11.9** (measured against the author's own project, whose
+narration is clipped: every full stop is a pause). So the limit is built on the
+*fast* end deliberately — it then refuses only what could not fit at **any**
+rate. Built on the slow end it would refuse lines that would have fitted, which
+is a wrong answer given confidently, and worse than the seven wasted minutes it
+saves. Anything under the limit that still overruns is caught downstream on its
+measured duration, which is the number that governs (D-021). Today a 100 000-character script is spoken for eleven minutes,
 normalized by two FFmpeg passes, and *then* refused for its measured duration
 of 1.6 hours. The limit is derived from `MAX_SCENE_SECONDS` rather than typed in
 beside it, and it is deliberately generous — a line slowed with `--rate -50%`

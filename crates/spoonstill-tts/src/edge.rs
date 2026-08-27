@@ -192,8 +192,28 @@ const EXAMINABLE_CHARS: usize = 200;
 
 /// Characters of text per second of speech, at `--rate +0%`.
 ///
-/// Measured on this machine, 2026-08-26: 20 000 characters produced 1 153.2 s
-/// of audio — 17.3 characters per second.
+/// **This is the fastest observed rate, on purpose.** Two measurements on this
+/// machine:
+///
+/// | text | audio | rate |
+/// |---|---|---|
+/// | 20 000 chars of flowing prose | 1 153.2 s | 17.3 chars/s |
+/// | 25 000 chars of short sentences | 2 099.7 s | 11.9 chars/s |
+///
+/// A 45% spread, because every full stop is a pause — the same voice reads
+/// clipped narration far more slowly than it reads paragraphs. So there is no
+/// single correct value here, and the only question is which end to use.
+///
+/// The fast end, because of what this number is *for*: refusing a line before
+/// speaking it, on the grounds that no scene could hold the result. A limit
+/// derived from the fast rate refuses only what **cannot** fit at any rate. A
+/// limit derived from the slow rate would refuse lines that would have fitted,
+/// which is a wrong answer given confidently — worse than the seven wasted
+/// minutes it saves. Anything under the limit that still overruns is caught
+/// downstream on its *measured* duration, which is the number that governs
+/// (D-021).
+///
+/// Do not "correct" this to the slower figure.
 const SPEECH_CHARS_PER_SECOND: f64 = 17.3;
 
 /// The longest line that could fit in one scene.
@@ -1762,6 +1782,33 @@ aiohttp.client_exceptions.ClientProxyConnectionError: Cannot connect to host 127
         assert!(said.contains("minutes of speech"), "{said}");
         assert!(said.contains("Split it"), "it says what to do: {said}");
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    /// The rate this is built on is the *fastest* observed, so the limit
+    /// refuses only what cannot fit at any speaking rate. Measured on this
+    /// machine: 17.3 chars/s for flowing prose, 11.9 for clipped sentences.
+    /// Deriving the limit from the slow end would refuse lines that fit.
+    #[test]
+    fn the_limit_refuses_only_what_could_never_fit() {
+        const SLOWEST_SEEN: f64 = 11.9;
+        assert!(
+            SPEECH_CHARS_PER_SECOND > SLOWEST_SEEN,
+            "the limit must come from the fastest rate, or it refuses lines that would have fitted"
+        );
+
+        // A line just under the limit is refusable downstream if it happens to
+        // be slow prose — and that is correct, because the duration that
+        // governs is the measured one (D-021).
+        let cap = spoonstill_core::project::MAX_SCENE_SECONDS;
+        let at_the_limit = max_line_chars() as f64;
+        assert!(
+            at_the_limit / SPEECH_CHARS_PER_SECOND <= cap,
+            "a line at the limit fits when read quickly"
+        );
+        assert!(
+            at_the_limit / SLOWEST_SEEN > cap,
+            "and may not when read slowly — which downstream catches, not us"
+        );
     }
 
     /// The limit is derived from the scene cap, not typed in beside it. If

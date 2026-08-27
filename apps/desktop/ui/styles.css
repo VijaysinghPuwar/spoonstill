@@ -84,6 +84,15 @@ html[data-theme="light"] {
 
   --radius: 7px;
   --rail: 194px;
+
+  /* The scenes grid's fixed columns (D-101). Everything not listed here is the
+     narration, which takes the slack. The responsive block at the foot of this
+     file is the only other place they are set. */
+  --w-scene: 58px;
+  --w-still: 58px;
+  --w-audio: 76px;
+  --w-resolved: 104px;
+  --w-arrange: 122px;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
 }
 
@@ -157,9 +166,20 @@ body {
 .bar-mark i:nth-child(2) { left: 3px; top: 2px; border-color: var(--ink-2); background: var(--panel); }
 .bar-mark i:nth-child(3) { left: 6px; top: 4px; border-color: var(--ink); background: var(--ink); }
 
-#t-name { font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; }
+/* Both halves must be able to end. A project called after the folder it came
+   from can be sixty characters, and a flex item's default `min-width: auto` is
+   its whole text — so without these the name ran under the theme switch. */
+#t-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
 
 .path {
+  min-width: 0;
   color: var(--ink-3);
   font-family: var(--mono);
   font-size: 11px;
@@ -489,24 +509,34 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 .pane-head {
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 14px;
+  gap: 10px 14px;
   padding: 12px 16px 11px;
   border-bottom: 1px solid var(--line);
 }
 
+/* The heading and its sentence give way first: three buttons that wrap onto
+   their own line are still three buttons, and a button that has been squeezed
+   to half a word is not. */
+.pane-head > div:first-child { flex: 1 1 260px; min-width: 0; }
+
 .pane-head.thin { padding: 9px 16px; align-items: center; }
 .pane-head h2 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
 .pane-head .sub { margin: 3px 0 0; color: var(--ink-3); font-size: 12px; max-width: 78ch; }
-.pane-tools { flex: none; display: flex; align-items: center; gap: 8px; }
+.pane-tools { flex: 0 1 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 
 .body { padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; }
 .body.scroll { flex: 1; min-height: 0; overflow: auto; }
 
 .cols {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  /* `min()` rather than a bare 420px: at the 900px minimum window the content
+     area is ~700px, and a 420px minimum forced one column while still asking
+     for 420 — which overflowed a 340px pane. Now the track can be as narrow as
+     the pane is. */
+  grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
   gap: 14px;
   align-items: start;
 }
@@ -573,9 +603,10 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 .filters {
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
   padding: 9px 16px;
   border-bottom: 1px solid var(--line);
 }
@@ -611,13 +642,28 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 .chip.on .n { color: var(--ink-2); }
 .chip.attention .n { color: var(--warn); }
 
-.search { width: 210px; }
+.search { flex: 0 1 210px; width: 210px; min-width: 120px; }
 
 /* ------------------------------------------------------------------- grid */
 
-.grid-wrap { flex: 1; min-height: 0; overflow: auto; background: var(--grid); }
+.grid-wrap { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; background: var(--grid); }
 
-.grid { width: 100%; border-collapse: collapse; }
+/* **Fixed, not auto.** With `table-layout: auto` the browser sizes the columns
+   from their content, and one long narration is content 3 000px wide: the table
+   grew past its wrapper, the wrapper scrolled sideways, and Audio, Resolved and
+   the whole arrange column left the window. An operator who cannot see Remove
+   concludes it does not exist — which is what was reported. Fixed layout means
+   the column widths below are the whole truth, the sum is always the window,
+   and every column is on screen at every size (D-101).
+
+   The consequence to keep in mind: a fixed table ignores content width, so
+   anything that can be long has to say how it ends. Every cell here either
+   ellipsizes or wraps; none of them may simply overflow. */
+.grid {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+}
 
 .grid thead th {
   position: sticky;
@@ -635,17 +681,26 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
   white-space: nowrap;
 }
 
-.grid td { padding: 6px 16px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.grid td { padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 .grid tbody tr:hover td { background: var(--hover); }
 
-.c-scene    { width: 62px; }
-.c-still    { width: 62px; }
-.c-audio    { width: 84px; }
-.c-resolved { width: 132px; text-align: right; }
-.c-arrange  { width: 148px; }
-.c-when     { width: 186px; }
-.c-sev      { width: 62px; }
-.c-scope    { width: 92px; }
+/* The gutters are the pane's, not every cell's. 16px of padding on both sides
+   of six columns is 192px spent on nothing, which at the 900px minimum window
+   is a quarter of the grid — and it was coming out of the narration. */
+.grid th:first-child, .grid td:first-child { padding-left: 16px; }
+.grid th:last-child,  .grid td:last-child  { padding-right: 16px; }
+
+/* Every fixed column, in one place, so the sum can be checked by eye. The
+   narration column is what is left over and is never given a width: it is the
+   one that should absorb a wider window. */
+.c-scene    { width: var(--w-scene); }
+.c-still    { width: var(--w-still); }
+.c-audio    { width: var(--w-audio); }
+.c-resolved { width: var(--w-resolved); text-align: right; }
+.c-arrange  { width: var(--w-arrange); }
+.c-when     { width: 168px; }
+.c-sev      { width: 58px; }
+.c-scope    { width: 88px; }
 
 .grid td.c-scene { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
 .grid td.c-when, .grid td.c-sev, .grid td.c-scope { white-space: nowrap; }
@@ -656,7 +711,14 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
    these move the operator's photographs about, and a control that shouts is a
    control that gets pressed by accident. */
 .grid td.c-arrange { text-align: right; white-space: nowrap; }
-.arrange { display: inline-flex; gap: 4px; opacity: 0; transition: opacity 90ms ease; }
+
+/* Present, not hidden. These used to sit at `opacity: 0` until the row was
+   under the pointer, which is how a first-time operator concluded there was no
+   way to reorder or remove a scene — you cannot hover something you do not
+   know is there. They are legible at rest and full ink under the pointer:
+   discoverable, still quiet, still not shouting at the row you are reading
+   (D-101, softening D-100). */
+.arrange { display: inline-flex; gap: 4px; opacity: 0.42; transition: opacity 90ms ease; }
 .grid tr:hover .arrange,
 .grid tr:focus-within .arrange { opacity: 1; }
 
@@ -701,7 +763,21 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 .thumb.portrait { width: 25px; height: 44px; }
 .thumb.square   { width: 34px; height: 34px; }
 
-.file { font-family: var(--mono); font-size: 11px; color: var(--ink-2); margin-right: 9px; white-space: nowrap; }
+/* The still's name, in front of the line it speaks. It shrinks before the
+   narration does and disappears before the narration is unreadable: the words
+   are the content of this screen and the filename is a label for them. */
+.file {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 15ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  margin-right: 9px;
+  white-space: nowrap;
+}
 
 .source-cell { display: flex; align-items: center; min-width: 0; }
 
@@ -733,6 +809,9 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
   border-radius: 5px;
   padding: 2px 6px;
   margin: -2px -6px;
+  resize: none;
+  overflow-y: auto;
+  line-height: 1.45;
 }
 
 .narration-input:focus { outline: none; }
@@ -772,14 +851,16 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 .chosen {
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 14px;
+  gap: 10px 14px;
   padding: 13px 16px;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
 }
 
-.chosen-who { flex: 1; min-width: 0; }
+.chosen-who { flex: 1 1 200px; min-width: 0; }
+.chosen-name, .chosen-id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chosen-name { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
 .chosen-id { margin-top: 1px; font-size: 11px; color: var(--ink-3); }
 
@@ -800,9 +881,23 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 
 .voices { margin: 0; padding: 0; list-style: none; }
 
+/* A grid, not a row of fixed widths. Seven columns of hard pixels added up to
+   more than a 900px window has, so the last of them — the play button — went
+   off the edge and the voice could not be auditioned at all. Here the fixed
+   ones stay fixed, the readable ones are `minmax(floor, fraction)` and take the
+   slack, and the play button is `auto` at the end of a track that cannot
+   overflow (D-101). */
 .voices li {
-  display: flex;
-  align-items: baseline;
+  display: grid;
+  grid-template-columns:
+    minmax(108px, 1.15fr)   /* name */
+    var(--v-mark, 104px)    /* selected / project default */
+    minmax(96px, 1fr)       /* language */
+    56px                    /* gender */
+    minmax(0, 1.5fr)        /* note */
+    minmax(0, 1.15fr)       /* id */
+    auto;                   /* ▶ */
+  align-items: center;
   gap: 12px;
   padding: 6px 16px;
   border-bottom: 1px solid var(--line);
@@ -818,27 +913,25 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 .voices li.is-default { box-shadow: inset 3px 0 0 var(--ink-3); }
 
 .voices .v-mark {
-  flex: none;
-  width: 112px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.01em;
   color: var(--ink-3);
 }
 .voices li.on .v-mark { color: var(--accent); }
-.voices .v-name   { flex: none; width: 168px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.voices li > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.voices .v-name   { font-weight: 500; }
 .voices li.on .v-name { font-weight: 600; }
 .voices li.is-default .v-name { font-weight: 600; }
-.voices .v-lang   { flex: none; width: 190px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.voices .v-gender { flex: none; width: 64px; color: var(--ink-3); font-size: 12px; }
-.voices .v-note   { flex: 1; min-width: 0; color: var(--ink-2); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.voices .v-id     { flex: none; width: 210px; font-size: 10.5px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
-.voices .v-play   { flex: none; padding: 1px 9px; font-size: 11px; }
-
-/* A language name is the point of this list, so it is the last thing to go. */
-@media (max-width: 1320px) { .voices .v-note { display: none; } }
-@media (max-width: 900px)  { .voices .v-mark { width: 24px; font-size: 0; } }
-@media (max-width: 1080px) { .voices .v-id { display: none; } }
+.voices .v-lang   { color: var(--ink); }
+.voices .v-gender { color: var(--ink-3); font-size: 12px; }
+.voices .v-note   { color: var(--ink-2); font-size: 12px; }
+.voices .v-id     { font-size: 10.5px; color: var(--ink-3); text-align: right; }
+.voices .v-play   { overflow: visible; padding: 1px 9px; font-size: 11px; }
 
 /* --------------------------------------------------------------- problems */
 
@@ -913,14 +1006,64 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 .counts { flex: none; color: var(--ink-3); }
 .counts .attention { color: var(--warn); }
 
-/* At the stated 1100x700 minimum the path in the title bar and the rail's
-   width are the first things that can go. Nothing reflows into a mobile
-   layout, because there is no mobile. */
+/* ------------------------------------------------------------- narrower */
+
+/* The window's real floor is 900x600 (`tauri.conf.json`), and this file used to
+   say 1100x700 — which is how a whole band of legal window sizes went
+   untested. Everything below is ordered by what an operator can most afford to
+   lose, and nothing in it hides a control: a control that is gone is a feature
+   that is gone (D-101).
+
+   Nothing reflows into a mobile layout, because there is no mobile. */
+
+/* Wide enough for a laptop, not for a filename beside every line. */
+@media (max-width: 1280px) {
+  :root { --w-resolved: 92px; }
+  .voices .v-note { display: none; }
+  .voices li { grid-template-columns: minmax(108px, 1.15fr) var(--v-mark, 104px) minmax(96px, 1fr) 56px 0 minmax(0, 1.15fr) auto; }
+}
+
 @media (max-width: 1180px) {
   .path { display: none; }
-  :root { --rail: 166px; }
-  .search { width: 150px; }
-  .projects .p-name { width: 150px; }
+  :root { --rail: 168px; }
+  .file { max-width: 11ch; }
+}
+
+/* The point where the arrange buttons stop spelling "Remove". The word is the
+   button's tooltip and its accessible name either way — see `drawArrange`. */
+@media (max-width: 1080px) {
+  :root { --w-arrange: 92px; --w-still: 52px; --w-scene: 52px; }
+  .grid td, .grid th { padding-left: 8px; padding-right: 8px; }
+  .arrange-button.wordy { font-size: 0; padding: 4px 7px; }
+  .arrange-button.wordy::after { content: "✕"; font-size: 11px; }
+  .arrange-button.wordy.armed::after { content: "✕?"; }
+  .voices .v-id { display: none; }
+  .voices li { grid-template-columns: minmax(108px, 1.15fr) var(--v-mark, 104px) minmax(96px, 1fr) 56px 0 0 auto; }
+}
+
+/* At the floor the filename goes and the narration takes what it leaves. */
+@media (max-width: 980px) {
+  :root { --w-audio: 68px; --w-resolved: 84px; }
+  .file { display: none; }
+  .search { flex: 1 1 140px; }
+  .voices .v-mark { --v-mark: 86px; }
+  .voices li { grid-template-columns: minmax(96px, 1.15fr) 86px minmax(88px, 1fr) 52px 0 0 auto; }
+}
+
+/* Below the window's own minimum. Reachable only on a scaled display or a
+   webview under test, and it should still be usable rather than clipped. */
+@media (max-width: 820px) {
+  :root { --rail: 148px; --w-still: 0px; --w-resolved: 76px; }
+  .c-still { display: none; }
+  .grid thead th.c-still { display: none; }
+  .voices li { grid-template-columns: minmax(90px, 1.2fr) 0 minmax(80px, 1fr) 0 0 0 auto; }
+  .voices .v-mark, .voices .v-gender { display: none; }
+}
+
+/* Short windows: the two lists that set their own height give it back. */
+@media (max-height: 720px) {
+  .live { max-height: 220px; }
+  .problem-strip { max-height: 22vh; }
 }
 
 

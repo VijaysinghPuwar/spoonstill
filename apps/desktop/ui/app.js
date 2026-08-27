@@ -500,13 +500,31 @@ function resolved(scene) {
 }
 
 // One row, edited in place. Enter or blur saves; Escape puts it back.
+//
+// A textarea rather than an input, and it grows to whatever it holds. The grid
+// shows one elided line because it is a review grid at 500 rows (D-051) — but
+// the moment the operator opens a line to read or change it, showing them two
+// thirds of their own sentence is the same defect as clipping it. Narration is
+// not a short field: D-095 exists because a scene can hold an hour of it.
 function editNarration(scene, cell) {
   if (rendering) return;
-  const input = document.createElement("input");
+  const input = document.createElement("textarea");
   input.className = "narration-input";
+  input.rows = 1;
   input.value = scene.narration;
   input.placeholder = "What this scene says. Leave it empty for a silent scene.";
   cell.replaceWith(input);
+
+  // Capped, not unbounded: one very long line must not push every other row
+  // off the screen. Past the cap the textarea scrolls, which is the one place
+  // in this window where scrolling text is the right answer.
+  const fit = () => {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, Math.round(innerHeight * 0.4)) + "px";
+  };
+  input.addEventListener("input", fit);
+  fit();
+
   input.focus();
   input.select();
 
@@ -528,7 +546,12 @@ function editNarration(scene, cell) {
   };
 
   input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") finish(true);
+    // Enter saves, because a scene is one spoken line far more often than it
+    // is a paragraph. Shift+Enter is the way to a second line.
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      finish(true);
+    }
     if (event.key === "Escape") finish(false);
   });
   input.addEventListener("blur", () => finish(true));
@@ -555,11 +578,17 @@ function drawArrange(box, scene, showing) {
   const position = scene.index + 1;
   const filtered = showing !== total;
 
-  const button = (label, hint, enabled, run) => {
+  // `wordy` marks a button whose label is a word rather than a glyph. Below
+  // 1080px the stylesheet swaps that word for ✕ so the column can be narrow
+  // enough to stay on screen; the word survives as the tooltip and as the
+  // accessible name, which is why both are set here rather than left to the
+  // text (D-101).
+  const button = (label, hint, enabled, run, wordy) => {
     const b = document.createElement("button");
-    b.className = "arrange-button";
+    b.className = "arrange-button" + (wordy ? " wordy" : "");
     b.textContent = label;
     b.title = hint;
+    b.setAttribute("aria-label", label);
     b.disabled = !enabled || rendering;
     if (enabled && !rendering) b.addEventListener("click", run);
     box.appendChild(b);
@@ -586,15 +615,17 @@ function drawArrange(box, scene, showing) {
     box.querySelectorAll(".arrange-button").forEach((b) => delete b.dataset.armed);
     remove.dataset.armed = "1";
     remove.textContent = "Remove?";
+    remove.setAttribute("aria-label", "Remove scene " + scene.id + " — click again to confirm");
     remove.classList.add("armed");
     setStatus(`Click again to take scene ${scene.id} out. Its files move to removed/, not deleted.`);
     setTimeout(() => {
       if (!remove.dataset.armed) return;
       delete remove.dataset.armed;
       remove.textContent = "Remove";
+      remove.setAttribute("aria-label", "Remove");
       remove.classList.remove("armed");
     }, 4000);
-  });
+  }, true);
 }
 
 // One arrangement, then a reload — the folder is the truth and it has changed
