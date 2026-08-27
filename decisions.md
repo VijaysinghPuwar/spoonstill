@@ -1706,6 +1706,46 @@ now wraps rather than running off the centred screen.
 
 ---
 
+### D-102 — The tag is the version, and a release carries no co-author · Accepted
+
+Two defects of the same shape, both found 2026-08-27 by looking at the
+repository the way a stranger sees it rather than the way the author builds it.
+
+**The number was only ever in the tag.** `git tag v0.1.1` and `v0.1.2` both
+published twelve assets built from a workspace whose `[workspace.package]`
+version had said `0.1.0` since M0. So `still --version` answered `0.1.0` on
+every release, and Tauri named its Windows bundle `spoonstill_0.1.0_x64_en-US`
+before D-098's rename took the number back off the filename. Nothing failed;
+the release simply lied about which build it was, which is the worst kind of
+version bug because it surfaces in a bug report months later.
+
+The rule: **the tag, `Cargo.toml` and `apps/desktop/tauri.conf.json` state one
+version, and the release workflow refuses the job if they disagree.** The check
+is the first step of the `draft` job — before the draft exists and before any
+of the four build legs start — because failing at asset eleven of twelve is
+D-097's failure mode again. Bumping a version is therefore a commit, and the
+tag goes on that commit; a tag is never the first place a number appears.
+
+**A tag can hold a commit the branch does not.** `v0.1.2` pointed at `4bce8ec`,
+which carried a `Co-Authored-By: Claude` trailer. `master` carried `33e9408` —
+the identical tree, re-committed without the trailer — so `git log` on the
+branch was clean while GitHub's contributor list, which reads every commit the
+repo can reach including through tags, showed two people. Re-committing does
+not remove the old commit; only moving or deleting the ref that keeps it alive
+does. The tag was moved onto `33e9408` (identical tree, verified by
+`git rev-parse <c>^{tree}` on both) and force-pushed, orphaning the trailer.
+
+The rule that follows: **`git log` on the branch is not the repository.**
+Anything reachable from any ref is public — tags, and any branch pushed once
+and forgotten. When a commit is rewritten to remove something, check what still
+points at the original.
+
+Recording the author's standing preference, which this file is the only place
+that survives: **commits in this project carry no co-author or session
+trailer.** The author is the only contributor and intends the history to say so.
+
+---
+
 ## Reference repositories
 
 ### D-080 — A project is made and filled by the program, not by the operator's file manager · Accepted

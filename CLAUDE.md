@@ -414,6 +414,18 @@ these builds are unsigned, un-notarized, have no updater and bundle no FFmpeg,
 and the README says so in as many words. Do not delete an M5 deliverable
 because a release exists.
 
+**The tag is the version, and a tag can hold a commit the branch does not**
+(D-102). `[workspace.package] version` said `0.1.0` through the v0.1.1 and
+v0.1.2 releases, so every published binary answered `still --version` with
+`0.1.0`. The number now lives in `Cargo.toml` and `apps/desktop/tauri.conf.json`
+and the release workflow's **first** step refuses the job if either disagrees
+with the tag — bumping a version is a commit, and the tag goes on that commit.
+Separately: `v0.1.2` pointed at a commit that was not on `master` and carried a
+`Co-Authored-By` trailer, which is why GitHub listed two contributors while
+`git log` on the branch listed one. Re-committing does not remove the old
+commit; the tag was moved onto the identical tree on `master`. **Commits in
+this project carry no co-author or session trailer.**
+
 **A pinned toolchain owns the targets** (D-097). `rust-toolchain.toml` pins
 1.94.0, and that pin beats whatever `dtolnay/rust-toolchain` installed — so its
 `targets:` input added the target to *stable* while `cargo build` used 1.94.0,
@@ -505,7 +517,9 @@ provider, a retry, or the pre-flight check in `film.rs`, and D-095 before
 touching how a long line is split or joined, and D-096 before giving a probe a
 constant timeout, and D-097 before touching a release workflow's toolchain
 setup, D-098 before renaming an asset, D-099 before touching an installer's
-quarantine handling, and D-100 before touching `arrange` or the Scenes rows**. D-054 through D-057 and D-075 through D-082 were added during M2 and
+quarantine handling, D-100 before touching `arrange` or the Scenes rows, and
+D-102 before cutting a release, bumping a version, or writing a commit
+message**. D-054 through D-057 and D-075 through D-082 were added during M2 and
 are all Accepted — read D-056 before touching the import path, D-057 before
 touching concat or transitions, D-076/D-077 before touching the pool, D-078
 before changing what the finished film is asserted against, D-079 before

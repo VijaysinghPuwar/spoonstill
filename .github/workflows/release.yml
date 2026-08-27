@@ -42,6 +42,23 @@ jobs:
       - id: tag
         run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
 
+      # D-102: the tag is the version, so nothing else may disagree with it.
+      # v0.1.1 and v0.1.2 both shipped binaries that answered `--version` with
+      # 0.1.0, and an MSI named for it, because the tag was the only place the
+      # number was ever written. Fail here, before twelve assets are built.
+      - name: The tag, Cargo.toml and tauri.conf.json state one version
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          want="${TAG#v}"
+          cargo_v=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)
+          tauri_v=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' apps/desktop/tauri.conf.json)
+          echo "tag=$want cargo=$cargo_v tauri=$tauri_v"
+          if [ "$want" != "$cargo_v" ] || [ "$want" != "$tauri_v" ]; then
+            echo "::error::Tag $TAG wants $want; Cargo.toml says $cargo_v and tauri.conf.json says $tauri_v. Bump them in a commit, then move the tag onto it."
+            exit 1
+          fi
+
       - name: Create or reuse the draft
         env:
           GH_TOKEN: ${{ github.token }}
