@@ -1182,9 +1182,21 @@ nothing on it that did anything.
   The path now wraps rather than trailing off, because on a card there is room
   and the folder is how an operator tells two projects of the same name apart.
 
-- **Prose that restates the screen is deleted.** Two paragraphs explaining what
-  Edge TTS is and one restating what the program does are gone. What is left is
-  a state line, a control, and the sentence a control needs to be understood.
+- **Prose that restates the screen is deleted.** A control that needs a
+  paragraph is a control that is wrong; a control that has one anyway is a
+  screen nobody reads. Gone from Settings, Output and the Voice card: what
+  `project.yaml` is, what Edge TTS is, what an MP4 is, that the destination is
+  for the next render — all of it either visible in the control beside it or
+  written in `decisions.md` where it belongs. What is left is a state line, a
+  control, and at most one short line where a control genuinely needs one.
+
+- **The Runs tab is gone.** It showed one project's log inside that project,
+  which is the question an operator does not have — they have "something went
+  wrong", and the folder is often the thing they are trying to establish.
+  D-093's CSV answers that from Settings, and the per-project JSON Lines is
+  still on disk and still in the diagnostics bundle, so nothing was lost except
+  a screen that could only answer a question you had already answered. The two
+  window commands that fed it went with it.
 
 Also recorded here because it was found in the same pass: **the release builds
 one universal `.dmg`** rather than one per architecture, and the Intel CLI

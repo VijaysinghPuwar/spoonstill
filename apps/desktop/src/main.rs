@@ -312,15 +312,6 @@ struct ProviderStatus {
     default_voice: String,
 }
 
-/// One line from a project's log, for the Runs tab.
-#[derive(Debug, Clone, Serialize)]
-struct RunLine {
-    at: String,
-    severity: String,
-    scope: String,
-    message: String,
-}
-
 /// What a drop of files did, in the shape the window reports it.
 #[derive(Debug, Clone, Serialize)]
 struct IngestView {
@@ -617,66 +608,6 @@ async fn provider_status(provider: String) -> Result<ProviderStatus, String> {
     })
     .await
     .map_err(|e| format!("the check failed: {e}"))?
-}
-
-/// The tail of this project's log — every run, successful or not (D-016).
-#[tauri::command]
-async fn runs(root: String, limit: usize) -> Result<Vec<RunLine>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let dir = PathBuf::from(root)
-            .join(spoonstill_core::STATE_DIR)
-            .join(spoonstill_app::surface::LOGS_DIR);
-
-        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
-            .collect();
-        files.sort();
-
-        let mut lines: Vec<RunLine> = Vec::new();
-        for file in files.iter().rev().take(2) {
-            let text = std::fs::read_to_string(file).unwrap_or_default();
-            for line in text.lines() {
-                if let Some(parsed) = parse_line(line) {
-                    lines.push(parsed);
-                }
-            }
-        }
-        // Newest first, because the thing that just went wrong is the thing
-        // being looked for.
-        lines.reverse();
-        lines.truncate(limit.clamp(1, 2000));
-        Ok(lines)
-    })
-    .await
-    .map_err(|e| format!("the log could not be read: {e}"))?
-}
-
-/// One JSON Lines record, read without a JSON dependency.
-///
-/// The shell has `serde_json` and could parse this properly; it does not,
-/// because the log's shape is `spoonstill-state`'s to define and a second
-/// parser here would be a second definition. This reads the four fields the
-/// tab shows and ignores everything else, so a new field in the writer cannot
-/// break the reader.
-fn parse_line(line: &str) -> Option<RunLine> {
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    let field = |name: &str| {
-        value
-            .get(name)
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_owned()
-    };
-    Some(RunLine {
-        at: field("at"),
-        severity: field("severity"),
-        scope: field("scope"),
-        message: field("message"),
-    })
 }
 
 /// Make a new project folder.
@@ -1065,16 +996,6 @@ fn initial_project() -> Option<String> {
         .filter(|argument| std::path::Path::new(argument).is_dir())
 }
 
-/// Where a project's diagnostics go, so the window can point at them (D-016).
-#[tauri::command]
-fn log_directory(path: String) -> String {
-    PathBuf::from(path)
-        .join(spoonstill_core::STATE_DIR)
-        .join(spoonstill_app::surface::LOGS_DIR)
-        .display()
-        .to_string()
-}
-
 fn view_of(event: FilmEvent) -> ProgressView {
     match event {
         FilmEvent::Planned {
@@ -1152,9 +1073,7 @@ fn main() {
             render_project,
             cancel_render,
             open_film,
-            reveal_project,
-            runs,
-            log_directory
+            reveal_project
         ])
         .run(tauri::generate_context!())
         .expect("the spoonstill window could not start");

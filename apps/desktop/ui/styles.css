@@ -338,20 +338,26 @@ button.wide { width: 100%; padding: 7px 12px; }
 /* A project is a thing you pick up, so it is a card. As a row-per-project list
    the only thing separating one from the next was a hairline, and a long path
    made the whole screen read as one grey block. D-092. */
-.projects { margin: 0; padding: 0 18px 18px; list-style: none; }
+.projects { margin: 0; padding: 18px; list-style: none; }
 
 .projects.cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  /* Capped, not `1fr`: on a wide window a handful of projects became a row of
+     enormous slabs, and a card that is mostly empty space reads as broken. */
+  grid-template-columns: repeat(auto-fill, minmax(250px, 330px));
+  justify-content: start;
   gap: 12px;
 }
 
 .projects li {
   position: relative;
   display: grid;
-  grid-template-rows: auto auto auto;
-  gap: 4px;
-  padding: 15px 16px 13px;
+  /* The middle row takes the slack, so the timestamp sits on the floor of
+     every card and the cards in a row line up whatever their paths do. */
+  grid-template-rows: auto 1fr auto;
+  gap: 5px;
+  min-height: 104px;
+  padding: 14px 16px 12px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--panel);
@@ -363,10 +369,22 @@ button.wide { width: 100%; padding: 7px 12px; }
 .projects .p-name { font-weight: 600; font-size: 14.5px; letter-spacing: -0.01em;
                     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The path wraps rather than trailing off: on a card there is room, and the
-   folder is how an operator tells two projects of the same name apart. */
-.projects .p-path { font-size: 11px; color: var(--ink-3); line-height: 1.45;
-                    overflow-wrap: anywhere; }
-.projects .p-when { margin-top: 2px; color: var(--ink-3); font-size: 11.5px; }
+   folder is how an operator tells two projects of the same name apart. Two
+   lines of room — a scratch directory is nine segments long and would
+   otherwise set the height of every card beside it. The whole path is still
+   the card's tooltip. */
+.projects .p-path {
+  font-size: 11px;
+  color: var(--ink-3);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.projects .p-when { align-self: end; color: var(--ink-3); font-size: 11.5px; }
 .projects .p-forget {
   position: absolute;
   top: 10px;

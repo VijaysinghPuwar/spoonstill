@@ -25,7 +25,7 @@ const MEDIA = [
   "txt", "md",
 ];
 
-const TABS = ["scenes", "voice", "output", "render", "runs"];
+const TABS = ["scenes", "voice", "output", "render"];
 
 // The only things the frontend remembers: which project is on screen, what the
 // last render produced, and what the operator has chosen for the *next* render.
@@ -74,7 +74,6 @@ function setStatus(text) { el("status").textContent = text || ""; }
 function tab(name) {
   for (const button of el("tabs").children) button.classList.toggle("on", button.dataset.tab === name);
   for (const pane of TABS) el("pane-" + pane).hidden = pane !== name;
-  if (name === "runs") loadRuns();
   if (name === "voice") loadVoices();
 }
 
@@ -170,8 +169,8 @@ async function loadActivityLog() {
     el("activity-open").disabled = !info.exists;
     said.classList.remove("bad");
     said.textContent = info.exists
-      ? `${(info.size / 1024).toFixed(0)} KB so far.`
-      : "Nothing recorded yet — it appears the first time you render.";
+      ? `${(info.size / 1024).toFixed(0)} KB`
+      : "Empty until you render.";
   } catch (error) {
     el("activity-path").textContent = "—";
     el("activity-open").disabled = true;
@@ -221,7 +220,7 @@ async function installProvider() {
   button.textContent = "Installing…";
   said.hidden = false;
   said.classList.remove("bad");
-  said.textContent = "This runs your package manager and can take a minute.";
+  said.textContent = "Running your package manager…";
   try {
     const ran = await invoke("install_provider", { provider: "edge" });
     said.textContent = `Installed with ${ran}`;
@@ -272,11 +271,7 @@ async function loadFallbackVoice() {
   select.value = appDefaultVoice ?? "";
   select.disabled = catalogue.length === 0;
 
-  said.textContent = catalogue.length === 0
-    ? "No voices to choose from until the voice service is installed."
-    : appDefaultVoice
-      ? `Projects that name no voice will use ${describe(appDefaultVoice)}.`
-      : "Projects that name no voice use whatever the provider picks.";
+  said.textContent = catalogue.length === 0 ? "Install the voice service first." : "";
 }
 
 async function setFallbackVoice(id) {
@@ -284,9 +279,7 @@ async function setFallbackVoice(id) {
     const settings = await invoke("set_default_voice", { voice: id || null });
     appDefaultVoice = settings.default_voice || null;
     el("app-voice").value = appDefaultVoice ?? "";
-    el("app-voice-said").textContent = appDefaultVoice
-      ? `Projects that name no voice will use ${describe(appDefaultVoice)}.`
-      : "Projects that name no voice use whatever the provider picks.";
+    el("app-voice-said").textContent = "";
   } catch (error) {
     el("app-voice-said").textContent = String(error);
   }
@@ -957,35 +950,6 @@ function restoreChoices() {
   guard(refreshOutput());
 }
 
-// ---------------------------------------------------------------------- runs
-
-async function loadRuns() {
-  if (!project) return;
-  try {
-    el("log-dir").textContent = await invoke("log_directory", { path: project.root });
-    const lines = await invoke("runs", { root: project.root, limit: 400 });
-    const rows = el("run-rows");
-    rows.innerHTML = "";
-    for (const line of lines) {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `<td class="c-when mono"></td><td class="c-sev mono"></td><td class="c-scope mono"></td><td></td>`;
-      tr.children[0].textContent = line.at;
-      tr.children[1].textContent = line.severity;
-      tr.children[2].textContent = line.scope;
-      tr.children[3].textContent = line.message;
-      if (line.severity === "error") tr.classList.add("failed");
-      rows.appendChild(tr);
-    }
-    if (lines.length === 0) {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `<td colspan="4" class="empty-note">Nothing has been recorded for this project yet.</td>`;
-      rows.appendChild(tr);
-    }
-  } catch (error) {
-    setStatus(String(error));
-  }
-}
-
 // ------------------------------------------------------------------ render
 
 async function render() {
@@ -1207,7 +1171,6 @@ el("add").addEventListener("click", chooseMedia);
 el("render").addEventListener("click", render);
 el("cancel").addEventListener("click", cancel);
 el("recheck").addEventListener("click", () => project && load(project.root));
-el("refresh-runs").addEventListener("click", loadRuns);
 el("search").addEventListener("input", () => { drawRows(); drawStatus(); });
 el("play").addEventListener("click", () => guard(invoke("open_film")));
 el("reveal").addEventListener("click", () => guard(invoke("reveal_project")));

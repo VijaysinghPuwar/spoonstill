@@ -360,7 +360,10 @@ Both follow one rule: **a screen that shows a true thing in a misleading order,
 or marks a state without naming it, is a defect of the same kind as a wrong
 number.**
 
-**Settings is where you act** (D-092). `Provider::install()` is part of the TTS
+**Settings is where you act, and the Runs tab is gone** (D-092). A screen that
+showed one project's log inside that project answered a question nobody has —
+D-093's CSV answers "what went wrong" without needing to know which folder.
+The per-project JSON Lines is untouched and still in the diagnostics bundle. `Provider::install()` is part of the TTS
 trait — Edge tries pipx, then brew, then a `--user` pip, and reports success only
 when `availability()` says Ready, not when the installer exits zero. The machine
 also holds a **fallback voice**; precedence is run override → project's

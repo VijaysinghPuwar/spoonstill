@@ -70,7 +70,7 @@
     <div class="pane-head">
       <div>
         <h2>Settings</h2>
-        <p class="sub">This machine, not any one project. A project's own settings live in its <code>project.yaml</code>.</p>
+        <p class="sub">This machine, not any one project.</p>
       </div>
       <div class="pane-tools">
         <button id="settings-back">← All projects</button>
@@ -95,11 +95,7 @@
 
         <section class="card">
           <h3>Fallback voice</h3>
-          <p class="sub tight">
-            Used by any project whose <code>project.yaml</code> names no voice.
-            A project that names one wins, and a project's own Voice screen wins
-            over both. Nothing here is written to <code>project.yaml</code>.
-          </p>
+          <p class="sub tight">When a project names none. Never written to <code>project.yaml</code>.</p>
           <div class="row-actions">
             <select id="app-voice" class="select wide-select"></select>
             <button id="app-voice-clear">Use the provider's own</button>
@@ -109,12 +105,7 @@
 
         <section class="card">
           <h3>Activity log</h3>
-          <p class="sub tight">
-            Every event from every project, in one CSV a spreadsheet opens. Each
-            project also keeps its own detailed log; this is the one place that
-            answers "what went wrong just now" without knowing which folder to
-            look in.
-          </p>
+          <p class="sub tight">Every event, every project, in one CSV.</p>
           <p id="activity-path" class="mono wrap whisper left">—</p>
           <div class="row-actions">
             <button id="activity-open" class="primary">Open the CSV</button>
@@ -140,10 +131,7 @@
               <div class="who-rev">still · local only</div>
             </div>
           </div>
-          <p class="whisper left">
-            Everything happens on this machine, except the lines you ask a voice
-            service to speak.
-          </p>
+
         </section>
       </div>
     </div>
@@ -186,10 +174,6 @@
         <button data-tab="render">
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 2.6 13 8l-8.8 5.4z"/></svg>
           <span>Render</span>
-        </button>
-        <button data-tab="runs">
-          <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 4.4V8l2.6 1.7"/></svg>
-          <span>Runs</span>
         </button>
       </nav>
 
@@ -312,7 +296,7 @@
       <div class="pane-head">
         <div>
           <h2>Output</h2>
-          <p class="sub">Where the film lands, and what it is called.</p>
+
         </div>
         <div class="pane-tools">
           <button id="out-default">Use the project default</button>
@@ -339,11 +323,6 @@
               <span class="v mono wrap" id="out-full">—</span>
             </div>
             <p id="out-problem" class="state missing" hidden></p>
-            <p class="whisper left">
-              A destination for the next render. The project's own
-              <code>output:</code> setting is left alone — change it in
-              <code>project.yaml</code> to make a new default.
-            </p>
           </section>
 
           <section class="card">
@@ -355,11 +334,6 @@
               <dt>Project folder</dt><dd id="s-root" class="mono wrap"></dd>
               <dt>Project default</dt><dd id="s-output" class="mono wrap"></dd>
             </dl>
-            <p class="whisper left">
-              One MP4, H.264 and AAC, cut on the narration. Change
-              <code>aspect</code>, <code>short_edge</code> or <code>fps</code>
-              in <code>project.yaml</code> and re-check.
-            </p>
           </section>
         </div>
       </div>
@@ -401,38 +375,6 @@
           <ul id="live" class="live"></ul>
           <p id="live-note" class="whisper left"></p>
         </section>
-      </div>
-    </div>
-
-    <!-- ------------------------------------------------------------ runs -->
-    <div class="pane" id="pane-runs" hidden>
-      <div class="pane-head">
-        <div>
-          <h2>Runs</h2>
-          <p class="sub">
-            This project's own log, in full. Every project's events also land in
-            one CSV on this machine — <strong>Settings &gt; Activity log</strong>
-            — which is the one to open when you do not know which project went
-            wrong.
-          </p>
-        </div>
-        <div class="pane-tools">
-          <button id="refresh-runs">Refresh</button>
-        </div>
-      </div>
-      <p class="log-dir mono" id="log-dir"></p>
-      <div class="grid-wrap">
-        <table class="grid">
-          <thead>
-            <tr>
-              <th class="c-when">When</th>
-              <th class="c-sev">Level</th>
-              <th class="c-scope">Scope</th>
-              <th>What happened</th>
-            </tr>
-          </thead>
-          <tbody id="run-rows"></tbody>
-        </table>
       </div>
     </div>
 
