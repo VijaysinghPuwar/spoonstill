@@ -12,7 +12,7 @@ export PATH := /opt/homebrew/opt/rustup/bin:$(PATH)
 CARGO ?= cargo
 
 .DEFAULT_GOAL := help
-.PHONY: help test lint fmt fixtures brand check clean gates gates-m0 gates-m1 gates-m2
+.PHONY: help test tts-live lint fmt fixtures brand check clean gates gates-m0 gates-m1 gates-m2
 
 help: ## Show available targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -20,6 +20,12 @@ help: ## Show available targets
 
 test: ## Run every test in the workspace
 	$(CARGO) test --workspace
+
+tts-live: ## Exercise the Edge provider against the real service (D-094)
+	@# Ignored by `make test` on purpose: these cross a network. They prove the
+	@# stderr fixtures in edge.rs still match the installed edge-tts, which is
+	@# the thing that goes stale.
+	$(CARGO) test -p spoonstill-tts --test edge_live -- --ignored --nocapture
 
 lint: ## clippy with warnings denied, plus a formatting check
 	$(CARGO) clippy --workspace --all-targets -- -D warnings

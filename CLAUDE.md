@@ -124,7 +124,7 @@ what any document claims:
 ```bash
 make gates          # M0 8/8, M1 8/8, M2 9/9 = intact.
                     # Also: make gates-m1 | gates-m2 | test | lint | fixtures
-                    #       | brand | help
+                    #       | brand | tts-live | help
 git log --oneline   # planning corpus, then M0, then M1, then M2 slice by slice
 ```
 
@@ -217,6 +217,22 @@ raw output is kept under that key, so changing the profile, the loudness target
 or the trim re-normalizes every line and re-speaks none (D-084). The normalized
 artifact has its own key on top of it. Every field is length-prefixed. `still voices [FILTER]` lists what a provider offers; `--voice`
 overrides for one run without touching `project.yaml` (D-082).
+
+**The one network call is classified, retried, and asked about first** (D-094).
+A failing `edge-tts` puts a Python exception on the last line of stderr; that
+line is matched on the exception's *class name* and decides everything.
+Transient — `aiohttp`, a websocket, a 429, our own timeout — is retried three
+times with a growing pause. Permanent — `NoAudioReceived`, `Invalid voice`, and
+**anything unrecognised** — is attempted once and reported as a sentence
+naming the row and the fix, never as a traceback. The ceiling on one line is
+60 s + 30 ms/char rather than a flat 90 s, because 5 980 characters measured
+37.6 s here. And `check_voice_service` asks the provider whether it works
+**before the pool starts** (D-002), counting only the lines not already in the
+speech cache — so a finished project still re-renders on a machine that has
+since lost the tool. Two test suites: `edge_retry.rs` fakes the tool with a
+script and runs offline in `make test`; `edge_live.rs` provokes each failure
+against the real service and is `#[ignore]`d behind **`make tts-live`**, which
+is what re-checks the recorded stderr after an `edge-tts` upgrade.
 
 **Parallel rendering, in one paragraph.** `--jobs N` sets how many scenes
 encode at once; the default is `available_parallelism() / 2` capped at 4,
@@ -405,7 +421,8 @@ anything. D-087 was added after M2: read it before touching a workflow, an
 installer or `README.md`, and D-089 before touching a path or a disabled
 control, D-090 before touching a hostile-name fixture, and D-091 before
 touching the live panel or the voice list, D-092 before touching Settings or a
-provider's tooling, and D-093 before touching a log sink. D-054 through D-057 and D-075 through D-082 were added during M2 and
+provider's tooling, and D-093 before touching a log sink, and **D-094 before touching the Edge
+provider, a retry, or the pre-flight check in `film.rs`**. D-054 through D-057 and D-075 through D-082 were added during M2 and
 are all Accepted — read D-056 before touching the import path, D-057 before
 touching concat or transitions, D-076/D-077 before touching the pool, D-078
 before changing what the finished film is asserted against, D-079 before

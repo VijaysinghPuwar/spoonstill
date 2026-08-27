@@ -1249,6 +1249,94 @@ so the webview names neither a directory nor a file — and from
 `still diagnostics where`, because the CLI can do everything the window can
 (D-010).
 
+### D-094 — The one network call is classified, retried, and asked about first · Accepted
+
+Decided 2026-08-26 while hardening the Edge provider. Everything else this
+program does is local, deterministic and repeatable. Speaking a line is not: it
+crosses a network to a reverse-engineered endpoint (D-023), it is the step most
+likely to fail while nobody is watching, and at n=500 it is the step that will
+fail *sometimes*. Three rules follow, and they are all in
+`spoonstill_tts::edge`.
+
+**1. A failure is classified before it is reported.** `edge-tts` puts a Python
+exception on the last line of stderr and exits non-zero — every time, for every
+failure mode, verified against 7.2.8 on this machine. That line is matched on
+the exception's *class name*, never on its prose, because the sentence after
+the colon is written for a human and changes:
+
+| stderr says | verdict | what the operator reads |
+|---|---|---|
+| `NoAudioReceived` | permanent | the row, and that a line of pure punctuation does this |
+| `ValueError: Invalid voice` | permanent | the voice, and `still voices` |
+| `aiohttp.*`, `WebSocketError`, `429`, a timeout | transient | nothing — it is tried again |
+| anything unrecognised | **permanent** | the last line, verbatim |
+
+Unrecognised defaults to permanent on purpose. An unknown failure is far more
+often a wrong argument than a flaky socket, and retrying every unknown failure
+three times with backoff turns one bad project into a batch that takes half an
+hour to say so.
+
+**2. A transient failure is retried three times with a growing pause**
+(0.5 s, then 1.5 s), and a permanent one is attempted exactly once. Three
+rather than five: a dropped websocket and a rate limit clear in seconds or not
+at all. The backoff is **not jittered** — deterministic keeps the slowest
+failing render reproducible, and the pool here is four workers, not four
+hundred. The loop is a free function over a closure with the sleep injected, so
+it is tested without a network and without waiting; that matters because retry
+logic that can only be exercised by unplugging a cable is retry logic nobody
+tests.
+
+**3. The service is asked whether it works before the pool starts** — D-002's
+oldest rule, which the render path was not actually following. `edge-tts`
+missing was discovered by the first scene needing speech, so a project whose
+spoken scenes come late paid for the whole run first. `check_voice_service` in
+`spoonstill_app::film` now asks once, names the provider, the fix and how many
+scenes were about to fail, and refuses before anything is rendered. It asks
+**only about work that is actually left**: a line already in the speech cache
+needs no service, so a finished project still re-renders on a machine that has
+since lost the tool. `crate::audio::speech_key` is shared with `resolve` rather
+than reimplemented, because a pre-flight check with its own copy of a cache key
+is a second cache with its own bugs.
+
+Three smaller things settled at the same time, each with a test:
+
+- **The ceiling on one line is derived from the line.** Measured here: a short
+  line takes 0.6 s and 5 980 characters took 37.6 s — about 6.3 ms/char. The
+  old fixed 90 s therefore refused a long paragraph on a slow link while
+  calling it "the network is gone". It is now 60 s plus 30 ms/char, capped at
+  15 minutes.
+- **A voice id is not always `xx-YY-Name`.** Six of the catalogue's 322 are not:
+  `iu-Cans-CA-SiqiniqNeural` carries a script subtag that belongs to the locale,
+  and `zh-CN-liaoning-XiaobeiNeural` carries a dialect that is not a BCP-47
+  subtag at all. Taking the first two segments produced `iu-Cans` — a tag
+  D-086's `Intl.DisplayNames` cannot name, listing those voices under no
+  language. The segments are now read positionally: language, optional
+  four-letter script, optional region, and anything else ends the tag.
+- **An empty voice list is an error, not an empty list.** If `--list-voices`
+  prints something this build cannot parse, the window would otherwise draw
+  three hundred voices as none, with nothing wrong on screen and nothing in the
+  log. It now says so and quotes the line it could not read. The real 322-row
+  table is checked in at
+  `crates/spoonstill-tts/fixtures/edge-list-voices-7.2.8.txt` and every row of
+  it is parsed by a test.
+
+**Two test suites, and the split is deliberate.** `tests/edge_retry.rs` fakes
+`edge-tts` with a shell script that fails on cue, so the real spawn → classify
+→ retry path runs offline, in half a second, inside `make test` (Unix only — a
+`.sh` is not a program on Windows, and faking one there would be testing the
+fake). `tests/edge_live.rs` provokes each failure against the real tool and the
+real service, and is `#[ignore]`d behind `make tts-live`, because `make test`
+must give the same answer on a plane as in CI. The live suite exists for one
+reason: the classifier is built on recorded stderr, and recorded stderr goes
+stale the moment `edge-tts` is upgraded. When it fails, the fixtures are what
+is out of date.
+
+One fact worth keeping, measured while doing this: **speaking the same line
+twice does not produce the same bytes** — two runs gave files of identical
+length differing in 5 916 bytes. Nothing downstream depends on it, since
+duration is measured and not assumed (D-021), but it is why D-084's raw speech
+cache is load-bearing rather than an optimization.
+
 ---
 
 ## Reference repositories

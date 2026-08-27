@@ -304,6 +304,54 @@ pub fn preview(
     )
 }
 
+/// The cache key of the raw speech for a spoken source, or `None` for a source
+/// that is not spoken.
+///
+/// Exposed so that a caller reasoning about what is already spoken — the
+/// pre-flight check of D-094, a diagnostic, a future queue — asks the same
+/// function [`resolve`] asks, rather than growing a second copy of the key
+/// that drifts from this one on the next change to what a key contains.
+#[must_use]
+pub fn speech_key(source: &AudioSource) -> Option<u64> {
+    match source {
+        AudioSource::Tts {
+            text,
+            provider,
+            voice,
+            settings,
+        } => Some(key_for_speech(
+            text,
+            &provider.0,
+            &voice.0,
+            &settings.sorted(),
+        )),
+        _ => None,
+    }
+}
+
+/// Which provider this scene will actually have to call, if any (D-094).
+///
+/// `None` for a recording, for silence, and — the case that makes this worth a
+/// function — for a line whose raw speech is already in the cache. A re-render
+/// of a project whose lines are all spoken needs no voice service at all, and
+/// must not be refused by a check that only looked at whether the scene *has*
+/// a script.
+///
+/// The key is the same one [`resolve`] would compute, from the same function.
+/// A pre-flight check that guessed at the key would be a second cache with its
+/// own bugs.
+#[must_use]
+pub fn provider_needed<'a>(cache: &AudioCache, source: &'a AudioSource) -> Option<&'a str> {
+    let AudioSource::Tts { provider, .. } = source else {
+        return None;
+    };
+    let key = speech_key(source)?;
+    if cache.spoken_path(key).exists() {
+        return None;
+    }
+    Some(&provider.0)
+}
+
 /// Resolve one scene's narration.
 ///
 /// `file` is the canonical, contained path import produced for an

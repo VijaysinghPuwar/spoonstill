@@ -31,6 +31,33 @@
 //!    operator sends us. Their script is their content; it does not belong in
 //!    our diagnostics, and the only reliable way to keep it out is for it never
 //!    to be an argument.
+//!
+//! ## A network call in the middle of a 500-line batch (D-094)
+//!
+//! Everything else this program does is local and deterministic. This is the
+//! one step that crosses a network, and it is the step that will fail while
+//! nobody is watching. So the failure is **classified before it is reported**:
+//! a dropped socket is tried again with a growing pause, and a line the service
+//! will never speak — a bad voice, a line of only punctuation — is reported
+//! immediately rather than three times slowly. `still render` at n=500 makes
+//! that difference twenty-five minutes wide.
+//!
+//! The three facts the behaviour here is built on, all measured on this machine
+//! on 2026-08-26 against `edge-tts 7.2.8`:
+//!
+//! - A short line takes about 0.6 s; **5 980 characters took 37.6 s** — about
+//!   6.3 ms per character. A fixed 90 s ceiling therefore refuses a long
+//!   paragraph on a slow link while calling it "the network is gone", which is
+//!   why the ceiling is now derived from the length of the line.
+//! - Every failure mode puts a **Python exception on the last line of stderr**
+//!   and exits non-zero. `NoAudioReceived` and `ValueError: Invalid voice` are
+//!   permanent; anything from `aiohttp` or a websocket is not.
+//! - **Speaking one line twice does not produce the same bytes.** Two runs of
+//!   the same text and voice gave files of identical length that differed in
+//!   5 916 bytes. Nothing downstream depends on those bytes being stable —
+//!   duration is measured, not assumed (D-021) — but it is why the raw speech
+//!   cache of D-084 is load-bearing rather than an optimization: re-speaking a
+//!   line is not a no-op.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -75,8 +102,11 @@ const INSTALLERS: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// The last thing a failing installer said, which is the part that names the
-/// cause. Package managers print pages; an error box holds a sentence.
+/// The last thing a failing tool said, which is the part that names the cause.
+///
+/// A Python traceback is twenty lines of our own irrelevance and one line of
+/// diagnosis, and the diagnosis is always last. Package managers print pages;
+/// an error box holds a sentence.
 fn last_line(stderr: &str) -> String {
     stderr
         .lines()
@@ -95,17 +125,49 @@ pub const EDGE_TTS_ENV: &str = "SPOONSTILL_EDGE_TTS";
 /// The name used in `project.yaml`.
 pub const ID: &str = "edge";
 
-/// How long one line may take before it is a failure.
+/// The sentence an operator needs when the tool is not there. One string, so
+/// the pre-flight check, a failed render and the window all say the same thing.
+fn how_to_install(program: &Path) -> String {
+    format!(
+        "`{}` is not on this machine. Install it with `pip install edge-tts` \
+         (or `brew install edge-tts`), press Install in Settings, or point \
+         {EDGE_TTS_ENV} at it.",
+        program.display()
+    )
+}
+
+/// What a line's ceiling starts at, before its length is considered.
 ///
-/// A short line is about 1.5 s over a working connection (measured on this
-/// machine, 2026-08-26). Ninety seconds is not a performance budget — it is the
-/// point past which "the network is gone" is a better explanation than "this
-/// sentence is long", and it matches the receive timeout the author's own
-/// SetupTTS uses against the same service.
-const SPEAK_TIMEOUT: Duration = Duration::from_secs(90);
+/// This is the connection, the handshake and Python's own start-up — the part
+/// that does not get bigger when the sentence does. Sixty seconds is not a
+/// performance budget: it is the point past which "the network is gone" is a
+/// better explanation than "this is taking a while".
+const SPEAK_BASE: Duration = Duration::from_secs(60);
+
+/// What each character of the line adds to that ceiling.
+///
+/// Measured at 6.3 ms/char (see the module note). Thirty is roughly five times
+/// that, which is the headroom a hotel connection needs and still refuses a
+/// wedged socket long before an operator gives up on it.
+const SPEAK_PER_CHAR: Duration = Duration::from_millis(30);
+
+/// No line waits longer than this, however long it is. A line this size is a
+/// paragraph that should have been several scenes.
+const SPEAK_CEILING: Duration = Duration::from_secs(900);
+
+/// How long to give one line, given how long the line is.
+fn speak_timeout(characters: usize) -> Duration {
+    let scaled = SPEAK_PER_CHAR
+        .checked_mul(u32::try_from(characters).unwrap_or(u32::MAX))
+        .unwrap_or(SPEAK_CEILING);
+    SPEAK_BASE.saturating_add(scaled).min(SPEAK_CEILING)
+}
 
 /// Listing voices talks to the same service and returns 300-odd rows.
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `--version` should answer immediately or not at all.
+const LIMIT_VERSION: Duration = Duration::from_secs(20);
 
 /// The default voice, used when a project names none.
 ///
@@ -114,10 +176,251 @@ const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 /// (D-043: a cache key that hashes "default" must mean one voice).
 pub const DEFAULT_VOICE: &str = "en-US-AvaNeural";
 
+/// Whether one failure is worth trying again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fault {
+    /// The socket, the service or the machine was momentarily busy.
+    Transient,
+    /// Nothing about waiting will change the answer.
+    Permanent,
+}
+
+/// What one attempt left behind.
+enum Failure {
+    /// Report this, now. The error is already shaped for the operator.
+    Permanent(TtsError),
+    /// Worth another attempt. The string is what the last one said, kept so
+    /// that giving up can quote it.
+    Transient(String),
+}
+
+/// How many times a line is attempted, and how long the pauses grow.
+///
+/// Three attempts rather than five: the failures worth retrying are a dropped
+/// websocket and a rate limit, and both clear in seconds or not at all. Beyond
+/// three, a batch is spending minutes proving something it already knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retry {
+    /// Total attempts, including the first. One means never retry.
+    pub attempts: u32,
+    /// The pause before the second attempt; tripled for each one after.
+    pub backoff: Duration,
+}
+
+impl Default for Retry {
+    fn default() -> Self {
+        Retry {
+            attempts: 3,
+            backoff: Duration::from_millis(500),
+        }
+    }
+}
+
+impl Retry {
+    /// Never retry — what a test uses, and what a caller that has its own
+    /// supervision would ask for.
+    #[must_use]
+    pub const fn once() -> Self {
+        Retry {
+            attempts: 1,
+            backoff: Duration::ZERO,
+        }
+    }
+
+    /// The pause before attempt number `attempt` (1-based, so attempt 1 has
+    /// none). Deliberately deterministic: a jittered backoff would make the
+    /// slowest failing render un-reproducible for no gain at this scale, where
+    /// the pool is four workers and not four hundred.
+    fn pause_before(self, attempt: u32) -> Duration {
+        if attempt <= 1 {
+            return Duration::ZERO;
+        }
+        self.backoff
+            .checked_mul(3u32.saturating_pow(attempt - 2))
+            .unwrap_or(self.backoff)
+    }
+}
+
+/// Run `attempt` until it succeeds, fails permanently, or runs out of tries.
+///
+/// Separated from the process boundary on purpose: retry logic that can only be
+/// exercised by unplugging a network cable is retry logic nobody tests, and
+/// this is the code that runs when everything else has already gone wrong.
+/// `rest` is the sleep, injected so a test costs nothing.
+fn persevere<T>(
+    policy: Retry,
+    mut attempt: impl FnMut(u32) -> Result<T, Failure>,
+    mut rest: impl FnMut(Duration),
+) -> Result<T, (u32, Failure)> {
+    let total = policy.attempts.max(1);
+    let mut last = String::new();
+    for number in 1..=total {
+        let pause = policy.pause_before(number);
+        if !pause.is_zero() {
+            rest(pause);
+        }
+        match attempt(number) {
+            Ok(value) => return Ok(value),
+            Err(Failure::Permanent(error)) => return Err((number, Failure::Permanent(error))),
+            Err(Failure::Transient(reason)) => last = reason,
+        }
+    }
+    Err((total, Failure::Transient(last)))
+}
+
+/// Read a failing `edge-tts` run and decide whether waiting could help.
+///
+/// Classified on the **last** line of stderr, which is where Python puts the
+/// exception, and matched on the exception's own class name rather than on
+/// prose — the sentence after the colon is written for a human and changes;
+/// `edge_tts.exceptions.NoAudioReceived` is an identifier and does not.
+///
+/// The default is [`Fault::Permanent`]. An unrecognised failure is far more
+/// likely to be a wrong argument than a flaky socket, and retrying every
+/// unrecognised failure three times turns one bad project into a batch that
+/// takes half an hour to tell you so.
+fn classify(stderr: &str) -> Fault {
+    let line = last_line(stderr);
+
+    // Permanent first: a `NoAudioReceived` traceback can pass through network
+    // code on its way out, and the outermost exception is the true one.
+    const PERMANENT: &[&str] = &[
+        "NoAudioReceived",
+        "ValueError",
+        "TypeError",
+        "usage: edge-tts",
+        "unrecognized arguments",
+        "No such file or directory",
+        "Permission denied",
+        "ModuleNotFoundError",
+    ];
+    if PERMANENT.iter().any(|marker| line.contains(marker)) {
+        return Fault::Permanent;
+    }
+
+    // Everything the service and the socket can do to us. `WebSocketError`
+    // covers the 403 that arrives when the anti-abuse token has moved and the
+    // installed `edge-tts` has not caught up — worth one more attempt, because
+    // it is also what a proxy returns when it is having a moment.
+    const TRANSIENT: &[&str] = &[
+        "WebSocketError",
+        "UnexpectedResponse",
+        "UnknownResponse",
+        "SkewAdjustmentError",
+        "aiohttp",
+        "websockets",
+        "ClientConnector",
+        "ServerDisconnected",
+        "ConnectionResetError",
+        "ConnectionRefusedError",
+        "TimeoutError",
+        "socket.gaierror",
+        "ssl.SSLError",
+        "Temporary failure in name resolution",
+        "429",
+        "503",
+    ];
+    if TRANSIENT.iter().any(|marker| line.contains(marker)) {
+        return Fault::Transient;
+    }
+
+    Fault::Permanent
+}
+
+/// Turn one failed run into a shaped error, or into a reason to try again.
+///
+/// The shaped errors are the point. `ValueError: Invalid voice 'en-GB-Ryan'.`
+/// with twenty lines of Python above it is a stack trace; "en-GB-Ryan is not
+/// one of this provider's voices — run `still voices`" is an instruction.
+fn interpret(error: spoonstill_media::MediaError, voice: &str, text: &str) -> Failure {
+    use spoonstill_media::MediaError;
+
+    match error {
+        // The tool is not there. Nothing to wait for, and the sentence is the
+        // same one the pre-flight check and the window print.
+        MediaError::BinaryMissing { ref tried, .. } => Failure::Permanent(TtsError::Unavailable {
+            provider: ID.to_owned(),
+            detail: how_to_install(tried),
+        }),
+        // We killed it. Either the line is enormous or the socket is wedged;
+        // both are worth one more go with a fresh connection.
+        MediaError::Timeout { waited, .. } => Failure::Transient(format!(
+            "it did not finish within {:.0}s",
+            waited.as_secs_f64()
+        )),
+        // Spawning failed for a reason other than "not found" — under a worker
+        // pool that is a resource limit, which passes.
+        MediaError::Spawn { ref source, .. } => {
+            Failure::Transient(format!("could not start it: {source}"))
+        }
+        MediaError::Exit { ref stderr, .. } => {
+            let said = last_line(stderr);
+            match classify(stderr) {
+                Fault::Transient => Failure::Transient(said),
+                Fault::Permanent if said.contains("Invalid voice") => {
+                    Failure::Permanent(TtsError::BadRequest {
+                        provider: ID.to_owned(),
+                        detail: format!(
+                            "{voice:?} is not one of this provider's voices — \
+                             run `still voices` to see the ones that are"
+                        ),
+                    })
+                }
+                Fault::Permanent if said.contains("NoAudioReceived") => {
+                    Failure::Permanent(TtsError::NoAudio {
+                        provider: ID.to_owned(),
+                        text: opening(text),
+                        detail: format!(
+                            "the service accepted the request for {voice} and returned no \
+                             audio. A line with no speakable words in it — only punctuation, \
+                             digits or symbols — does this."
+                        ),
+                    })
+                }
+                Fault::Permanent => Failure::Permanent(TtsError::NoAudio {
+                    provider: ID.to_owned(),
+                    text: opening(text),
+                    detail: said,
+                }),
+            }
+        }
+        other => Failure::Transient(other.to_string()),
+    }
+}
+
+/// Whether these bytes could be an audio file at all.
+///
+/// `edge-tts` writes an MP3 today. This does not require one: it refuses only
+/// what is not any container we could hand to FFmpeg — an HTML error page, a
+/// JSON refusal, a fragment of a Python traceback. A truncated MP3 still passes
+/// here and is caught downstream, where duration is measured (D-021); the point
+/// of this check is to name the *provider* when the provider is what went
+/// wrong, instead of surfacing it two steps later as "FFmpeg could not read
+/// the narration".
+fn looks_like_audio(head: &[u8]) -> bool {
+    match head {
+        [] => false,
+        // MPEG frame sync, in the two shapes a bare MP3 starts with.
+        [0xFF, b, ..] if b & 0xE0 == 0xE0 => true,
+        _ => {
+            const CONTAINERS: &[&[u8]] = &[
+                b"ID3",              // MP3 with a tag
+                b"RIFF",             // WAV
+                b"OggS",             // Ogg / Opus
+                b"fLaC",             // FLAC
+                b"\x1A\x45\xDF\xA3", // Matroska / WebM
+                b"\x00\x00\x00",     // ISO-BMFF: a box length, then `ftyp`
+            ];
+            CONTAINERS.iter().any(|magic| head.starts_with(magic))
+        }
+    }
+}
+
 /// Microsoft's neural voices, via `edge-tts`.
 #[derive(Debug, Clone)]
 pub struct Edge {
     program: PathBuf,
+    retry: Retry,
 }
 
 impl Edge {
@@ -127,6 +430,7 @@ impl Edge {
         Edge {
             program: std::env::var_os(EDGE_TTS_ENV)
                 .map_or_else(|| PathBuf::from("edge-tts"), PathBuf::from),
+            retry: Retry::default(),
         }
     }
 
@@ -136,7 +440,15 @@ impl Edge {
     pub fn at(program: impl Into<PathBuf>) -> Self {
         Edge {
             program: program.into(),
+            retry: Retry::default(),
         }
+    }
+
+    /// Change how hard this provider tries before it gives up.
+    #[must_use]
+    pub const fn with_retry(mut self, retry: Retry) -> Self {
+        self.retry = retry;
+        self
     }
 
     /// The binary this provider will run.
@@ -144,6 +456,92 @@ impl Edge {
     pub fn program(&self) -> &Path {
         &self.program
     }
+
+    /// One attempt at one line: run the tool, then check what it wrote.
+    ///
+    /// The audio lands on `audio`, a temporary beside the destination. Moving
+    /// it into place is the caller's last act, after the last thing that can
+    /// fail has not.
+    fn attempt_speak(
+        &self,
+        voice: &str,
+        text: &str,
+        knobs: &Knobs,
+        script: &Path,
+        audio: &Path,
+    ) -> Result<Spoken, Failure> {
+        let mut command = FfmpegCommand::new(&self.program);
+        command
+            .arg("--voice")
+            .arg(voice)
+            .arg("--rate")
+            .arg(&knobs.rate)
+            .arg("--volume")
+            .arg(&knobs.volume)
+            .arg("--pitch")
+            .arg(&knobs.pitch)
+            .arg("--file")
+            .arg(script)
+            .arg("--write-media")
+            .arg(audio);
+
+        let how = command.display();
+        let outcome = command
+            .spawn()
+            .and_then(|child| child.wait_until(speak_timeout(text.chars().count())))
+            .and_then(spoonstill_media::Finished::ok);
+
+        // Whatever happened, a failed attempt leaves no half-file for the next
+        // one to append to or for the caller to mistake for output.
+        let finished = match outcome {
+            Ok(finished) => finished,
+            Err(e) => {
+                let _ = std::fs::remove_file(audio);
+                return Err(interpret(e, voice, text));
+            }
+        };
+
+        // `edge-tts` reports some refusals by exiting zero and writing nothing
+        // — the failure mode a bare exit-status check calls success.
+        let bytes = std::fs::metadata(audio).map(|m| m.len()).unwrap_or(0);
+        if bytes == 0 {
+            let _ = std::fs::remove_file(audio);
+            return Err(Failure::Permanent(TtsError::NoAudio {
+                provider: ID.to_owned(),
+                text: opening(text),
+                detail: if finished.stderr.trim().is_empty() {
+                    format!("the service accepted the request for {voice} and returned no audio")
+                } else {
+                    last_line(&finished.stderr)
+                },
+            }));
+        }
+
+        if !head_of(audio).is_some_and(|head| looks_like_audio(&head)) {
+            let _ = std::fs::remove_file(audio);
+            return Err(Failure::Transient(format!(
+                "it wrote {bytes} bytes that are not an audio file"
+            )));
+        }
+
+        Ok(Spoken { bytes, how })
+    }
+}
+
+/// The first few bytes of a file, or nothing if it cannot be read.
+fn head_of(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 8];
+    let read = file.read(&mut head).ok()?;
+    Some(head[..read].to_vec())
+}
+
+/// The three knobs, already validated into the forms `edge-tts` accepts.
+struct Knobs {
+    rate: String,
+    volume: String,
+    pitch: String,
 }
 
 impl Default for Edge {
@@ -165,14 +563,9 @@ impl Provider for Edge {
             Ok(finished) => Availability::Missing(format!(
                 "`{} --version` failed: {}",
                 self.program.display(),
-                finished.stderr.trim()
+                last_line(&finished.stderr)
             )),
-            Err(_) => Availability::Missing(format!(
-                "`{}` is not on this machine. Install it with \
-                 `pip install edge-tts` (or `brew install edge-tts`), or point \
-                 {EDGE_TTS_ENV} at it.",
-                self.program.display()
-            )),
+            Err(_) => Availability::Missing(how_to_install(&self.program)),
         }
     }
 
@@ -189,6 +582,12 @@ impl Provider for Edge {
     /// (D-062, D-012): every candidate is the platform's own package manager,
     /// run because a button that says install was pressed.
     fn install(&self) -> Result<String, TtsError> {
+        // Already there. Five minutes of a package manager re-resolving a
+        // dependency tree is not what a button press asked for.
+        if self.availability() == Availability::Ready {
+            return Ok(format!("{} is already installed", self.program.display()));
+        }
+
         let mut tried: Vec<String> = Vec::new();
 
         for (program, args) in INSTALLERS {
@@ -230,11 +629,56 @@ impl Provider for Edge {
         })
     }
 
+    /// The whole catalogue, over the same network as a line of speech — so it
+    /// is retried on the same terms, and an unreadable answer is an error
+    /// rather than an empty list.
+    ///
+    /// An empty list is the worst possible outcome here: the window would draw
+    /// three hundred voices as none, with nothing wrong on screen and nothing
+    /// in the log. If `edge-tts` printed something this build cannot parse, the
+    /// operator is told exactly that, and shown the line we could not read.
     fn voices(&self) -> Result<Vec<Voice>, TtsError> {
-        let mut command = FfmpegCommand::new(&self.program);
-        command.arg("--list-voices");
-        let finished = command.spawn()?.wait_until(LIST_TIMEOUT)?.ok()?;
-        Ok(parse_voices(&String::from_utf8_lossy(&finished.stdout)))
+        let list = |_attempt: u32| -> Result<Vec<Voice>, Failure> {
+            let mut command = FfmpegCommand::new(&self.program);
+            command.arg("--list-voices");
+            let finished = command
+                .spawn()
+                .and_then(|c| c.wait_until(LIST_TIMEOUT))
+                .and_then(spoonstill_media::Finished::ok)
+                .map_err(|e| interpret(e, "", ""))?;
+
+            let table = String::from_utf8_lossy(&finished.stdout);
+            let voices = parse_voices(&table);
+            if voices.is_empty() {
+                let first = table.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                return Err(Failure::Permanent(TtsError::Unavailable {
+                    provider: ID.to_owned(),
+                    detail: if first.is_empty() {
+                        format!("`{} --list-voices` printed nothing", self.program.display())
+                    } else {
+                        format!(
+                            "`{} --list-voices` printed a table this build cannot read, \
+                             beginning {first:?}. A newer edge-tts may have changed its \
+                             output.",
+                            self.program.display()
+                        )
+                    },
+                }));
+            }
+            Ok(voices)
+        };
+
+        match persevere(self.retry, list, std::thread::sleep) {
+            Ok(voices) => Ok(voices),
+            Err((_, Failure::Permanent(error))) => Err(error),
+            Err((attempts, Failure::Transient(reason))) => Err(TtsError::Unavailable {
+                provider: ID.to_owned(),
+                detail: format!(
+                    "could not list its voices after {attempts} attempt{}: {reason}",
+                    if attempts == 1 { "" } else { "s" }
+                ),
+            }),
+        }
     }
 
     fn speak(&self, request: &Request<'_>, destination: &Path) -> Result<Spoken, TtsError> {
@@ -251,97 +695,96 @@ impl Provider for Edge {
             request.voice
         };
 
+        // Every knob is validated before anything is spawned or written: a
+        // typo in `project.yaml` should not cost a process, a temporary file
+        // and a network round trip to discover, five hundred times.
+        let knobs = Knobs {
+            rate: percent(request.setting("rate"), "rate")?,
+            volume: percent(request.setting("volume"), "volume")?,
+            pitch: hertz(request.setting("pitch"))?,
+        };
+
         // Both temporaries live beside the destination: a rename within one
         // filesystem is atomic, one across two is a copy (D-042).
         let script = atomic::partial_path(&destination.with_extension("txt"));
         let audio = atomic::partial_path(destination);
-        let mut file = std::fs::File::create(&script).map_err(|source| TtsError::Io {
-            path: script.clone(),
-            source,
-        })?;
-        file.write_all(request.text.as_bytes())
-            .and_then(|()| file.sync_all())
-            .map_err(|source| TtsError::Io {
-                path: script.clone(),
-                source,
-            })?;
-        drop(file);
+        write_script(&script, request.text)?;
 
-        let mut command = FfmpegCommand::new(&self.program);
-        command
-            .arg("--voice")
-            .arg(voice)
-            .arg("--rate")
-            .arg(percent(request.setting("rate"))?)
-            .arg("--volume")
-            .arg(percent(request.setting("volume"))?)
-            .arg("--pitch")
-            .arg(hertz(request.setting("pitch"))?)
-            .arg("--file")
-            .arg(&script)
-            .arg("--write-media")
-            .arg(&audio);
-
-        let how = command.display();
-        let outcome = command
-            .spawn()
-            .and_then(|child| child.wait_until(SPEAK_TIMEOUT))
-            .and_then(spoonstill_media::Finished::ok);
+        // Retries reuse the script — the words have not changed, and rewriting
+        // them would be the one part of this loop that can fail for a reason
+        // that has nothing to do with the service.
+        let outcome = persevere(
+            self.retry,
+            |_attempt| self.attempt_speak(voice, request.text, &knobs, &script, &audio),
+            std::thread::sleep,
+        );
 
         // The script is the operator's words on our disk. It goes away whether
         // the run worked or not, and before the error is even shaped.
         let _ = std::fs::remove_file(&script);
 
-        let finished = match outcome {
-            Ok(finished) => finished,
-            Err(e) => {
-                let _ = std::fs::remove_file(&audio);
-                return Err(e.into());
+        let spoken = match outcome {
+            Ok(spoken) => spoken,
+            Err((_, Failure::Permanent(error))) => return Err(error),
+            Err((attempts, Failure::Transient(reason))) => {
+                return Err(TtsError::NoAudio {
+                    provider: ID.to_owned(),
+                    text: opening(request.text),
+                    detail: format!(
+                        "the voice service failed {attempts} time{} in a row. \
+                         The last attempt said: {reason}",
+                        if attempts == 1 { "" } else { "s" }
+                    ),
+                });
             }
         };
 
-        // `edge-tts` reports a refused line by exiting zero and writing nothing
-        // — the failure mode a bare exit-status check would call success.
-        let bytes = std::fs::metadata(&audio).map(|m| m.len()).unwrap_or(0);
-        if bytes == 0 {
-            let _ = std::fs::remove_file(&audio);
-            return Err(TtsError::NoAudio {
-                provider: ID.to_owned(),
-                text: opening(request.text),
-                detail: if finished.stderr.trim().is_empty() {
-                    format!("the service accepted the request for {voice} and returned no audio")
-                } else {
-                    finished.stderr.trim().to_owned()
-                },
-            });
-        }
-
         atomic::move_into_place(&audio, destination)?;
-        Ok(Spoken { bytes, how })
+        Ok(spoken)
     }
 }
 
-/// `--version` should answer immediately or not at all.
-const LIMIT_VERSION: Duration = Duration::from_secs(20);
+/// Put the line in a file for `edge-tts --file` to read.
+///
+/// Not `sync_all`: this file is deleted before the function that made it
+/// returns, so durability across a power cut is a guarantee nobody needs, and
+/// at n=500 it is five hundred fsyncs bought for nothing. Closing the handle
+/// before the child opens it is the part that matters, and that is what
+/// dropping it does.
+fn write_script(path: &Path, text: &str) -> Result<(), TtsError> {
+    let attempt = || -> std::io::Result<()> {
+        let mut file = std::fs::File::create(path)?;
+        file.write_all(text.as_bytes())?;
+        file.flush()
+    };
+    attempt().map_err(|source| {
+        // A half-written script is worse than none: `edge-tts` would speak it.
+        let _ = std::fs::remove_file(path);
+        TtsError::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
+}
 
 /// Validate a percentage knob into the `+N%` form `edge-tts` requires.
 ///
 /// Absent means `+0%`. A value the tool would reject is caught here, with the
-/// scene's name attached, rather than as a stderr line from a subprocess in the
+/// knob's name attached, rather than as a stderr line from a subprocess in the
 /// middle of a 500-line batch.
-fn percent(value: Option<&str>) -> Result<String, TtsError> {
+fn percent(value: Option<&str>, knob: &str) -> Result<String, TtsError> {
     let Some(raw) = value.map(str::trim).filter(|v| !v.is_empty()) else {
         return Ok("+0%".to_owned());
     };
     let number = raw.trim_end_matches('%');
     let parsed: i32 = number.parse().map_err(|_| TtsError::BadRequest {
         provider: ID.to_owned(),
-        detail: format!("{raw:?} is not a percentage like -10% or +25%"),
+        detail: format!("{knob} {raw:?} is not a percentage like -10% or +25%"),
     })?;
     if !(-100..=200).contains(&parsed) {
         return Err(TtsError::BadRequest {
             provider: ID.to_owned(),
-            detail: format!("{parsed}% is outside the range -100% to +200%"),
+            detail: format!("{knob} {parsed}% is outside the range -100% to +200%"),
         });
     }
     Ok(format!("{parsed:+}%"))
@@ -356,15 +799,69 @@ fn hertz(value: Option<&str>) -> Result<String, TtsError> {
         .trim_end_matches(|c: char| c.eq_ignore_ascii_case(&'z') || c.eq_ignore_ascii_case(&'h'));
     let parsed: i32 = number.trim().parse().map_err(|_| TtsError::BadRequest {
         provider: ID.to_owned(),
-        detail: format!("{raw:?} is not a pitch shift like -20Hz or +50Hz"),
+        detail: format!("pitch {raw:?} is not a shift like -20Hz or +50Hz"),
     })?;
     if !(-100..=100).contains(&parsed) {
         return Err(TtsError::BadRequest {
             provider: ID.to_owned(),
-            detail: format!("{parsed}Hz is outside the range -100Hz to +100Hz"),
+            detail: format!("pitch {parsed}Hz is outside the range -100Hz to +100Hz"),
         });
     }
     Ok(format!("{parsed:+}Hz"))
+}
+
+/// The locale part of a voice id, as a tag the platform can name (D-086).
+///
+/// Microsoft spells a voice `<locale>-<Name>Neural`, and for 316 of the 322
+/// voices in the recorded catalogue the locale is the first two segments. The
+/// other six are why this is a function:
+///
+/// - `iu-Cans-CA-SiqiniqNeural` — language, **script**, region. Taking two
+///   segments gives `iu-Cans`, which is not a locale, which the window's
+///   `Intl.DisplayNames` cannot name, and which leaves the voice listed as
+///   "CA-Siqiniq".
+/// - `zh-CN-liaoning-XiaobeiNeural` — language, region, and a **dialect** that
+///   is not a BCP-47 subtag at all. Taking three segments gives `zh-CN-liaoning`,
+///   which is equally unnameable.
+///
+/// So the segments are read positionally — language, then an optional
+/// four-letter script, then an optional region — and anything that does not fit
+/// one of those slots ends the tag rather than joining it.
+fn locale_of(id: &str) -> String {
+    let parts: Vec<&str> = id.split('-').collect();
+    // The last segment is the voice's own name, never part of the locale.
+    let Some((_, head)) = parts.split_last() else {
+        return String::new();
+    };
+    let mut out: Vec<&str> = Vec::new();
+    let mut segments = head.iter();
+
+    // Language: two or three letters, and required.
+    match segments.next() {
+        Some(part) if (2..=3).contains(&part.len()) && part.chars().all(char::is_alphabetic) => {
+            out.push(part);
+        }
+        _ => return String::new(),
+    }
+
+    let mut next = segments.next();
+    // Script: exactly four letters, optional.
+    if let Some(part) = next
+        && part.len() == 4
+        && part.chars().all(char::is_alphabetic)
+    {
+        out.push(part);
+        next = segments.next();
+    }
+    // Region: two letters or three digits, optional.
+    if let Some(part) = next
+        && (part.len() == 2 && part.chars().all(char::is_alphabetic)
+            || part.len() == 3 && part.chars().all(|c| c.is_ascii_digit()))
+    {
+        out.push(part);
+    }
+
+    out.join("-")
 }
 
 /// Read `edge-tts --list-voices`, which prints a fixed-width table.
@@ -373,23 +870,31 @@ fn hertz(value: Option<&str>) -> Result<String, TtsError> {
 /// offset: the widths follow the longest value in each column, so they differ
 /// between releases and between locales. A row that does not have at least a
 /// name is skipped rather than guessed at.
+///
+/// The `----` rule is found rather than assumed. A table with no rule — which
+/// is what a future `edge-tts` that drops it would print — falls back to
+/// skipping a header line whose first word is `Name`, so that a cosmetic
+/// change to the tool costs an operator nothing.
 fn parse_voices(table: &str) -> Vec<Voice> {
-    table
-        .lines()
-        .skip_while(|line| !line.starts_with("---"))
-        .skip(1)
+    let lines: Vec<&str> = table.lines().collect();
+    let body = match lines.iter().position(|line| line.starts_with("---")) {
+        Some(rule) => &lines[rule + 1..],
+        None => match lines.first() {
+            Some(first) if first.trim_start().starts_with("Name") => &lines[1..],
+            _ => &lines[..],
+        },
+    };
+
+    body.iter()
         .filter_map(|line| {
             let mut columns = line.split("  ").filter(|c| !c.trim().is_empty());
             let id = columns.next()?.trim().to_owned();
-            if id.is_empty() {
+            // A name with a space in it is a wrapped line or a message, not a
+            // voice — Microsoft's ids have never contained one.
+            if id.is_empty() || id.contains(char::is_whitespace) {
                 return None;
             }
-            // `af-ZA-AdriNeural` -> `af-ZA`. A name that is not in that shape
-            // keeps an empty locale rather than a wrong one.
-            let locale = id
-                .match_indices('-')
-                .nth(1)
-                .map_or_else(String::new, |(at, _)| id[..at].to_owned());
+            let locale = locale_of(&id);
             Some(Voice {
                 id,
                 locale,
@@ -408,18 +913,22 @@ fn parse_voices(table: &str) -> Vec<Voice> {
 mod tests {
     use super::*;
 
-    /// The first rows of a real `edge-tts --list-voices` on this machine,
-    /// 2026-08-26, `edge-tts 7.2.8`. Recorded rather than described, so that a
-    /// change in the tool's output is a test failure and not a silent empty
-    /// voice list in the window (plan.md §M2: a recorded fixture from the
-    /// first commit).
+    /// The real output of `edge-tts --list-voices` on this machine, 2026-08-26,
+    /// `edge-tts 7.2.8` — 322 voices, captured rather than typed. plan.md §M2
+    /// asks for a recorded fixture from the first commit, and the reason is
+    /// this file: a change in the tool's output is a test failure here instead
+    /// of an empty voice list in the window with nothing wrong on screen.
+    const CATALOGUE: &str = include_str!("../fixtures/edge-list-voices-7.2.8.txt");
+
+    /// The first rows of that same capture, kept inline because most tests want
+    /// four voices rather than three hundred.
     const RECORDED: &str = "\
 Name                               Gender    ContentCategories      VoicePersonalities
 ---------------------------------  --------  ---------------------  --------------------------------------
 af-ZA-AdriNeural                   Female    General                Friendly, Positive
 af-ZA-WillemNeural                 Male      General                Friendly, Positive
 en-US-AvaNeural                    Female    Conversation, Copilot  Expressive, Caring, Pleasant, Friendly
-en-GB-RyanNeural                   Male      News, Novel            Friendly, Positive
+en-GB-RyanNeural                   Male      General                Friendly, Positive
 ";
 
     #[test]
@@ -437,6 +946,55 @@ en-GB-RyanNeural                   Male      News, Novel            Friendly, Po
         );
     }
 
+    /// Every row of the real catalogue, not a hand-picked four. A parser that
+    /// drops one row in three hundred passes a four-row test and loses a voice
+    /// an operator was using.
+    #[test]
+    fn every_voice_in_the_recorded_catalogue_parses() {
+        let voices = parse_voices(CATALOGUE);
+        let rows = CATALOGUE.lines().count() - 2; // header, rule
+
+        assert_eq!(voices.len(), rows, "every row is a voice");
+        assert!(
+            voices
+                .iter()
+                .all(|v| !v.id.is_empty() && !v.gender.is_empty()),
+            "no row loses its name or its gender"
+        );
+        assert!(
+            voices.iter().all(|v| !v.locale.is_empty()),
+            "every voice can be filed under a language: {:?}",
+            voices
+                .iter()
+                .filter(|v| v.locale.is_empty())
+                .map(|v| &v.id)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            voices.iter().all(|v| v.id.starts_with(&v.locale)),
+            "a locale that is not the head of its own id is a parse, not a fact"
+        );
+    }
+
+    /// The six voices in the catalogue whose ids are not `xx-YY-Name`. These
+    /// are the whole reason `locale_of` exists; if a future catalogue drops
+    /// them the rule still has to be right for the next odd shape.
+    #[test]
+    fn a_script_subtag_stays_and_a_dialect_does_not() {
+        assert_eq!(locale_of("af-ZA-AdriNeural"), "af-ZA");
+        assert_eq!(locale_of("en-US-AvaNeural"), "en-US");
+        // Language, script, region: the script belongs to the locale.
+        assert_eq!(locale_of("iu-Cans-CA-SiqiniqNeural"), "iu-Cans-CA");
+        assert_eq!(locale_of("iu-Latn-CA-TaqqiqNeural"), "iu-Latn-CA");
+        // Language, region, dialect: the dialect is not a BCP-47 subtag, so it
+        // is not smuggled into one.
+        assert_eq!(locale_of("zh-CN-liaoning-XiaobeiNeural"), "zh-CN");
+        assert_eq!(locale_of("zh-CN-shaanxi-XiaoniNeural"), "zh-CN");
+        // Nonsense keeps an empty locale rather than a wrong one.
+        assert_eq!(locale_of("Nonsense"), "");
+        assert_eq!(locale_of(""), "");
+    }
+
     #[test]
     fn a_table_with_no_rows_is_empty_rather_than_a_row_of_dashes() {
         let header = RECORDED.lines().take(2).collect::<Vec<_>>().join("\n");
@@ -444,13 +1002,30 @@ en-GB-RyanNeural                   Male      News, Novel            Friendly, Po
         assert!(parse_voices("").is_empty());
     }
 
+    /// A future `edge-tts` that stops printing the rule must not silently
+    /// produce zero voices — that is the failure that looks like nothing.
+    #[test]
+    fn a_table_without_its_rule_still_parses() {
+        let ruleless: String = RECORDED
+            .lines()
+            .filter(|line| !line.starts_with("---"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let voices = parse_voices(&ruleless);
+        assert_eq!(voices.len(), 4, "{voices:?}");
+        assert_eq!(voices[0].id, "af-ZA-AdriNeural");
+    }
+
     #[test]
     fn knobs_default_to_no_change_and_normalize_their_sign() {
-        assert_eq!(percent(None).expect("absent is fine"), "+0%");
-        assert_eq!(percent(Some("")).expect("blank is absent"), "+0%");
-        assert_eq!(percent(Some("10")).expect("bare number"), "+10%");
-        assert_eq!(percent(Some("+10%")).expect("already signed"), "+10%");
-        assert_eq!(percent(Some("-25%")).expect("negative"), "-25%");
+        assert_eq!(percent(None, "rate").expect("absent is fine"), "+0%");
+        assert_eq!(percent(Some(""), "rate").expect("blank is absent"), "+0%");
+        assert_eq!(percent(Some("10"), "rate").expect("bare number"), "+10%");
+        assert_eq!(
+            percent(Some("+10%"), "rate").expect("already signed"),
+            "+10%"
+        );
+        assert_eq!(percent(Some("-25%"), "rate").expect("negative"), "-25%");
         assert_eq!(hertz(None).expect("absent is fine"), "+0Hz");
         assert_eq!(hertz(Some("-20Hz")).expect("negative"), "-20Hz");
         assert_eq!(hertz(Some("5")).expect("bare number"), "+5Hz");
@@ -458,9 +1033,13 @@ en-GB-RyanNeural                   Male      News, Novel            Friendly, Po
 
     #[test]
     fn a_knob_that_is_not_a_number_is_refused_before_the_process_starts() {
-        let error = percent(Some("fast")).expect_err("not a percentage");
+        let error = percent(Some("fast"), "rate").expect_err("not a percentage");
         assert!(error.to_string().contains("fast"), "{error}");
-        assert!(percent(Some("400%")).is_err(), "outside the range");
+        assert!(
+            error.to_string().contains("rate"),
+            "the knob is named: {error}"
+        );
+        assert!(percent(Some("400%"), "rate").is_err(), "outside the range");
         assert!(hertz(Some("+900Hz")).is_err(), "outside the range");
     }
 
@@ -482,6 +1061,39 @@ en-GB-RyanNeural                   Male      News, Novel            Friendly, Po
         assert!(matches!(error, TtsError::BadRequest { .. }), "{error}");
     }
 
+    /// A bad knob must be caught before a file is created, not after — the
+    /// temporary would be left behind on a path this function never returns to.
+    #[test]
+    fn a_bad_knob_is_refused_before_the_script_is_written() {
+        let directory = std::env::temp_dir().join(format!(
+            "spoonstill-edge-knob-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+
+        let settings = vec![("rate".to_owned(), "quickly".to_owned())];
+        let error = Edge::at("/nonexistent/edge-tts")
+            .speak(
+                &Request {
+                    text: "A line worth saying.",
+                    voice: "en-US-AvaNeural",
+                    settings: &settings,
+                },
+                &directory.join("out.mp3"),
+            )
+            .expect_err("a knob that is not a number");
+
+        assert!(matches!(error, TtsError::BadRequest { .. }), "{error}");
+        let left = std::fs::read_dir(&directory)
+            .expect("readable")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>();
+        assert!(left.is_empty(), "nothing is left behind: {left:?}");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     #[test]
     fn a_missing_binary_reports_how_to_install_it() {
         let edge = Edge::at("/nonexistent/edge-tts");
@@ -492,5 +1104,291 @@ en-GB-RyanNeural                   Male      News, Novel            Friendly, Po
             }
             Availability::Ready => panic!("a binary that is not there cannot be ready"),
         }
+    }
+
+    /// A missing binary in the middle of a render says the same sentence the
+    /// pre-flight check does — and says it once, without three attempts and
+    /// six seconds of pauses first.
+    #[test]
+    fn a_missing_binary_is_not_retried_and_names_the_fix() {
+        let directory = std::env::temp_dir().join(format!(
+            "spoonstill-edge-missing-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+
+        let started = std::time::Instant::now();
+        let error = Edge::at("/nonexistent/edge-tts")
+            .speak(
+                &Request {
+                    text: "A line worth saying.",
+                    voice: "en-US-AvaNeural",
+                    settings: &[],
+                },
+                &directory.join("out.mp3"),
+            )
+            .expect_err("no binary");
+
+        assert!(matches!(error, TtsError::Unavailable { .. }), "{error}");
+        assert!(
+            error.to_string().contains("pip install edge-tts"),
+            "{error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a permanent failure must not sit through the backoff"
+        );
+
+        let left = std::fs::read_dir(&directory)
+            .expect("readable")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>();
+        assert!(left.is_empty(), "the script is removed too: {left:?}");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    // ---- classification -------------------------------------------------
+    //
+    // Every string below is real stderr from `edge-tts 7.2.8`, captured on
+    // this machine on 2026-08-26. Described failures are the ones a classifier
+    // gets wrong.
+
+    /// A line of only punctuation. The service accepts the request, sends no
+    /// audio, and the tool raises. Saying it again will do the same thing.
+    const NO_AUDIO: &str = "\
+Traceback (most recent call last):
+  File \"/opt/homebrew/lib/python3.14/site-packages/edge_tts/communicate.py\", line 562, in __stream
+    raise NoAudioReceived(
+        \"No audio was received. Please verify that your parameters are correct.\"
+    )
+edge_tts.exceptions.NoAudioReceived: No audio was received. Please verify that your parameters are correct.
+";
+
+    /// A voice that does not exist. Caught by the tool before any network.
+    const BAD_VOICE: &str = "\
+  File \"/opt/homebrew/lib/python3.14/site-packages/edge_tts/data_classes.py\", line 40, in validate_string_param
+    raise ValueError(f\"Invalid {param_name} '{param_value}'.\")
+ValueError: Invalid voice 'not-a-voice'.
+";
+
+    /// The network is not there. Captured through an unreachable proxy, which
+    /// is the same exception a dropped connection raises.
+    const NO_NETWORK: &str = "\
+  File \"/opt/homebrew/lib/python3.14/site-packages/aiohttp/connector.py\", line 1321, in _wrap_create_connection
+    raise client_error(req.connection_key, exc) from exc
+aiohttp.client_exceptions.ClientProxyConnectionError: Cannot connect to host 127.0.0.1:9 ssl:<ssl.SSLContext object at 0x10b01b790> [Connect call failed ('127.0.0.1', 9)]
+";
+
+    #[test]
+    fn a_failure_the_service_will_repeat_is_not_retried() {
+        assert_eq!(classify(NO_AUDIO), Fault::Permanent);
+        assert_eq!(classify(BAD_VOICE), Fault::Permanent);
+        assert_eq!(
+            classify(""),
+            Fault::Permanent,
+            "an unrecognised failure is not retried three times at n=500"
+        );
+    }
+
+    #[test]
+    fn a_failure_the_network_caused_is_retried() {
+        assert_eq!(classify(NO_NETWORK), Fault::Transient);
+        assert_eq!(
+            classify("edge_tts.exceptions.WebSocketError: Received 403"),
+            Fault::Transient,
+            "the token moved, or a proxy is having a moment"
+        );
+        assert_eq!(
+            classify("edge_tts.exceptions.UnknownResponse: unexpected message"),
+            Fault::Transient
+        );
+    }
+
+    /// The trap this classifier is shaped around: a permanent failure whose
+    /// traceback passes through the network stack on its way out. The
+    /// outermost exception is the true one, and it is on the last line.
+    #[test]
+    fn a_permanent_failure_wrapped_in_network_frames_is_still_permanent() {
+        let mixed = format!(
+            "  File \"aiohttp/client.py\", line 1, in request\n{}",
+            NO_AUDIO
+        );
+        assert_eq!(classify(&mixed), Fault::Permanent);
+    }
+
+    #[test]
+    fn a_bad_voice_is_reported_as_a_bad_voice_and_not_as_a_traceback() {
+        let error = spoonstill_media::MediaError::Exit {
+            command: "edge-tts".to_owned(),
+            code: Some(1),
+            stderr: BAD_VOICE.to_owned(),
+        };
+        match interpret(error, "not-a-voice", "A line.") {
+            Failure::Permanent(TtsError::BadRequest { detail, .. }) => {
+                assert!(detail.contains("not-a-voice"), "{detail}");
+                assert!(
+                    detail.contains("still voices"),
+                    "names the way out: {detail}"
+                );
+                assert!(!detail.contains("Traceback"), "{detail}");
+            }
+            Failure::Permanent(other) => panic!("wrong error: {other}"),
+            Failure::Transient(reason) => panic!("a bad voice is not transient: {reason}"),
+        }
+    }
+
+    #[test]
+    fn a_line_with_nothing_speakable_in_it_names_the_line_and_the_cause() {
+        let error = spoonstill_media::MediaError::Exit {
+            command: "edge-tts".to_owned(),
+            code: Some(1),
+            stderr: NO_AUDIO.to_owned(),
+        };
+        match interpret(error, "en-US-AvaNeural", "...") {
+            Failure::Permanent(TtsError::NoAudio { text, detail, .. }) => {
+                assert_eq!(text, "...");
+                assert!(detail.contains("punctuation"), "{detail}");
+            }
+            Failure::Permanent(other) => panic!("wrong error: {other}"),
+            Failure::Transient(reason) => panic!("this one repeats: {reason}"),
+        }
+    }
+
+    /// Our own timeout is always worth another go: a wedged socket and a very
+    /// long line look identical from here, and the second attempt gets a fresh
+    /// connection.
+    #[test]
+    fn a_timeout_is_transient() {
+        let error = spoonstill_media::MediaError::Timeout {
+            command: "edge-tts".to_owned(),
+            waited: Duration::from_secs(90),
+        };
+        match interpret(error, "en-US-AvaNeural", "A line.") {
+            Failure::Transient(reason) => assert!(reason.contains("90"), "{reason}"),
+            Failure::Permanent(error) => panic!("a timeout is worth retrying: {error}"),
+        }
+    }
+
+    // ---- the retry loop itself ------------------------------------------
+
+    #[test]
+    fn a_transient_failure_is_tried_again_and_can_succeed() {
+        let mut slept = Vec::new();
+        let outcome = persevere(
+            Retry::default(),
+            |attempt| {
+                if attempt < 3 {
+                    Err(Failure::Transient(format!("attempt {attempt} dropped")))
+                } else {
+                    Ok("spoke")
+                }
+            },
+            |pause| slept.push(pause),
+        );
+
+        assert_eq!(outcome.ok(), Some("spoke"));
+        assert_eq!(
+            slept,
+            vec![Duration::from_millis(500), Duration::from_millis(1500)],
+            "the pause grows, and there is none before the first attempt"
+        );
+    }
+
+    #[test]
+    fn a_permanent_failure_stops_at_the_first_attempt() {
+        let mut attempts = 0;
+        let mut slept = 0;
+        let outcome: Result<(), _> = persevere(
+            Retry::default(),
+            |_| {
+                attempts += 1;
+                Err(Failure::Permanent(TtsError::BadRequest {
+                    provider: ID.to_owned(),
+                    detail: "no".to_owned(),
+                }))
+            },
+            |_| slept += 1,
+        );
+
+        assert_eq!(attempts, 1);
+        assert_eq!(slept, 0);
+        assert!(matches!(outcome, Err((1, Failure::Permanent(_)))));
+    }
+
+    #[test]
+    fn running_out_of_attempts_reports_the_last_thing_that_went_wrong() {
+        let outcome: Result<(), _> = persevere(
+            Retry::default(),
+            |attempt| Err(Failure::Transient(format!("dropped on {attempt}"))),
+            |_| {},
+        );
+
+        match outcome {
+            Err((3, Failure::Transient(reason))) => assert_eq!(reason, "dropped on 3"),
+            Err((n, _)) => panic!("three attempts, not {n}"),
+            Ok(()) => panic!("nothing succeeded"),
+        }
+    }
+
+    #[test]
+    fn one_attempt_means_one_attempt() {
+        let mut attempts = 0;
+        let outcome: Result<(), _> = persevere(
+            Retry::once(),
+            |_| {
+                attempts += 1;
+                Err(Failure::Transient("dropped".to_owned()))
+            },
+            |_| panic!("nothing to wait for"),
+        );
+        assert_eq!(attempts, 1);
+        assert!(outcome.is_err());
+    }
+
+    // ---- the ceiling on one line ----------------------------------------
+
+    /// 5 980 characters took 37.6 s on this machine. The ceiling has to be
+    /// above that with room for a bad connection, and the old fixed 90 s was
+    /// not: it refused a paragraph twice this long on any link slower than the
+    /// one it was measured on.
+    #[test]
+    fn a_long_line_gets_longer_than_a_short_one() {
+        let short = speak_timeout(20);
+        let measured = speak_timeout(5_980);
+
+        assert!(short >= Duration::from_secs(60), "{short:?}");
+        assert!(
+            measured > Duration::from_secs(37 * 4),
+            "37.6s measured, and a slow link is several times that: {measured:?}"
+        );
+        assert!(measured > short);
+        assert_eq!(
+            speak_timeout(usize::MAX),
+            SPEAK_CEILING,
+            "no line waits forever"
+        );
+    }
+
+    // ---- what came back --------------------------------------------------
+
+    #[test]
+    fn the_first_bytes_of_a_real_mp3_are_recognised_as_audio() {
+        // The opening of a file this provider actually produced, 2026-08-26.
+        assert!(looks_like_audio(&[
+            0xFF, 0xF3, 0x64, 0xC4, 0x00, 0x00, 0x00, 0x03
+        ]));
+        assert!(looks_like_audio(b"ID3\x04\x00\x00\x00"));
+        assert!(looks_like_audio(b"RIFF\x24\x08\x00"));
+        assert!(looks_like_audio(b"OggS\x00\x02\x00"));
+    }
+
+    #[test]
+    fn an_error_page_written_to_the_media_file_is_not_audio() {
+        assert!(!looks_like_audio(b"<!DOCTYPE html>"));
+        assert!(!looks_like_audio(b"{\"error\":\"429\"}"));
+        assert!(!looks_like_audio(b"Traceback (most"));
+        assert!(!looks_like_audio(b""));
     }
 }

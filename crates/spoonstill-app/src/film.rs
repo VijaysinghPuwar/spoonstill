@@ -219,6 +219,17 @@ pub enum FilmError {
         /// The setting, as written.
         value: String,
     },
+    /// The voice service is not usable, and scenes need it (D-002, D-094).
+    ///
+    /// Found before the pool starts, not at scene 340 of 500.
+    VoiceService {
+        /// Which provider the project asked for.
+        provider: String,
+        /// The sentence naming the fix.
+        detail: String,
+        /// How many scenes were going to need it.
+        scenes: usize,
+    },
     /// One or more narrations could not be resolved.
     Audio {
         /// Every failure, in render order.
@@ -266,6 +277,19 @@ impl std::fmt::Display for FilmError {
                 f,
                 "the project's output setting {value:?} points outside the project folder \
                  (D-054). Pass --out to write somewhere else deliberately."
+            ),
+            FilmError::VoiceService {
+                provider,
+                detail,
+                scenes,
+            } => write!(
+                f,
+                "{scenes} scene{} need{} the {provider} voice service, and it is not \
+                 usable: {detail}\n\
+                 Nothing was rendered. This is asked before the first scene rather than \
+                 discovered at the last one (D-002).",
+                plural(*scenes),
+                if *scenes == 1 { "s" } else { "" }
             ),
             FilmError::Audio { failures } => {
                 write!(
@@ -527,6 +551,59 @@ pub fn destination(
     Ok(project.root.join(relative))
 }
 
+/// Ask every voice service this run will actually call whether it works, once.
+///
+/// "Actually call" is doing the work: a line already in the speech cache needs
+/// no service, so a re-render of a finished project on a machine that has since
+/// lost `edge-tts` still renders. That is the same rule the cache follows
+/// everywhere else — the question is never "could this need work", it is
+/// "does this need work".
+fn check_voice_service(
+    project: &Project,
+    cache: &AudioCache,
+    log: &dyn Diagnostics,
+) -> Result<(), FilmError> {
+    // Ordered by first appearance rather than sorted: with one provider it
+    // makes no difference, and with two the operator reads about theirs in the
+    // order their project names them.
+    let mut wanted: Vec<(String, usize)> = Vec::new();
+    for scene in &project.scenes {
+        let Some(id) = crate::audio::provider_needed(cache, &scene.spec.source) else {
+            continue;
+        };
+        match wanted.iter_mut().find(|(name, _)| name == id) {
+            Some((_, count)) => *count += 1,
+            None => wanted.push((id.to_owned(), 1)),
+        }
+    }
+
+    for (id, scenes) in wanted {
+        let engine = match crate::tts::provider(&id) {
+            Ok(engine) => engine,
+            Err(e) => {
+                return Err(FilmError::VoiceService {
+                    provider: id,
+                    detail: e.to_string(),
+                    scenes,
+                });
+            }
+        };
+        if let crate::tts::Availability::Missing(detail) = engine.availability() {
+            return Err(FilmError::VoiceService {
+                provider: id,
+                detail,
+                scenes,
+            });
+        }
+        log.record(
+            &spoonstill_core::diagnostics::Event::info("tts", "voice service is ready")
+                .with("provider", &id)
+                .with("scenes", scenes.to_string()),
+        );
+    }
+    Ok(())
+}
+
 /// Phase one: resolve every scene's narration, `audio_jobs` at a time.
 fn resolve_audio(
     project: &Project,
@@ -543,6 +620,14 @@ fn resolve_audio(
             tail_seconds: project.settings.trim_tail,
         },
     };
+
+    // Before the pool: is the voice service even there? (D-002, D-094.)
+    //
+    // Every scene that needs speech would otherwise discover this for itself,
+    // which at n=500 means five hundred processes failing one at a time, and
+    // — if the scenes needing speech come late — forty minutes of rendering
+    // thrown away to learn something one `--version` call knew at the start.
+    check_voice_service(project, &cache, log)?;
 
     let outcomes = pool::run(
         &project.scenes,
@@ -937,6 +1022,156 @@ mod tests {
     /// D-035, D-043: the key covers everything that changes the bytes. Each of
     /// these edits must produce a different segment file rather than silently
     /// reusing the last one.
+    use spoonstill_core::project::AudioSource;
+
+    /// A directory of this test's own, removed when it is done.
+    fn scratch(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "spoonstill-film-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("a scratch directory");
+        path
+    }
+
+    /// A scene that needs a line spoken by `provider`.
+    fn spoken_scene(id: &str, text: &str, provider: &str) -> ResolvedScene {
+        use spoonstill_core::project::{
+            MotionRequest, ProviderId, SceneId, SceneSpec, TtsSettings, VoiceId,
+        };
+        ResolvedScene {
+            spec: SceneSpec {
+                id: SceneId::new(id).expect("a legal id"),
+                image: PathBuf::from("001.jpg"),
+                source: AudioSource::Tts {
+                    text: text.to_owned(),
+                    provider: ProviderId(provider.to_owned()),
+                    voice: VoiceId("en-US-AvaNeural".to_owned()),
+                    settings: TtsSettings::default(),
+                },
+                motion: MotionRequest::default(),
+            },
+            image: PathBuf::from("001.jpg"),
+            audio: None,
+        }
+    }
+
+    fn project_of(root: &Path, scenes: Vec<ResolvedScene>) -> Project {
+        Project {
+            root: root.to_path_buf(),
+            settings: crate::import::settings::Settings::default(),
+            mode: crate::import::Mode::Convention,
+            scenes,
+            problems: Vec::new(),
+        }
+    }
+
+    /// D-002 in one test: the run stops before the pool, naming the provider,
+    /// the fix, and how many scenes were about to fail one at a time.
+    #[test]
+    fn a_missing_voice_service_stops_the_run_before_any_scene_is_touched() {
+        let root = scratch("no-service");
+        // A provider name this build does not have stands in for a machine
+        // with no `edge-tts`: both are "the service is not usable", and only
+        // this one is the same on every machine the tests run on.
+        let project = project_of(
+            &root,
+            vec![
+                spoken_scene("001", "The harbour was empty.", "nonesuch"),
+                spoken_scene("002", "The light had gone.", "nonesuch"),
+            ],
+        );
+
+        let error = check_voice_service(
+            &project,
+            &AudioCache::in_project(&root),
+            &spoonstill_core::diagnostics::Noop,
+        )
+        .expect_err("no such provider");
+
+        match error {
+            FilmError::VoiceService {
+                provider,
+                detail,
+                scenes,
+            } => {
+                assert_eq!(provider, "nonesuch");
+                assert_eq!(scenes, 2, "it counts what was about to fail");
+                assert!(
+                    detail.contains("edge"),
+                    "it names what does exist: {detail}"
+                );
+            }
+            other => panic!("wrong error: {other}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The regression this check could have caused: a project whose lines are
+    /// all already spoken re-renders on a machine with no voice service at
+    /// all. The cache is the answer to "does this need work", here as
+    /// everywhere else (D-075, D-084).
+    #[test]
+    fn a_project_whose_lines_are_already_spoken_needs_no_voice_service() {
+        let root = scratch("warm-cache");
+        let scene = spoken_scene("001", "A line already spoken.", "nonesuch");
+        let cache = AudioCache::in_project(&root);
+
+        assert_eq!(
+            crate::audio::provider_needed(&cache, &scene.spec.source),
+            Some("nonesuch"),
+            "cold: the service is needed"
+        );
+
+        // Warm it exactly the way a real run would.
+        std::fs::create_dir_all(cache.directory()).expect("the cache directory");
+        let spoken = match &scene.spec.source {
+            AudioSource::Tts { .. } => {
+                let key = crate::audio::speech_key(&scene.spec.source).expect("a spoken source");
+                cache.spoken_path(key)
+            }
+            _ => unreachable!(),
+        };
+        std::fs::write(&spoken, b"not really an mp3").expect("write");
+
+        assert_eq!(
+            crate::audio::provider_needed(&cache, &scene.spec.source),
+            None,
+            "warm: nothing to ask a service for"
+        );
+        check_voice_service(
+            &project_of(&root, vec![scene]),
+            &cache,
+            &spoonstill_core::diagnostics::Noop,
+        )
+        .expect("a warm cache renders with no voice service");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A recording and a silent still never ask a service anything.
+    #[test]
+    fn a_recording_and_a_silence_need_no_voice_service() {
+        let root = scratch("no-speech");
+        let cache = AudioCache::in_project(&root);
+        assert_eq!(
+            crate::audio::provider_needed(
+                &cache,
+                &AudioSource::File {
+                    original_path: PathBuf::from("001.wav")
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            crate::audio::provider_needed(&cache, &AudioSource::Silent { seconds: 4.0 }),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn the_segment_key_changes_with_everything_that_changes_the_segment() {
         let motion = MotionSpec::new(MotionKind::ZoomIn, 0.1, Anchor::Center);
