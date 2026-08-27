@@ -1,0 +1,245 @@
+name: release
+
+# Tag a version and this publishes something an operator can actually download
+# (D-087). Three CLI builds and three desktop bundles, each with the checksum
+# the installers verify against.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# These are *unsigned preview* builds. Signing, notarization and a bundled
+# LGPL FFmpeg are M5 (D-062) — until then the README tells the operator why
+# Gatekeeper and SmartScreen object, and the installers use the system FFmpeg.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # One draft release up front, so every matrix leg uploads into the same place
+  # and a half-finished set of assets is never visible to anyone.
+  draft:
+    name: draft release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - id: tag
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or reuse the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — uploading into it."
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --draft \
+            --title "spoonstill $TAG" \
+            --notes "$(cat <<'NOTES'
+          ## Install
+
+          **macOS**
+          ```bash
+          curl -fsSL https://raw.githubusercontent.com/VijaysinghPuwar/spoonstill/master/scripts/install.sh | bash
+          ```
+
+          **Windows** (PowerShell)
+          ```powershell
+          irm https://raw.githubusercontent.com/VijaysinghPuwar/spoonstill/master/scripts/install.ps1 | iex
+          ```
+
+          Or take a file below: `.dmg` / `-setup.exe` for the window, the
+          `still-*` archive for the command line.
+
+          ## Before you render
+
+          FFmpeg is not bundled yet (D-062 — the shipped build needs its own
+          LGPL build first). Install it once:
+
+          ```bash
+          brew install ffmpeg          # macOS
+          winget install Gyan.FFmpeg   # Windows
+          ```
+
+          Text read aloud by a neural voice also wants `pipx install edge-tts`.
+
+          ## These builds are unsigned
+
+          Signing and notarization are M5. macOS: right-click the app > Open.
+          Windows: More info > Run anyway. See the README for why, and for
+          building from source instead.
+          NOTES
+          )"
+
+  # The command line, which is the complete control surface (D-010). Three
+  # native builds — no cross-compilation, because the test suite that proves a
+  # target works has to be able to run there.
+  cli:
+    name: still · ${{ matrix.target }}
+    needs: draft
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.draft.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked -p spoonstill-cli --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        env:
+          TAG: ${{ needs.draft.outputs.tag }}
+        run: |
+          name="still-${TAG}-${{ matrix.target }}.tar.gz"
+          tar -czf "$name" -C "target/${{ matrix.target }}/release" still
+          shasum -a 256 "$name" > "$name.sha256"
+          echo "ASSET=$name" >> "$GITHUB_ENV"
+
+      - name: Package (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        env:
+          TAG: ${{ needs.draft.outputs.tag }}
+        run: |
+          $name = "still-$env:TAG-${{ matrix.target }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/still.exe" -DestinationPath $name -Force
+          $hash = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
+          # Same two-field shape `shasum -c` writes, so one installer format serves both.
+          "$hash  $name" | Out-File -FilePath "$name.sha256" -Encoding ascii -NoNewline
+          "ASSET=$name" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Smoke test the binary that is about to ship
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/still"
+          if [ -f "$bin.exe" ]; then bin="$bin.exe"; fi
+          "$bin" --version
+          "$bin" --help > /dev/null
+
+      - name: Upload
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.draft.outputs.tag }}
+        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber
+
+  # The window. Same binary logic underneath — the shell owns none of it (D-010).
+  desktop:
+    name: app · ${{ matrix.target }}
+    needs: draft
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            bundles: dmg
+          - os: macos-13
+            target: x86_64-apple-darwin
+            bundles: dmg
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.draft.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-${{ matrix.target }}
+
+      # There is no npm build step: `frontendDist` is a folder of static files.
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Install the Tauri CLI
+        run: cargo binstall -y --no-confirm tauri-cli --version '^2'
+
+      - name: Bundle
+        run: cargo tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+        working-directory: apps/desktop
+
+      - name: Collect and checksum
+        shell: bash
+        run: |
+          out="dist"; mkdir -p "$out"
+          find "target/${{ matrix.target }}/release/bundle" \
+               -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*-setup.exe' \) \
+               -exec cp {} "$out/" \;
+          ls -1 "$out" | grep . || { echo "::error::the bundler produced nothing"; exit 1; }
+          cd "$out"
+          sum() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1"; else sha256sum "$1"; fi; }
+          for f in *; do sum "$f" > "$f.sha256"; done
+          ls -l
+
+      - name: Upload
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.draft.outputs.tag }}
+        run: gh release upload "$TAG" dist/* --clobber
+
+  publish:
+    name: publish
+    needs: [draft, cli, desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Undraft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.draft.outputs.tag }}
+        run: |
+          # Six CLI files, plus each platform's bundles and their checksums.
+          # Anything less and the installers,
+          # which verify before they install, would fail on a live release.
+          count=$(gh release view "$TAG" --json assets --jq '.assets | length')
+          echo "$count assets attached"
+          [ "$count" -ge 12 ] || { echo "::error::only $count assets — not publishing"; exit 1; }
+          gh release edit "$TAG" --draft=false --latest

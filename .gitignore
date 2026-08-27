@@ -23,6 +23,11 @@ __pycache__/
 # Tauri regenerates these from tauri.conf.json and capabilities/ on every build.
 /apps/desktop/gen/
 
+# Release packaging scratch (D-087). The published artifacts live on the tag.
+/dist/
+*.dmg
+*.msi
+
 # OS / editor
 .DS_Store
 .idea/

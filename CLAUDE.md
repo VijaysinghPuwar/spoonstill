@@ -318,6 +318,18 @@ Two things M2 deliberately left for later, in rough priority order:
    silence into as many pieces as there are photos is the biggest remaining
    saving in the whole tool.
 
+**It ships from a tag, and FFmpeg is still the operator's** (D-087). `README.md`
+is the front door — the one document written for someone who has never read
+`decisions.md`. Pushing `v*` runs `.github/workflows/release.yml`, which builds
+the CLI and the window natively for macOS arm64, macOS x86_64 and Windows x64,
+attaches a SHA-256 sidecar to every asset, and only undrafts the release once
+every leg has uploaded. `scripts/install.sh` and `scripts/install.ps1` are the
+one-line installers; they **verify the checksum before they install** and hand
+FFmpeg to Homebrew or winget rather than shipping it. Nothing here is M5:
+these builds are unsigned, un-notarized, have no updater and bundle no FFmpeg,
+and the README says so in as many words. Do not delete an M5 deliverable
+because a release exists.
+
 **The logo, in one paragraph.** The mark is final as of 2026-08-26 (D-079):
 three stacked stills, the front one carrying the image. It is **one ink at
 three opacities**, not three greys — each still is an opaque black plate under
@@ -331,7 +343,8 @@ and `make brand` emits all of them, stdlib only. The JPEG in
 acquire a colour that is not a failure or a warning.
 
 **Open decisions:** only D-072 (captions) remains, and it does not block
-anything. D-054 through D-057 and D-075 through D-082 were added during M2 and
+anything. D-087 was added after M2: read it before touching a workflow, an
+installer or `README.md`. D-054 through D-057 and D-075 through D-082 were added during M2 and
 are all Accepted — read D-056 before touching the import path, D-057 before
 touching concat or transitions, D-076/D-077 before touching the pool, D-078
 before changing what the finished film is asserted against, D-079 before

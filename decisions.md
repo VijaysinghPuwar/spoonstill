@@ -3,7 +3,8 @@
 **Status:** active. This file wins over every other document in the repo.
 **Last updated:** 2026-08-26 (M2 slice 4 and the shell: D-080 how a project is
 made and filled, D-081 where the TTS provider sits, D-082 the default provider
-and the voice override, D-083 the window, D-084 loudness and trim).
+and the voice override, D-083 the window, D-084 loudness and trim; then D-087,
+how a build reaches someone who is not the author).
 
 `plan/PROJECT_BRIEF.md` and `plan/BRIEF_RECONCILIATION.md` both carry a
 "superseded by `decisions.md`" banner. Until now that file did not exist, so
@@ -927,6 +928,66 @@ held.
 Not decided here: whether `dissolve` re-encodes the whole timeline or only the
 segments either side of each join. That is an M3 implementation question with a
 measurement attached, and it does not change anything an operator sees.
+
+---
+
+## Distribution — added after M2
+
+### D-087 — Preview builds ship from a tag; FFmpeg stays the operator's · Accepted
+
+Decided 2026-08-26, implemented in `.github/workflows/release.yml`,
+`scripts/install.sh`, `scripts/install.ps1` and `README.md`.
+
+M2 renders real films. M5 — signing, notarization, a bundled LGPL FFmpeg,
+auto-update — is two milestones away. In between, the only person who can run
+this tool is someone with a Rust toolchain and this repository, which makes
+every milestone until M5 unverifiable by an actual operator. That is the
+bottleneck this decision removes, and it removes it without taking one item off
+M5's list.
+
+- **A tag publishes a release.** `git tag v0.1.0 && git push origin v0.1.0`
+  builds the CLI for `aarch64-apple-darwin`, `x86_64-apple-darwin` and
+  `x86_64-pc-windows-msvc`, and the window for the same three, and attaches
+  them to one GitHub release. Every leg is a **native** build on its own
+  runner, not a cross-compilation: a target whose test suite cannot run there
+  is a target we have not tested.
+- **Every asset carries a SHA-256 sidecar, and the installers verify before
+  they install.** An installer piped from `curl` into `bash` that does not
+  check what it just downloaded is a supply chain with no gate in it. A
+  mismatch installs nothing and says so.
+- **The release is drafted first and published last.** Assets appear one leg at
+  a time; a half-uploaded set is never a thing an operator can download.
+- **FFmpeg is not in the release, and the app never fetches it.** The installer
+  asks Homebrew or winget for it, once, before anything renders. This keeps
+  both existing rules intact rather than bending either: D-012 forbids *the
+  renderer* downloading a binary at runtime, and it still never does; D-062
+  forbids redistributing the GPL build, and we redistribute nothing. What the
+  operator installs is the platform's own package, from the platform's own
+  package manager, on their own instruction.
+- **Unsigned is stated, not hidden.** These builds trip Gatekeeper and
+  SmartScreen because they are genuinely unidentified, and the README says
+  exactly that, gives the two-click path through each dialog, and offers
+  building from source as the alternative for anyone who would rather not.
+  Signing certificates cost money and lead time and belong to M5.
+
+Rejected, with reasons:
+
+- **Bundling the Homebrew FFmpeg.** It is built `--enable-gpl
+  --enable-version3`. D-062 already settled this; convenience does not reopen
+  it.
+- **Downloading FFmpeg from the app on first run.** This is precisely
+  `ffmpeg-sidecar`'s behaviour, rejected in D-012 for a reason that has not
+  changed: a renderer that quietly fetches a build produces output that cannot
+  be reproduced. An installer the operator ran on purpose, before any project
+  exists, is a different act from a render that fetches its own encoder.
+- **Waiting for M5.** It costs two milestones of not knowing whether the thing
+  works on a machine that is not this one.
+
+**What this is not:** M5. No notarization, no code signing, no auto-update, no
+third-party licence manifest, no pinned checksum-verified bundled FFmpeg. Every
+one of those is still in `plan.md` §M5 and none of them is discharged here.
+`README.md` is the front door this creates, and it is the one document written
+for someone who has never read `decisions.md`.
 
 ---
 
