@@ -81,13 +81,25 @@ fn hostile_paths_survive_the_process_boundary() {
     let tools = common::tools();
     let root = common::out_dir("hostile-paths");
 
-    let names = [
+    // What counts as a hostile *name* is platform-specific, and Win32 refuses
+    // two of these before any of our code runs: `|` is a reserved character,
+    // and a directory whose name ends in a space is `InvalidFilename` (error
+    // 123). A test cannot assert that we survive a name the operating system
+    // will not create — so the shapes they stand for, a shell metacharacter
+    // and awkward surrounding whitespace, are covered by names that exist
+    // everywhere, and the two POSIX-only ones still run where they are legal.
+    // D-090; the macOS coverage is unchanged.
+    let mut names = vec![
         "ünïcode spaced 名前",
         "it's a $(pwd) `name`",
-        "semi;colon &and& pipe|",
+        "semi;colon &and& ampersand",
+        " leading space",
         "-leading-dash",
-        "trailing space ",
     ];
+    if cfg!(unix) {
+        names.push("semi;colon &and& pipe|");
+        names.push("trailing space ");
+    }
 
     for (index, name) in names.iter().enumerate() {
         // The hostile text is in the directory as well as the filenames.

@@ -339,6 +339,15 @@ that decision is the one to remember: **a disabled control explains itself where
 it is.** `updateRender()` in `apps/desktop/ui/app.js` is the only thing that
 decides whether a render can start, and it writes the reason next to the button.
 
+**The set of legal names is the platform's, not ours** (D-089 and D-090
+together). macOS allows a folder whose name ends in a space and our code wrongly
+trimmed it away; Windows genuinely forbids that name and `|` besides, so
+`create_dir_all` fails with error 123 before any spoonstill code runs. Neither
+trim a name down nor assume the legal set is the same on both platforms — the
+hostile fixture list in `segment_integrity.rs` is split accordingly, and macOS
+coverage is unchanged. This is the first concrete place where D-071's "both
+platforms" means "differently".
+
 **The logo, in one paragraph.** The mark is final as of 2026-08-26 (D-079):
 three stacked stills, the front one carrying the image. It is **one ink at
 three opacities**, not three greys — each still is an opaque black plate under
@@ -363,7 +372,7 @@ clicked before it is called done.
 **Open decisions:** only D-072 (captions) remains, and it does not block
 anything. D-087 was added after M2: read it before touching a workflow, an
 installer or `README.md`, and D-089 before touching a path or a disabled
-control. D-054 through D-057 and D-075 through D-082 were added during M2 and
+control, and D-090 before touching a hostile-name fixture. D-054 through D-057 and D-075 through D-082 were added during M2 and
 are all Accepted — read D-056 before touching the import path, D-057 before
 touching concat or transitions, D-076/D-077 before touching the pool, D-078
 before changing what the finished film is asserted against, D-079 before

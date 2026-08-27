@@ -1082,6 +1082,35 @@ nothing (`ffmpeg-findings.md` §8b).
 
 ---
 
+### D-090 — A hostile name is only hostile where it is legal · Accepted
+
+Decided 2026-08-26, after the Windows CI job — running on a push for the first
+time — refused two of D-052's hostile fixture names outright.
+
+`semi;colon &and& pipe|` and `trailing space ` are ordinary names on macOS.
+On Windows `|` is a reserved character and a directory whose name ends in a
+space is `InvalidFilename`, error 123: `create_dir_all` fails before any
+spoonstill code is reached. A test cannot assert that we survive a name the
+operating system will not create.
+
+So the hostile set is split by what each platform can actually make. The
+shapes those two names stand for — a shell metacharacter, and awkward
+surrounding whitespace — are represented on every platform by
+`semi;colon &and& ampersand` and ` leading space`, which are legal everywhere
+(Win32 reserves a *trailing* space and period, not a leading one). The two
+POSIX-only names still run on POSIX, so **the macOS coverage is unchanged**;
+Windows gains the coverage it can hold rather than a test it cannot pass.
+
+This is the mirror of D-089. There, a trailing space in a folder name was a
+legitimate thing macOS allowed and our code wrongly trimmed away. Here, the
+same trailing space is a thing Windows genuinely forbids. Both follow from one
+fact worth stating plainly: **the set of legal names is the platform's to
+decide, not ours** — we may neither trim it down nor assume it is the same
+everywhere. D-071 said the code targets both platforms; this is the first
+concrete place where "both" means "differently".
+
+---
+
 ## Reference repositories
 
 ### D-080 — A project is made and filled by the program, not by the operator's file manager · Accepted
