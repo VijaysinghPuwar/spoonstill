@@ -257,7 +257,7 @@ What exists now, by crate:
 - `apps/desktop` — the Tauri 2 window (D-051's review grid, D-083's shape,
   D-085 and D-086's navigation). **Two levels: home is the operator's projects
   plus app-level Settings; a project is a left rail over one dense grid —
-  Scenes, Voice, Output, Render, Runs.** Sixteen commands, all translation. The
+  Scenes, Voice, Output, Render** (D-092 removed Runs). All translation. The
   design brief and canvas it was built against are in
   `~/Downloads/Desktop application redesign` — read D-083 for what was followed
   and the one thing that was not, then D-085 and D-086 for what the author's own
