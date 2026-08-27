@@ -127,6 +127,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # `rust-toolchain.toml` pins 1.94.0, and a pin wins over whatever the
+      # action installed — so the action added this target to *stable* while
+      # `cargo build` uses the pinned toolchain, which has only the host's.
+      # That is invisible on a native leg and fatal on a cross-compiled one:
+      # `x86_64-apple-darwin` on an arm64 runner failed with `can't find crate
+      # for std` while every other leg passed. Adding it here targets whichever
+      # toolchain is actually active.
+      - name: Add the target to the pinned toolchain
+        shell: bash
+        run: rustup target add ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
@@ -211,6 +222,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust-targets }}
+
+      # Same reason as the CLI job above: the pin in `rust-toolchain.toml`
+      # decides which toolchain builds, so the targets have to be added to it.
+      # A universal .dmg needs both Mac slices, and one of them is a cross
+      # compile however you look at it.
+      - name: Add the targets to the pinned toolchain
+        shell: bash
+        run: |
+          for target in $(echo "${{ matrix.rust-targets }}" | tr ',' ' '); do
+            rustup target add "$target"
+          done
 
       - uses: Swatinem/rust-cache@v2
         with:

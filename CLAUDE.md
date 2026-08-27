@@ -370,6 +370,16 @@ these builds are unsigned, un-notarized, have no updater and bundle no FFmpeg,
 and the README says so in as many words. Do not delete an M5 deliverable
 because a release exists.
 
+**A pinned toolchain owns the targets** (D-097). `rust-toolchain.toml` pins
+1.94.0, and that pin beats whatever `dtolnay/rust-toolchain` installed — so its
+`targets:` input added the target to *stable* while `cargo build` used 1.94.0,
+which has only the host's `std`. Invisible on all three native legs and fatal on
+the one cross-compiled leg (`x86_64-apple-darwin` on an arm64 runner), which is
+why the first release sat as a draft: D-087's publish gate correctly refused to
+undraft at ten assets of twelve. Every job now runs `rustup target add` against
+the active toolchain. Every upload uses `--clobber`, so a failed leg is re-run
+into the same draft rather than needing the tag re-cut.
+
 **A path is never trimmed** (D-089). Whitespace at either end of a path is part
 of the name — `~/Downloads/RANDOM vidoe ` is a folder Finder makes and macOS
 keeps. Trimming it in `resolve_output` greyed out Render on a project with five
@@ -448,7 +458,8 @@ touching the live panel or the voice list, D-092 before touching Settings or a
 provider's tooling, and D-093 before touching a log sink, and **D-094 before touching the Edge
 provider, a retry, or the pre-flight check in `film.rs`, and D-095 before
 touching how a long line is split or joined, and D-096 before giving a probe a
-constant timeout**. D-054 through D-057 and D-075 through D-082 were added during M2 and
+constant timeout, and D-097 before touching a release workflow's toolchain
+setup**. D-054 through D-057 and D-075 through D-082 were added during M2 and
 are all Accepted — read D-056 before touching the import path, D-057 before
 touching concat or transitions, D-076/D-077 before touching the pool, D-078
 before changing what the finished film is asserted against, D-079 before

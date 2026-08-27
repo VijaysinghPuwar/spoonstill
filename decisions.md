@@ -1461,6 +1461,60 @@ Two things worth keeping from how this was found:
 benchmark in this project so far measures many short scenes; nothing measured
 one long one. A six-hour film is six scenes, and it failed at the first.
 
+### D-097 — A pinned toolchain owns the targets, not the action that installed one · Accepted
+
+Found 2026-08-27, cutting the first release. `.github/workflows/release.yml`
+does the obvious correct thing:
+
+```yaml
+- uses: dtolnay/rust-toolchain@stable
+  with:
+    targets: ${{ matrix.target }}
+```
+
+and it does not work, because `rust-toolchain.toml` pins `1.94.0` (M0: "Rust
+stable via rustup. Pin it."). **The pin wins.** The action installs `stable` and
+adds the target to *that*; `cargo build` then runs the pinned 1.94.0, which has
+only the host's standard library. The failure is:
+
+```
+error[E0463]: can't find crate for `std`
+error: could not compile `serde_core` (lib)
+```
+
+**It is invisible on every native leg and fatal on the one cross-compiled leg.**
+`aarch64-apple-darwin` on an arm64 runner and `x86_64-pc-windows-msvc` on a
+Windows runner both build fine, because a toolchain always has its own host
+target. Only `x86_64-apple-darwin` on an arm64 runner needs a target added, and
+that is the only one that failed — three green legs and one red, from one
+missing step.
+
+So each job adds the target to whichever toolchain is *actually active*:
+
+```yaml
+- run: rustup target add ${{ matrix.target }}
+```
+
+The desktop job needs it twice over: a universal `.dmg` is both Mac slices
+lipo'd together, so one of them is a cross compile however you look at it.
+
+**This is why the first release never published.** D-087's `publish` job refuses
+to undraft below twelve assets, on the grounds that the installers verify a
+checksum before they install and a half-populated release would fail on a live
+download. That gate did its job perfectly: ten assets, no publish, a draft
+nobody could install from. The gate was right and the diagnosis went to the
+wrong place — the first run was read as "cancelled", which it was, and the
+underlying failure was only visible when the same leg failed again on a run
+nobody cancelled.
+
+Two things to keep:
+
+- **A matrix where only one leg cross-compiles is a matrix that tests one leg.**
+  The rest are testing that a toolchain has its own host target.
+- **`--clobber` on every upload is what made this cheap to fix.** The draft is
+  reused and re-run, so a failed leg is re-run into the same release rather than
+  needing the tag deleted and re-cut.
+
 ---
 
 ## Reference repositories
