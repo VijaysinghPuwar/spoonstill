@@ -12,6 +12,7 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use spoonstill_media::command::FfmpegCommand;
@@ -72,15 +73,30 @@ fn run(command: FfmpegCommand) -> String {
     finished.stderr
 }
 
+/// Every in-flight build gets its own temporary. See [`build_cached`].
+static BUILD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 /// Write a file through a temporary, so a concurrent reader never sees a
 /// partial one and a crashed run leaves no half-built fixture.
+///
+/// The temporary is unique **per call**, not per process. Three tests in one
+/// binary ask for `still(4000, 3000)` at once, and keying the temporary on the
+/// process id alone gave all three threads the same path: three FFmpeg
+/// processes writing one file, and then a rename of a file another thread
+/// still had open. POSIX renames that quite happily, so it passed on macOS
+/// forever; Windows refuses with a sharing violation, the `let _ =` swallowed
+/// it, and the assert below fired on a fixture nothing had managed to build.
+/// This is the exact class of Windows-only mistake D-071 predicted the CI job
+/// would surface first — and the three concurrent tests are its regression
+/// test, now that the job runs on every push.
 fn build_cached(path: &Path, build: impl FnOnce(&Path)) -> PathBuf {
     if path.exists() {
         return path.to_path_buf();
     }
     let temporary = path.with_extension(format!(
-        "building-{}.{}",
+        "building-{}-{}.{}",
         std::process::id(),
+        BUILD_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         path.extension().unwrap_or_default().to_string_lossy()
     ));
     build(&temporary);

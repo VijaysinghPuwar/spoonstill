@@ -25,6 +25,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The runner image stopped shipping it, and the suite renders real media.
+      # The Windows job below has always installed its own; this one had not,
+      # which went unnoticed because ci.yml watched a branch that is not this
+      # repository's.
+      - name: Install FFmpeg
+        run: brew install ffmpeg
+
       - name: Format
         run: cargo fmt --all --check
 

@@ -108,7 +108,11 @@ body {
 /* ---------------------------------------------------------------- titlebar */
 
 /* The traffic lights are the system's, overlaid — hence the 82px. Dragging the
-   window works anywhere on this strip except the controls. */
+   window is `data-tauri-drag-region="deep"` on the element in index.html, not
+   anything in here: `-webkit-app-region` is Electron's, and WKWebView ignores
+   it silently, which is how this bar spent M4 looking draggable and not being
+   (D-088). "deep" means the whole strip drags and every <button> in it does
+   not, which Tauri decides by tag — so a control added here needs no rule. */
 .titlebar {
   flex: none;
   height: 38px;
@@ -118,10 +122,7 @@ body {
   padding: 0 12px 0 82px;
   background: var(--raise);
   border-bottom: 1px solid var(--line);
-  -webkit-app-region: drag;
 }
-
-.titlebar button, .titlebar input { -webkit-app-region: no-drag; }
 
 .title {
   flex: 1;

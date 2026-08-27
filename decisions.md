@@ -991,6 +991,55 @@ for someone who has never read `decisions.md`.
 
 ---
 
+## The window, continued
+
+### D-088 — The title strip drags the window, and that costs one permission · Accepted
+
+Decided 2026-08-26, implemented in `apps/desktop/ui/index.html`,
+`apps/desktop/ui/styles.css` and `apps/desktop/capabilities/default.json`.
+
+The window could not be moved. `titleBarStyle: "Overlay"` puts the web content
+under the system title bar, so the strip the operator reaches for is the
+webview, and the webview said nothing about dragging. The CSS claimed it did —
+`-webkit-app-region: drag` on `.titlebar`, `no-drag` on its controls, and a
+comment stating "dragging the window works anywhere on this strip". That is
+Electron's property. WKWebView **ignores it silently**, which is the whole
+reason it survived M4: there is no warning, no console message and no visual
+difference between a bar that drags and a bar that is inert.
+
+- **`data-tauri-drag-region="deep"` on the strip.** Tauri's own attribute,
+  handled by a script it injects. `deep` means every descendant drags; the
+  script blocks `A`, `BUTTON`, `INPUT`, `SELECT`, `TEXTAREA`, `LABEL`,
+  `SUMMARY`, anything `contenteditable`, anything with a real `tabindex`, and
+  anything carrying an interactive `role`. So the mark and the theme toggle
+  keep working, and a control added to that bar later needs no rule written for
+  it. The alternative — a `mousedown` handler calling `startDragging()`
+  ourselves — is the same behaviour with our own list of what counts as
+  clickable, and it loses double-click-to-zoom, which the same script gives us
+  free.
+- **`core:window:allow-start-dragging` is added to the capability.** It is
+  **not** in `core:default` — the default window set is read-only accessors
+  plus `internal-toggle-maximize` — so the attribute alone would have invoked a
+  command the ACL denies, and the bar would have stayed inert with a message
+  only in the console. The permission moves this window. It cannot resize,
+  close, position or address any other window, and `windows: ["main"]` still
+  scopes it to the one that exists.
+- **The dead CSS is deleted, not left as documentation.** Two rules that do
+  nothing plus a comment asserting they do is worse than nothing: it is what
+  made this take four screens of source to find. The comment that replaces it
+  says where the behaviour actually lives.
+
+Not changed here: `resizable` was already `true` and the window resizes from
+its edges; nothing in this decision touches size, and the 900×600 minimum
+stands.
+
+**The general form, worth more than the fix:** a platform that ignores an
+unknown CSS property, and an ACL that denies a command quietly, will together
+let a control surface *look* implemented indefinitely. Anything in the window
+that cannot be asserted by a test has to be clicked before it is called done.
+
+---
+
 ## Reference repositories
 
 ### D-080 — A project is made and filled by the program, not by the operator's file manager · Accepted

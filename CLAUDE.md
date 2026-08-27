@@ -342,6 +342,15 @@ and `make brand` emits all of them, stdlib only. The JPEG in
 `apps/desktop/ui/styles.css` continues the same ink series and should not
 acquire a colour that is not a failure or a warning.
 
+**The window moves, and the strip that moves it is Tauri's, not CSS's**
+(D-088). `titleBarStyle: "Overlay"` puts the webview under the system title
+bar, so dragging is `data-tauri-drag-region="deep"` on `.titlebar` plus
+`core:window:allow-start-dragging` in `capabilities/default.json` — that
+permission is **not** in `core:default`. `-webkit-app-region` is Electron's and
+WKWebView ignores it without a word, which is how the bar shipped looking
+draggable and not being. Anything in the window a test cannot assert has to be
+clicked before it is called done.
+
 **Open decisions:** only D-072 (captions) remains, and it does not block
 anything. D-087 was added after M2: read it before touching a workflow, an
 installer or `README.md`. D-054 through D-057 and D-075 through D-082 were added during M2 and
@@ -349,8 +358,8 @@ are all Accepted — read D-056 before touching the import path, D-057 before
 touching concat or transitions, D-076/D-077 before touching the pool, D-078
 before changing what the finished film is asserted against, D-079 before
 touching anything with the logo in it, D-080 before touching `ingest`, and
-D-081/D-082 before touching a provider, D-083, D-085 and D-086 before touching
-the window, and D-084 before touching anything in the audio path.
+D-081/D-082 before touching a provider, D-083, D-085, D-086 and D-088 before
+touching the window, and D-084 before touching anything in the audio path.
 
 **Do not re-derive these** — they cost measurement time and are already settled
 in code with tests: the exact filter string, the 90 kHz time base, the H.264

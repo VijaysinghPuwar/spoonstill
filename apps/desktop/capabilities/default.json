@@ -1,12 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window, and nothing else. Every permission below is justified in one line, per plan.md M4's capability audit. Note what is NOT here: no filesystem scope, and no opener scope \u2014 opening a file or a folder is a Rust command that takes no path (see main.rs), so the webview cannot name one.",
+  "description": "The main window, and nothing else. Every permission below is justified in one line, per plan.md M4's capability audit. Note what is NOT here: no filesystem scope, and no opener scope \u2014 opening a file or a folder is a Rust command that takes no path (see main.rs), so the webview cannot name one. `core:window:allow-start-dragging` moves the window when the title strip is dragged \u2014 it is not in `core:default`, and without it the strip is inert (D-088); it can move this window and do nothing else.",
   "windows": [
     "main"
   ],
   "permissions": [
     "core:default",
+    "core:window:allow-start-dragging",
     "dialog:allow-open"
   ]
 }
