@@ -73,12 +73,22 @@ struct SceneView {
     renderable: bool,
 }
 
-/// One problem, exactly as `still validate` would print it.
+/// One problem, exactly as `still validate` would print it — plus, when the
+/// window can do something about it, the thing to press (D-105).
 #[derive(Debug, Clone, Serialize)]
 struct ProblemView {
     severity: String,
     scene: Option<String>,
+    /// What an operator reads. For an installable problem this is the plain
+    /// sentence alone: the paths and exit codes are in `detail`, which is
+    /// behind a disclosure and in the bundle.
     message: String,
+    /// The tool id to hand to `install_tool`, when this is a problem the
+    /// window can fix by pressing something. `None` for every problem that is
+    /// about the operator's own files, which is nearly all of them.
+    install: Option<String>,
+    /// The technical half, when there is one. Empty otherwise.
+    detail: String,
 }
 
 /// A project, as far as it can be known without rendering anything.
@@ -200,21 +210,43 @@ fn set_default_voice(app: tauri::AppHandle, voice: Option<String>) -> Result<App
     Ok(settings)
 }
 
-/// Install a provider's tooling, and say what was run.
+/// Install whichever tool the window was asked about, and say what was run.
 ///
 /// The window used to print `pip install edge-tts` and leave the operator to
 /// find a terminal, which is the program declining to do the thing it just
-/// asked for (D-092).
+/// asked for (D-092). D-105 finished that thought: **every** tool a
+/// [`spoonstill_core::Remedy`] marks installable is installable from wherever
+/// the problem was shown, and that now includes FFmpeg, which every render
+/// needs and which until now offered a string and no button.
+///
+/// One entry point rather than one per tool, because the caller is a webview
+/// echoing back a `install` field it was handed — it should not have to know
+/// which subsystem owns which program, and adding a third tool should not add
+/// a third command.
 #[tauri::command]
-async fn install_provider(provider: String) -> Result<String, String> {
+async fn install_tool(tool: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        spoonstill_app::tts::provider(&provider)
-            .map_err(|e| e.to_string())?
-            .install()
-            .map_err(|e| e.to_string())
+        // D-010: the shell asks spoonstill-app and stops there. Which
+        // subsystem owns which binary is `tooling`'s business, not a
+        // webview's.
+        spoonstill_app::tooling::install(&tool).map_err(|remedy| remedy.to_string())
     })
     .await
     .map_err(|e| format!("the install thread failed: {e}"))?
+}
+
+/// Whether FFmpeg is on this machine, asked the same way the voice service is.
+///
+/// This exists so the Render screen can refuse *before* the operator presses
+/// Render, rather than after — D-089's rule that a disabled control explains
+/// itself where it is, applied to the one dependency that every single render
+/// needs. Without it, a machine with no FFmpeg answers "Render" with a wall of
+/// per-file probe failures, which is D-103's original report.
+#[tauri::command]
+async fn ffmpeg_status() -> Result<ProviderStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| status_of(spoonstill_app::tooling::ffmpeg()))
+        .await
+        .map_err(|e| format!("the check failed: {e}"))
 }
 
 /// How many to keep. Long enough to cover a working period, short enough that
@@ -310,12 +342,44 @@ fn forget_project(app: tauri::AppHandle, path: String) -> Vec<RecentView> {
     views_of(&app, list)
 }
 
+/// One tool report, as the window receives it.
+///
+/// The same shape for FFmpeg and for a voice service, because the window draws
+/// them identically: a sentence, a button when there is one, and the technical
+/// half folded away (D-105).
+fn status_of(tool: spoonstill_app::tooling::ToolReport) -> ProviderStatus {
+    let remedy = tool
+        .remedy
+        .unwrap_or_else(|| spoonstill_core::Remedy::manual("", ""));
+    ProviderStatus {
+        id: tool.id,
+        ready: tool.ready,
+        need: remedy.need,
+        install: remedy.install,
+        detail: remedy.detail,
+        default_voice: String::new(),
+    }
+}
+
 /// Whether a voice service can be reached, and what to do if not.
+///
+/// Three fields rather than one sentence, because the window has a button and
+/// a terminal does not (D-105). The screenshot that prompted this showed
+/// `need`, `install` and `detail` mashed into one line of grey text above an
+/// empty list — the operator was told to open a terminal by a program that
+/// could have done it for them.
 #[derive(Debug, Clone, Serialize)]
 struct ProviderStatus {
     id: String,
     ready: bool,
-    /// The sentence naming the fix, when it is not ready.
+    /// The plain sentence. Empty when ready.
+    need: String,
+    /// The tool id for `install_tool`, when the window can fetch it. `None`
+    /// means there is genuinely nothing to press and `need` carries the whole
+    /// answer.
+    install: Option<String>,
+    /// The technical half — the path tried, the exit status. Behind a
+    /// disclosure, and in the diagnostics bundle.
     detail: String,
     /// What this provider speaks when a project names no voice. `project.yaml`
     /// says the word `default`; the window has to be able to say whose voice
@@ -469,10 +533,24 @@ async fn validate_project(
         let problems = project
             .problems
             .iter()
-            .map(|problem| ProblemView {
-                severity: problem.severity().as_str().to_owned(),
-                scene: problem.scene.as_ref().map(|id| id.as_str().to_owned()),
-                message: problem.kind.to_string(),
+            .map(|problem| {
+                // A missing tool is the one problem class the window can end
+                // rather than merely report, so it is the one that arrives in
+                // three pieces instead of as one formatted line (D-105).
+                let remedy = match &problem.kind {
+                    spoonstill_core::ProblemKind::ToolingMissing { remedy } => Some(remedy),
+                    _ => None,
+                };
+                ProblemView {
+                    severity: problem.severity().as_str().to_owned(),
+                    scene: problem.scene.as_ref().map(|id| id.as_str().to_owned()),
+                    message: remedy
+                        .map_or_else(|| problem.kind.to_string(), |remedy| remedy.need.clone()),
+                    install: remedy.and_then(|remedy| remedy.install.clone()),
+                    detail: remedy
+                        .map(|remedy| remedy.detail.clone())
+                        .unwrap_or_default(),
+                }
             })
             .collect();
 
@@ -600,30 +678,19 @@ async fn set_narration(root: String, scene: String, text: String) -> Result<(), 
 /// scene 340 of 500.
 #[tauri::command]
 async fn provider_status(provider: String) -> Result<ProviderStatus, String> {
-    tauri::async_runtime::spawn_blocking(move || match spoonstill_app::tts::provider(&provider) {
-        Err(e) => Ok(ProviderStatus {
-            id: provider,
-            ready: false,
-            detail: e.to_string(),
-            default_voice: String::new(),
-        }),
-        Ok(engine) => Ok(match engine.availability() {
-            spoonstill_app::tts::Availability::Ready => ProviderStatus {
-                id: engine.id().to_owned(),
-                ready: true,
-                detail: String::new(),
-                default_voice: engine.default_voice().to_owned(),
-            },
-            spoonstill_app::tts::Availability::Missing(detail) => ProviderStatus {
-                id: engine.id().to_owned(),
-                ready: false,
-                detail,
-                default_voice: engine.default_voice().to_owned(),
-            },
-        }),
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut status = status_of(spoonstill_app::tooling::provider(&provider));
+        // The one field a voice service has and FFmpeg does not: whose voice
+        // the word `default` actually means (D-086). Asked even when the tool
+        // is missing, because the Voice screen still has to name the project's
+        // choice while the operator installs it.
+        if let Ok(engine) = spoonstill_app::tts::provider(&provider) {
+            status.default_voice = engine.default_voice().to_owned();
+        }
+        status
     })
     .await
-    .map_err(|e| format!("the check failed: {e}"))?
+    .map_err(|e| format!("the check failed: {e}"))
 }
 
 /// Make a new project folder.
@@ -725,8 +792,8 @@ async fn move_scene(root: String, scene: String, to: usize) -> Result<String, St
 async fn voices(provider: String) -> Result<Vec<VoiceView>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let engine = spoonstill_app::tts::provider(&provider).map_err(|e| e.to_string())?;
-        if let spoonstill_app::tts::Availability::Missing(detail) = engine.availability() {
-            return Err(detail);
+        if let spoonstill_app::tts::Availability::Missing(remedy) = engine.availability() {
+            return Err(remedy.to_string());
         }
         Ok(engine
             .voices()
@@ -1115,7 +1182,8 @@ fn main() {
             set_default_voice,
             activity_log,
             open_activity_log,
-            install_provider,
+            install_tool,
+            ffmpeg_status,
             create_project,
             add_media,
             voices,

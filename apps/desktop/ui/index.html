@@ -85,12 +85,17 @@
           <dl class="facts">
             <dt>Provider</dt><dd id="app-provider" class="mono">edge</dd>
           </dl>
-          <div class="row-actions">
-            <!-- Not a sentence telling the operator to open a terminal. D-092. -->
-            <button id="app-provider-install" class="primary" hidden>Install it</button>
-            <button id="app-provider-recheck">Check again</button>
-          </div>
-          <p id="app-install-said" class="whisper left" hidden></p>
+          <!-- Not a sentence telling the operator to open a terminal (D-092),
+               and since D-105 the same component every other screen uses. -->
+          <div id="app-provider-fix" class="fix" hidden></div>
+        </section>
+
+        <section class="card">
+          <h3>Video engine</h3>
+          <p class="sub tight">FFmpeg. Every render needs it; spoonstill does the
+            timing and the motion, FFmpeg does the pixels.</p>
+          <p id="app-ffmpeg-state" class="state">Checking…</p>
+          <div id="app-ffmpeg-fix" class="fix" hidden></div>
         </section>
 
         <section class="card">
@@ -273,6 +278,9 @@
         <audio id="player" hidden></audio>
       </div>
       <p id="provider-state" class="state"></p>
+      <!-- D-105: the fix lives where the problem is shown. The old screen said
+           "press Install in Settings" and left the operator to find Settings. -->
+      <div id="voice-fix" class="fix" hidden></div>
 
       <div class="filters">
         <div class="pane-tools">
@@ -356,6 +364,13 @@
       </div>
 
       <div class="body fill">
+        <!--
+          D-105. Every render needs FFmpeg, and a machine without it used to
+          find that out as a wall of per-photograph probe failures (D-103).
+          Asked here, before the button is pressed, with the fix attached —
+          D-089's rule that a disabled control explains itself where it is.
+        -->
+        <div id="render-fix" class="fix" hidden></div>
         <section class="card">
           <div class="progress"><div id="bar" class="bar"></div></div>
           <p id="progress-line" class="whisper left">Nothing has been rendered in this window yet.</p>

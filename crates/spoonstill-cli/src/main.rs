@@ -49,6 +49,9 @@ enum Command {
     RenderScene(RenderSceneArgs),
     /// List the voices a text-to-speech provider offers.
     Voices(VoicesArgs),
+    /// Check every program spoonstill needs, and offer to install what is
+    /// missing (D-105).
+    Doctor(DoctorArgs),
     /// Diagnostics: logs and the bundle to send when something goes wrong.
     #[command(subcommand)]
     Diagnostics(DiagnosticsCommand),
@@ -311,6 +314,7 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Move(args) => move_scene(&args.project, &args.scene, args.to),
         Command::Validate(args) => validate(args),
         Command::Voices(args) => list_voices(&args),
+        Command::Doctor(args) => doctor(&args),
         Command::Render(args) => render_project(args),
         Command::RenderScene(args) => render_scene(args),
         Command::Diagnostics(DiagnosticsCommand::Export { out, project }) => {
@@ -442,6 +446,75 @@ fn add_media(root: &std::path::Path, media: &[PathBuf]) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Args)]
+struct DoctorArgs {
+    /// Install whatever is missing, rather than only reporting it.
+    ///
+    /// Every install is this machine's own package manager — Homebrew, winget,
+    /// pipx — run because it was asked for. Nothing is downloaded from us
+    /// (D-012).
+    #[arg(long)]
+    install: bool,
+}
+
+/// `still doctor` — every external program, checked in one place (D-105).
+///
+/// The window grew Install buttons for a missing FFmpeg and a missing voice
+/// service, and "if the CLI cannot do it, it does not exist" means this had to
+/// exist the same day. It is also the first thing to run when a report says
+/// the application opened a good folder as zero scenes: that was D-103, and
+/// the answer was always one of these two lines.
+fn doctor(args: &DoctorArgs) -> Result<(), String> {
+    let mut unresolved = 0;
+
+    for tool in spoonstill_app::tooling::check_all() {
+        if tool.ready {
+            println!("  ok       {} — {}", tool.id, tool.purpose);
+            continue;
+        }
+
+        let remedy = tool
+            .remedy
+            .clone()
+            .unwrap_or_else(|| spoonstill_core::Remedy::manual("not available", ""));
+        println!("  missing  {} — {}", tool.id, tool.purpose);
+        println!("           {}", remedy.need);
+        if !remedy.detail.is_empty() {
+            println!("           {}", remedy.detail);
+        }
+
+        if !args.install {
+            unresolved += 1;
+            if tool.is_installable() {
+                println!("           try `still doctor --install`");
+            }
+            continue;
+        }
+        if !tool.is_installable() {
+            unresolved += 1;
+            continue;
+        }
+
+        println!("           installing…");
+        match spoonstill_app::tooling::install(&tool.id) {
+            Ok(ran) => println!("           {ran}"),
+            Err(failed) => {
+                unresolved += 1;
+                println!("           {failed}");
+            }
+        }
+    }
+
+    if unresolved == 0 {
+        return Ok(());
+    }
+    Err(format!(
+        "{unresolved} thing{} spoonstill needs {} still missing",
+        if unresolved == 1 { "" } else { "s" },
+        if unresolved == 1 { "is" } else { "are" }
+    ))
+}
+
 /// A file's own name, for a report that lines up.
 fn name_of(path: &std::path::Path) -> String {
     path.file_name()
@@ -457,9 +530,9 @@ fn name_of(path: &std::path::Path) -> String {
 fn list_voices(args: &VoicesArgs) -> Result<(), String> {
     let provider = spoonstill_app::tts::provider(&args.provider).map_err(|e| e.to_string())?;
 
-    if let spoonstill_app::tts::Availability::Missing(detail) = provider.availability() {
+    if let spoonstill_app::tts::Availability::Missing(remedy) = provider.availability() {
         if !args.install {
-            return Err(format!("{detail}\n  try `still voices --install`"));
+            return Err(format!("{remedy}\n  try `still voices --install`"));
         }
         println!("  installing {}…", provider.id());
         let ran = provider.install().map_err(|e| e.to_string())?;

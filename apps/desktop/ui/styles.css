@@ -601,6 +601,39 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 .state.missing { color: var(--warn); }
 .card .state { padding: 0; margin: 0 0 10px; border: none; }
 
+/*
+  D-105. A missing tool, drawn as something to press.
+
+  Set apart from the surrounding pane rather than styled as another warning
+  line, because it is the one notice on any screen that contains a control —
+  the operator has to be able to tell at a glance that this block is different
+  from the ones that only tell them things. The palette stays inside the ink
+  series and the one warning colour the window already owns (D-079).
+*/
+.fix {
+  flex: none;
+  margin: 0;
+  padding: 12px 16px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  align-items: flex-start;
+}
+.card .fix { padding: 12px; margin: 0; border: 1px solid var(--line); border-radius: 6px; }
+.fix-need { margin: 0; font-size: 13px; line-height: 1.5; color: var(--ink); max-width: 68ch; }
+.fix-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.fix-said { margin: 0; font-size: 12px; line-height: 1.5; color: var(--ink-2); max-width: 68ch; }
+.fix-said.bad { color: var(--warn); }
+.fix details { font-size: 12px; color: var(--ink-2); }
+.fix summary { cursor: pointer; user-select: none; }
+.fix-detail { margin: 6px 0 0; font-size: 11px; color: var(--ink-2); max-width: 78ch; }
+
+/* The same button in a problem row, where the row is already tight. */
+.problems .fix-said { display: block; width: 100%; margin-top: 4px; }
+button.small { padding: 3px 9px; font-size: 11px; }
+
 .tally { margin: 0; padding: 0; list-style: none; }
 .tally li { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; border-bottom: 1px solid var(--line); }
 .tally li:last-child { border-bottom: none; }

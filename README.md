@@ -73,20 +73,31 @@ service > Install it**; on the command line that is `still voices --install`.
 
 spoonstill does the thinking; **FFmpeg** does the pixels. It is not bundled yet
 (see [D-062](decisions.md#d-062--licensing-boundary) — the shipped binary needs
-its own LGPL build first), so install it once:
+its own LGPL build first), so it has to be on your machine.
+
+**You do not have to do this by hand.** Open the window, go to
+**Settings**, and press **Install it for me** under Video engine — and under
+Voice service too, if you want written lines read aloud. Both use the package
+manager already on your machine, and both tell you when they are done.
+
+Prefer a terminal? One command checks everything and offers to fetch what is
+missing:
+
+```bash
+still doctor              # what is here, what is not
+still doctor --install    # fetch whatever is missing
+```
+
+Or install them yourself, once:
 
 ```bash
 brew install ffmpeg          # macOS
 winget install Gyan.FFmpeg   # Windows
+
+still voices --install       # a neural voice, or: pipx install edge-tts
 ```
 
-Want a neural voice to read your text? Install one more, once:
-
-```bash
-still voices --install       # or: pipx install edge-tts
-```
-
-Skip it if you are only using recordings you made yourself.
+Skip the voice if you are only using recordings you made yourself.
 
 **A note on quality.** Edge TTS is Microsoft's free endpoint and it returns
 24 kHz, mono, 48 kbps MP3 — the format is fixed in `edge-tts` itself, because
@@ -135,13 +146,23 @@ riding a fader.
 ### When it goes wrong
 
 ```bash
+still doctor                    # is everything this needs actually installed?
 still validate ~/holiday        # every problem in the folder, all at once
 still diagnostics export --project ~/holiday --out ~/bundle.txt
 ```
 
+Start with `doctor`. A folder of good photographs opening as **no scenes**, or a
+Voice screen with no voices on it, is almost always one missing program rather
+than anything wrong with your files — and `doctor --install` fetches it.
+
 `validate` reports *everything* it can find in one pass rather than stopping at
 the first bad row. The diagnostics bundle is one text file, with credentials
 redacted, that you can attach to an issue.
+
+**In the window**, you never need any of this: wherever spoonstill notices that
+something it needs is missing — the Voice screen, the Render screen, Settings —
+it says so in a sentence and puts an **Install it for me** button next to it.
+Press it and the screen you are on repairs itself.
 
 ---
 

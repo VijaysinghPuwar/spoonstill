@@ -23,6 +23,7 @@ pub mod hash;
 pub mod motion;
 pub mod path_safety;
 pub mod project;
+pub mod remedy;
 pub mod timing;
 
 pub use diagnostics::{Diagnostics, Event, Severity};
@@ -33,6 +34,7 @@ pub use project::{
     AudioSource, MotionRequest, Problem, ProblemKind, ProviderId, SceneDraft, SceneId, SceneSpec,
     TtsSettings, Validation, VoiceId, validate_draft, validate_drafts,
 };
+pub use remedy::Remedy;
 pub use timing::{SAMPLE_RATE, duration_for_frames, frames_for_duration, samples_for_frames};
 
 /// Human-owned manifest, relative to the project root (D-013).

@@ -588,10 +588,10 @@ fn check_voice_service(
                 });
             }
         };
-        if let crate::tts::Availability::Missing(detail) = engine.availability() {
+        if let crate::tts::Availability::Missing(remedy) = engine.availability() {
             return Err(FilmError::VoiceService {
                 provider: id,
-                detail,
+                detail: remedy.to_string(),
                 scenes,
             });
         }

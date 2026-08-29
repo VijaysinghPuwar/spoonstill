@@ -15,6 +15,11 @@
 //! not inherit the operator's `PATH`.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use spoonstill_core::Remedy;
+
+use crate::command::FfmpegCommand;
 
 /// Environment override for the FFmpeg binary. Development convenience.
 pub const FFMPEG_ENV: &str = "SPOONSTILL_FFMPEG";
@@ -88,23 +93,36 @@ impl Tools {
     ///
     /// # Errors
     ///
-    /// A sentence naming what is missing, ready to be shown to an operator.
-    pub fn ready(&self) -> Result<(), String> {
-        let missing: Vec<&str> = [("ffmpeg", &self.ffmpeg), ("ffprobe", &self.ffprobe)]
+    /// A [`Remedy`]: one plain sentence for the operator, the technical half
+    /// kept separate, and the fact that this application can install FFmpeg
+    /// itself — which is what turns the report into a button (D-105).
+    pub fn ready(&self) -> Result<(), Remedy> {
+        let missing: Vec<(&str, &PathBuf)> = [("ffmpeg", &self.ffmpeg), ("ffprobe", &self.ffprobe)]
             .into_iter()
             .filter(|(_, path)| !is_executable(path))
-            .map(|(tool, _)| tool)
             .collect();
 
         if missing.is_empty() {
             return Ok(());
         }
-        Err(format!(
-            "{} could not be found on this machine — spoonstill does the timing and the \
-             motion, FFmpeg does the pixels. Install it once ({}), then open this project \
-             again.",
-            missing.join(" and "),
-            INSTALL_HINT
+
+        // Both halves ship in one package everywhere, so "ffmpeg and ffprobe
+        // are missing" is one fact with two names attached and reads to an
+        // operator as two problems. The sentence names the product; the detail
+        // names the files.
+        let tried = missing
+            .iter()
+            .map(|(tool, path)| format!("{tool}: tried {}", path.display()))
+            .collect::<Vec<_>>()
+            .join("; ");
+
+        Err(Remedy::installable(
+            format!(
+                "Spoonstill needs FFmpeg to turn your photos into video, and it is not \
+                 installed yet. Press Install and it will be fetched with {INSTALL_WITH}.",
+            ),
+            FFMPEG_TOOL,
+            tried,
         ))
     }
 }
@@ -115,15 +133,173 @@ impl Default for Tools {
     }
 }
 
-/// The one command that installs it, for the platform being built for.
+/// The id a control surface hands back to [`install`]. One word, because it
+/// crosses a JSON boundary into the window (D-105).
+pub const FFMPEG_TOOL: &str = "ffmpeg";
+
+/// The package manager named in the plain sentence, so the operator knows what
+/// the button is about to run before they press it.
 #[cfg(target_os = "macos")]
-const INSTALL_HINT: &str = "brew install ffmpeg";
-/// The one command that installs it, for the platform being built for.
+const INSTALL_WITH: &str = "Homebrew";
+/// The package manager named in the plain sentence.
 #[cfg(target_os = "windows")]
-const INSTALL_HINT: &str = "winget install Gyan.FFmpeg";
-/// The one command that installs it, for the platform being built for.
+const INSTALL_WITH: &str = "winget";
+/// The package manager named in the plain sentence.
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const INSTALL_HINT: &str = "your package manager's ffmpeg";
+const INSTALL_WITH: &str = "your package manager";
+
+/// The package managers to try, in the order that works most often.
+///
+/// The same table, and the same reasoning, as `spoonstill_tts::edge`'s: the
+/// first candidate that both exists and succeeds wins, and every one of them
+/// is the platform's own package manager. Nothing is downloaded from us —
+/// D-012 refuses a build nobody chose, and this is the operator pressing a
+/// button that says install (D-105).
+#[cfg(target_os = "macos")]
+const INSTALLERS: &[(&str, &[&str])] = &[
+    ("brew", &["install", "ffmpeg"]),
+    ("port", &["install", "ffmpeg"]),
+];
+
+/// Windows has no Homebrew. winget ships with the OS; the other two are there
+/// only if the operator put them there, which is why they come after it.
+#[cfg(target_os = "windows")]
+const INSTALLERS: &[(&str, &[&str])] = &[
+    (
+        "winget",
+        &[
+            "install",
+            "--id",
+            "Gyan.FFmpeg",
+            "-e",
+            "--accept-source-agreements",
+            "--accept-package-agreements",
+        ],
+    ),
+    ("choco", &["install", "ffmpeg", "-y"]),
+    ("scoop", &["install", "ffmpeg"]),
+];
+
+/// Neither platform this project targets (D-071), but the module still builds.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const INSTALLERS: &[(&str, &[&str])] = &[
+    ("apt-get", &["install", "-y", "ffmpeg"]),
+    ("dnf", &["install", "-y", "ffmpeg"]),
+];
+
+/// How long a package manager gets. FFmpeg is a large build with many
+/// dependencies and a cold Homebrew can genuinely take minutes; the ceiling is
+/// here so a wedged download eventually returns the button to the operator
+/// rather than leaving "Installing…" on screen forever.
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(900);
+
+/// How long the post-install re-check gets. A stat and a spawn.
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Fetch FFmpeg through whichever package manager this machine has.
+///
+/// This is the second half of D-105, and it exists because the first half was
+/// only ever true of speech: `edge-tts` had an Install button since D-092,
+/// while FFmpeg — which every single render needs — offered the operator the
+/// string `brew install ffmpeg` and no way to run it. The screen that reported
+/// the more serious of the two problems was the one that could do less about
+/// it.
+///
+/// Located, not named, for D-104's reason: a package manager is exactly as
+/// invisible to a Finder-launched window as the tool it installs, so an
+/// Install button reached by bare name reports "brew is not on this machine"
+/// on a machine that has it.
+///
+/// # Errors
+///
+/// A [`Remedy`] naming every candidate that was tried and what each said. Not
+/// installable — pressing the button again would do the same thing, and the
+/// operator now needs the detail rather than another press.
+pub fn install() -> Result<String, Remedy> {
+    // Already there. Fifteen minutes of a package manager re-resolving a
+    // dependency tree is not what a button press asked for.
+    if Tools::from_env().ready().is_ok() {
+        return Ok("FFmpeg is already installed".to_owned());
+    }
+
+    let mut tried: Vec<String> = Vec::new();
+
+    for (program, args) in INSTALLERS {
+        let mut command = FfmpegCommand::new(locate(program));
+        command.args(*args);
+        let shown = command.display();
+
+        match command.spawn().and_then(|c| c.wait_until(INSTALL_TIMEOUT)) {
+            Ok(finished) if finished.status.success() => {
+                // Present is not the same as runnable, and the paths this
+                // process started with are stale by construction: the binaries
+                // did not exist when `from_env` looked. Locate them again, and
+                // only then claim success (D-104).
+                return match verify_installed() {
+                    Ok(()) => Ok(shown),
+                    Err(detail) => Err(Remedy::manual(
+                        "The install finished, but FFmpeg still cannot be run. It may have \
+                         landed somewhere this application does not look — restarting \
+                         spoonstill is the usual fix.",
+                        format!("`{shown}` succeeded; {detail}"),
+                    )),
+                };
+            }
+            Ok(finished) => tried.push(format!(
+                "`{shown}` exited {}: {}",
+                finished.status.code().unwrap_or(-1),
+                last_line(&finished.stderr)
+            )),
+            // Not on this machine — the next candidate is the point of having
+            // a list.
+            Err(_) => tried.push(format!("`{program}` is not on this machine")),
+        }
+    }
+
+    Err(Remedy::manual(
+        format!(
+            "Spoonstill could not install FFmpeg for you — none of the package managers it \
+             knows about worked on this machine. Installing {INSTALL_WITH} first, then \
+             pressing Install again, is the usual fix."
+        ),
+        tried.join("; "),
+    ))
+}
+
+/// Whether a freshly installed FFmpeg actually runs, located from scratch.
+fn verify_installed() -> Result<(), String> {
+    for program in ["ffmpeg", "ffprobe"] {
+        let path = locate(program);
+        let mut command = FfmpegCommand::new(&path);
+        command.arg("-version");
+        match command.spawn().and_then(|c| c.wait_until(VERIFY_TIMEOUT)) {
+            Ok(finished) if finished.status.success() => {}
+            Ok(finished) => {
+                return Err(format!(
+                    "`{} -version` exited {}",
+                    path.display(),
+                    finished.status.code().unwrap_or(-1)
+                ));
+            }
+            Err(_) => return Err(format!("{} is still not runnable", path.display())),
+        }
+    }
+    Ok(())
+}
+
+/// The last thing a failing tool said, which is the part that names the cause.
+///
+/// A package manager prints pages; an error box holds a sentence. Same rule,
+/// and the same function, as `spoonstill_tts::edge`'s.
+fn last_line(stderr: &str) -> String {
+    stderr
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("no output")
+        .to_owned()
+}
 
 /// Find `program` on this machine, as an absolute path.
 ///
@@ -389,16 +565,92 @@ mod tests {
         }
     }
 
-    /// `ready` is the sentence an operator acts on, so it has to name both the
-    /// missing tool and the command that installs it.
+    /// D-105. `ready` is what an operator acts on, so it is a [`Remedy`] and
+    /// not a sentence: the plain half names the product and no paths, the
+    /// technical half names both files that were tried, and it is installable
+    /// — which is the whole difference between a report and a button.
     #[test]
-    fn a_missing_binary_is_one_sentence_naming_the_install_command() {
-        let error = Tools::at("/nonexistent/ffmpeg", "/nonexistent/ffprobe")
+    fn a_missing_binary_is_a_remedy_with_a_button_on_it() {
+        let remedy = Tools::at("/nonexistent/ffmpeg", "/nonexistent/ffprobe")
             .ready()
             .expect_err("neither binary is there");
-        assert!(error.contains("ffmpeg"), "{error}");
-        assert!(error.contains("ffprobe"), "{error}");
-        assert!(error.contains(INSTALL_HINT), "{error}");
+
+        assert_eq!(
+            remedy.install.as_deref(),
+            Some(FFMPEG_TOOL),
+            "the window cannot draw a button without this"
+        );
+        assert!(remedy.need.contains("FFmpeg"), "{}", remedy.need);
+        assert!(
+            !remedy.need.contains('/'),
+            "a path is detail, not a sentence: {}",
+            remedy.need
+        );
+        // Both halves named, because a bundle that says only "ffmpeg" cannot
+        // tell a broken install from a half-installed one.
+        assert!(
+            remedy.detail.contains("/nonexistent/ffmpeg"),
+            "{}",
+            remedy.detail
+        );
+        assert!(
+            remedy.detail.contains("/nonexistent/ffprobe"),
+            "{}",
+            remedy.detail
+        );
+    }
+
+    /// One of the two present and the other missing is still one problem, and
+    /// the detail names which one it was.
+    #[test]
+    fn one_half_missing_still_names_which_half() {
+        let real = locate("ffprobe");
+        if !is_executable(&real) {
+            return; // Nothing to be half-installed from.
+        }
+        let remedy = Tools::at("/nonexistent/ffmpeg", &real)
+            .ready()
+            .expect_err("ffmpeg is not there");
+        assert!(remedy.detail.contains("ffmpeg: tried"), "{}", remedy.detail);
+        assert!(
+            !remedy.detail.contains("ffprobe: tried"),
+            "the one that is present is not a problem: {}",
+            remedy.detail
+        );
+    }
+
+    /// The installers are argument vectors of literals, and every one of them
+    /// is a package manager rather than a URL. D-012 refuses fetching a build
+    /// nobody chose; this table is only ever the platform's own.
+    #[test]
+    fn every_installer_is_a_package_manager_and_not_a_download() {
+        assert!(
+            !INSTALLERS.is_empty(),
+            "a platform with no installer has no button"
+        );
+        for (program, args) in INSTALLERS {
+            assert!(
+                !program.contains(' '),
+                "`{program}` is a command line, not a program"
+            );
+            for arg in *args {
+                assert!(
+                    !arg.starts_with("http"),
+                    "`{program}` reaches for a URL, which is what D-012 refuses: {arg}"
+                );
+            }
+        }
+    }
+
+    /// Install is not attempted on a machine that already has it — the guard
+    /// is what keeps a mis-press from costing fifteen minutes of Homebrew.
+    #[test]
+    fn install_is_a_no_op_when_ffmpeg_is_already_there() {
+        if Tools::from_env().ready().is_err() {
+            return; // This machine has none, and the real path needs a network.
+        }
+        let said = install().expect("already installed is a success");
+        assert!(said.contains("already"), "{said}");
     }
 
     /// A directory named `ffmpeg` is not an FFmpeg.

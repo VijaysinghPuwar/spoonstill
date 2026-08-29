@@ -33,6 +33,8 @@ pub mod edge;
 
 use std::path::Path;
 
+pub use spoonstill_core::Remedy;
+
 /// This crate's package name, resolved at compile time.
 pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
 
@@ -93,8 +95,10 @@ pub struct Spoken {
 pub enum Availability {
     /// Ready.
     Ready,
-    /// Not ready, with a sentence naming the fix.
-    Missing(String),
+    /// Not ready, with the fix as something to press rather than to read
+    /// (D-105). The window draws [`Remedy::need`] and an Install button; the
+    /// CLI and the diagnostics bundle print the whole thing.
+    Missing(Remedy),
 }
 
 /// Everything that can go wrong on the way to an audio file.

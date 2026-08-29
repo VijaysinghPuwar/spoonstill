@@ -18,6 +18,7 @@ pub mod import;
 pub mod ingest;
 pub mod pool;
 pub mod render;
+pub mod tooling;
 
 pub use audio::{AudioCache, AudioError, ResolvedAudio};
 pub use film::{FilmError, FilmEvent, RenderProjectOptions, RenderedFilm, render_project};

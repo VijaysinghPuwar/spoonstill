@@ -34,6 +34,7 @@ use std::path::PathBuf;
 use crate::diagnostics::Severity;
 use crate::motion::{Anchor, MotionKind};
 use crate::path_safety::PathError;
+use crate::remedy::Remedy;
 
 /// Longest single scene we will accept as a declared silent duration.
 ///
@@ -421,8 +422,10 @@ pub enum ProblemKind {
     /// errors that each appear to be about a different image. Produced by the
     /// application layer, before any file is probed.
     ToolingMissing {
-        /// What is missing and how to install it — already a sentence.
-        detail: String,
+        /// What is missing, what to say about it, and whether the window can
+        /// install it (D-105). Not a sentence any more: a sentence cannot be
+        /// pressed, and pressing it is the fix.
+        remedy: Remedy,
     },
     /// A project-level setting in `project.yaml` is unusable. Produced by the
     /// application layer.
@@ -514,7 +517,7 @@ impl fmt::Display for ProblemKind {
             ProblemKind::NoScenes => {
                 f.write_str("no scenes — no manifest rows and no image/narration pairs found")
             }
-            ProblemKind::ToolingMissing { detail } => f.write_str(detail),
+            ProblemKind::ToolingMissing { remedy } => write!(f, "{remedy}"),
             ProblemKind::UnusableSetting {
                 field,
                 value,

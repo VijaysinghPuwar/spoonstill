@@ -67,7 +67,7 @@ use spoonstill_media::atomic;
 use spoonstill_media::command::FfmpegCommand;
 use spoonstill_media::tools::locate;
 
-use crate::{Availability, Provider, Request, Spoken, TtsError, Voice, opening};
+use crate::{Availability, Provider, Remedy, Request, Spoken, TtsError, Voice, opening};
 
 /// How long to let a package manager run. Installing pulls a dependency tree
 /// over a network, so this is minutes rather than seconds.
@@ -129,14 +129,32 @@ const PROGRAM: &str = "edge-tts";
 /// The name used in `project.yaml`.
 pub const ID: &str = "edge";
 
-/// The sentence an operator needs when the tool is not there. One string, so
-/// the pre-flight check, a failed render and the window all say the same thing.
-fn how_to_install(program: &Path) -> String {
-    format!(
-        "`{}` is not on this machine. Install it with `pip install edge-tts` \
-         (or `brew install edge-tts`), press Install in Settings, or point \
-         {EDGE_TTS_ENV} at it.",
-        program.display()
+/// What an operator needs when the tool is not there. One constructor, so the
+/// pre-flight check, a failed render and the window all say the same thing.
+///
+/// This used to be a single string, and it was the sentence that made D-105
+/// necessary:
+///
+/// ```text
+/// `edge-tts` is not on this machine. Install it with `pip install edge-tts`
+/// (or `brew install edge-tts`), press Install in Settings, or point
+/// SPOONSTILL_EDGE_TTS at it.
+/// ```
+///
+/// Four instructions, three needing a terminal, one an environment variable,
+/// shown on the Voice screen above an empty list with no button within reach.
+/// It is now a plain sentence, a tool id the window turns into an Install
+/// button *on that same screen*, and the path we tried kept as detail.
+fn how_to_install(program: &Path) -> Remedy {
+    Remedy::installable(
+        "Spoonstill needs a small program called edge-tts to read your written lines \
+         aloud, and it is not installed yet. Press Install and it will be fetched for \
+         you — it takes about a minute and needs no account.",
+        ID,
+        format!(
+            "tried {}; set {EDGE_TTS_ENV} to name a different one",
+            program.display()
+        ),
     )
 }
 
@@ -151,10 +169,18 @@ fn availability_of(program: &Path) -> Availability {
     command.arg("--version");
     match command.spawn().and_then(|c| c.wait_until(LIMIT_VERSION)) {
         Ok(finished) if finished.status.success() => Availability::Ready,
-        Ok(finished) => Availability::Missing(format!(
-            "`{} --version` failed: {}",
-            program.display(),
-            last_line(&finished.stderr)
+        // Present but not runnable — a half-finished install, a Python that
+        // moved out from under its shim. Still installable: re-running the
+        // package manager is exactly the fix, and it is still one button.
+        Ok(finished) => Availability::Missing(Remedy::installable(
+            "The edge-tts program is on this machine but will not run — its install \
+             looks incomplete. Press Install to repair it.",
+            ID,
+            format!(
+                "`{} --version` failed: {}",
+                program.display(),
+                last_line(&finished.stderr)
+            ),
         )),
         Err(_) => Availability::Missing(how_to_install(program)),
     }
@@ -589,7 +615,7 @@ fn interpret(error: spoonstill_media::MediaError, voice: &str, text: &str) -> Fa
         // same one the pre-flight check and the window print.
         MediaError::BinaryMissing { ref tried, .. } => Failure::Permanent(TtsError::Unavailable {
             provider: ID.to_owned(),
-            detail: how_to_install(tried),
+            detail: how_to_install(tried).to_string(),
         }),
         // We killed it. Either the line is enormous or the socket is wedged;
         // both are worth one more go with a fresh connection.
@@ -1497,13 +1523,39 @@ en-GB-RyanNeural                   Male      General                Friendly, Po
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// D-105. What the operator reads is a sentence; what the window presses
+    /// is `install`; what the bundle keeps is `detail`. The old version of
+    /// this test asserted that the operator's sentence contained
+    /// `pip install edge-tts` and an environment variable, which is precisely
+    /// the message that made D-105 necessary — so it asserts the opposite now.
     #[test]
-    fn a_missing_binary_reports_how_to_install_it() {
+    fn a_missing_binary_reports_a_remedy_and_not_a_command_line() {
         let edge = Edge::at("/nonexistent/edge-tts");
         match edge.availability() {
-            Availability::Missing(detail) => {
-                assert!(detail.contains("pip install edge-tts"), "{detail}");
-                assert!(detail.contains(EDGE_TTS_ENV), "{detail}");
+            Availability::Missing(remedy) => {
+                assert_eq!(
+                    remedy.install.as_deref(),
+                    Some(ID),
+                    "without this the window has no button to draw"
+                );
+                assert!(remedy.need.contains("edge-tts"), "{}", remedy.need);
+                assert!(
+                    !remedy.need.contains("pip install"),
+                    "an operator without a terminal cannot run this: {}",
+                    remedy.need
+                );
+                assert!(
+                    !remedy.need.contains(EDGE_TTS_ENV),
+                    "an environment variable is not an instruction: {}",
+                    remedy.need
+                );
+                // Neither is lost — both moved to the half nobody has to read.
+                assert!(
+                    remedy.detail.contains("/nonexistent/edge-tts"),
+                    "{}",
+                    remedy.detail
+                );
+                assert!(remedy.detail.contains(EDGE_TTS_ENV), "{}", remedy.detail);
             }
             Availability::Ready => panic!("a binary that is not there cannot be ready"),
         }
@@ -1534,10 +1586,13 @@ en-GB-RyanNeural                   Male      General                Friendly, Po
             .expect_err("no binary");
 
         assert!(matches!(error, TtsError::Unavailable { .. }), "{error}");
-        assert!(
-            error.to_string().contains("pip install edge-tts"),
-            "{error}"
-        );
+        // The same words as the pre-flight check and the window, which is the
+        // whole point of `how_to_install` being one constructor — asserted
+        // against that constructor rather than against a copy of its text, so
+        // rewording the sentence cannot make the two drift apart (D-105).
+        let expected = how_to_install(std::path::Path::new("/nonexistent/edge-tts"));
+        assert!(error.to_string().contains(&expected.need), "{error}");
+        assert!(error.to_string().contains(&expected.detail), "{error}");
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "a permanent failure must not sit through the backoff"
@@ -2049,7 +2104,9 @@ aiohttp.client_exceptions.ClientProxyConnectionError: Cannot connect to host 127
     #[test]
     fn a_provider_that_is_nowhere_still_names_itself() {
         let nowhere = Edge::at(PROGRAM);
-        assert!(how_to_install(nowhere.program()).contains(PROGRAM));
-        assert!(how_to_install(nowhere.program()).contains(EDGE_TTS_ENV));
+        let remedy = how_to_install(nowhere.program());
+        assert!(remedy.need.contains(PROGRAM), "{}", remedy.need);
+        assert!(remedy.detail.contains(PROGRAM), "{}", remedy.detail);
+        assert!(remedy.detail.contains(EDGE_TTS_ENV), "{}", remedy.detail);
     }
 }

@@ -159,6 +159,11 @@ cargo build --release -p spoonstill-cli
 ./target/release/still render fixtures/projects/mixed/ --out /tmp/mixed.mp4 \
   --voice en-GB-RyanNeural
 
+# Every external program this needs, and the offer to install what is missing.
+# The first thing to run against a report that says the app "won't open".
+./target/release/still doctor
+./target/release/still doctor --install
+
 ./target/release/still diagnostics export --project /tmp --out /tmp/bundle.txt
 
 # The window. Three screens: make or open, fill, review.
@@ -274,7 +279,8 @@ What exists now, by crate:
 - `spoonstill-core` — `motion::build_filter` (pure), `geometry`, `timing`,
   `hash` (one-shot and streaming FNV-1a), `diagnostics`, `path_safety`
   (containment behind a `RealPath` trait), `project` (the scene model and every
-  pure validation rule). Still zero dependencies.
+  pure validation rule), `remedy` (a missing tool, as three fields — D-105).
+  Still zero dependencies.
 - `spoonstill-media` — `command` (the only place a process is spawned),
   `probe` (timed, typed), `profile` (`SegmentProfile` + `assert_matches_profile`),
   `scene` (render → validate → atomic move), `audio` (normalize, generate
@@ -289,11 +295,13 @@ What exists now, by crate:
   `ingest` (making a project and filling it), `audio` (the cache and
   `AudioSource` resolution, speech included), `pool` (the bounded worker pool),
   `film` (`still render`: two pools, the lock, the join), `render` (one scene),
-  `diagnostics`, `tts` (the re-export the control surfaces use), and `surface`.
+  `diagnostics`, `tooling` (every external program: checked, and installed —
+  D-105), `tts` (the re-export the control surfaces use), and `surface`.
   Owns `serde_yaml_ng` and `csv`; the domain model does not know what a file
   format is.
 - `spoonstill-cli` — `still new`, `still add`, `still validate`, `still render`,
-  `still render-scene`, `still voices`, `still diagnostics export|where`.
+  `still render-scene`, `still voices`, `still doctor`,
+  `still diagnostics export|where`.
 - `apps/desktop` — the Tauri 2 window (D-051's review grid, D-083's shape,
   D-085 and D-086's navigation). **Two levels: home is the operator's projects
   plus app-level Settings; a project is a left rail over one dense grid —
@@ -413,6 +421,39 @@ FFmpeg to Homebrew or winget rather than shipping it. Nothing here is M5:
 these builds are unsigned, un-notarized, have no updater and bundle no FFmpeg,
 and the README says so in as many words. Do not delete an M5 deliverable
 because a release exists.
+
+**A missing tool is something to press, not a sentence to read** (D-105). The
+Voice screen reported `` `edge-tts` is not on this machine. Install it with
+`pip install edge-tts` (or `brew install edge-tts`), press Install in Settings,
+or point SPOONSTILL_EDGE_TTS at it. `` — four instructions, three needing a
+terminal, one an environment variable, over an empty list, with the only button
+that could act on it one level up under Settings. **The screen reported a
+problem it could have ended.** (That the machine *had* `edge-tts` at
+`/opt/homebrew/bin` is D-103's bug: the installed app was v0.1.0, built before
+the fix. **The fix existed and had not shipped**, which is why a version bump
+is part of this decision.) A missing tool is now `spoonstill_core::Remedy` —
+three fields, not one string: `need` is one plain sentence with no paths and no
+flags, `install` is the tool id the window turns into a button, `detail` is the
+path and the stderr line, behind a disclosure and in the bundle. `Display`
+still prints all of it, so a terminal loses nothing but the button it never
+had. `drawFix` in `app.js` is the one component that draws a `Remedy` and it is
+on **every** screen that can report a missing tool — Voice, Render, both
+Settings cards — and on success it reloads what the tool was blocking, so the
+screen you are already looking at becomes the screen that works. **FFmpeg got
+the button the voice service already had**: `edge-tts` had one since D-092
+while FFmpeg, which every render needs, offered `brew install ffmpeg` and no
+way to run it — the screen with the more serious problem could do less about
+it. `ffmpeg_status` runs at project open and feeds `renderBlocker()`, so a
+machine without it shows a disabled Render button that explains itself next to
+the fix (D-089) rather than a wall of broken photographs. `spoonstill_app::tooling`
+owns which subsystem holds which binary, because D-010 forbids the window from
+reaching `spoonstill-media`; `still doctor [--install]` is the CLI half. This
+does not reopen D-012 — every installer is the platform's own package manager,
+pressed for, and a test asserts none of them reaches for a URL. And
+`apps/desktop/tests/ui_contract.rs` now asserts that every `el("id")` exists in
+the markup and every `invoke("cmd")` is registered: both fail **silently** in a
+webview — a listener on `null` throws and takes every listener after it, and
+the window opens looking correct with half its controls dead.
 
 **A binary is located, never named** (D-103, D-104). "I open the application
 and open the project and it's not opening" was a folder of six photographs
@@ -546,8 +587,10 @@ constant timeout, and D-097 before touching a release workflow's toolchain
 setup, D-098 before renaming an asset, D-099 before touching an installer's
 quarantine handling, D-100 before touching `arrange` or the Scenes rows, and
 D-102 before cutting a release, bumping a version, or writing a commit
-message, and D-103/D-104 before spawning a program, touching `tools::locate`,
-the `MediaCheck::ready` pre-flight, or the window's empty-project screen**. D-054 through D-057 and D-075 through D-082 were added during M2 and
+message, D-103/D-104 before spawning a program, touching `tools::locate`,
+the `MediaCheck::ready` pre-flight, or the window's empty-project screen, and
+**D-105 before touching `Remedy`, `spoonstill_app::tooling`, `drawFix`, or
+anything that reports a missing program to an operator**. D-054 through D-057 and D-075 through D-082 were added during M2 and
 are all Accepted — read D-056 before touching the import path, D-057 before
 touching concat or transitions, D-076/D-077 before touching the pool, D-078
 before changing what the finished film is asserted against, D-079 before

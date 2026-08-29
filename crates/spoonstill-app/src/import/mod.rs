@@ -39,6 +39,7 @@ use spoonstill_core::path_safety::{PathError, RealPath, resolve_within};
 use spoonstill_core::project::{
     AudioSource, Problem, ProblemKind, SceneSpec, Validation, validate_drafts,
 };
+use spoonstill_core::remedy::Remedy;
 use spoonstill_media::{Tools, probe};
 
 pub use rows::{Mode, Rows, RowsError};
@@ -97,8 +98,10 @@ pub trait MediaCheck {
     ///
     /// # Errors
     ///
-    /// A sentence naming what is missing and what installs it.
-    fn ready(&self) -> Result<(), String> {
+    /// A [`Remedy`]: the plain sentence an operator reads, the tool id the
+    /// window turns into an Install button, and the technical detail kept
+    /// apart from both (D-105).
+    fn ready(&self) -> Result<(), Remedy> {
         Ok(())
     }
 }
@@ -128,7 +131,7 @@ impl Default for ProbeCheck {
 }
 
 impl MediaCheck for ProbeCheck {
-    fn ready(&self) -> Result<(), String> {
+    fn ready(&self) -> Result<(), Remedy> {
         self.tools.ready()
     }
 
@@ -284,9 +287,9 @@ pub fn load(root: &Path, media: &dyn MediaCheck) -> Result<Project, ImportError>
     // every image being reported as unusable media, which is both untrue and
     // unactionable.
     let probes = media.ready();
-    if let Err(detail) = &probes {
+    if let Err(remedy) = &probes {
         problems.push(Problem::in_project(ProblemKind::ToolingMissing {
-            detail: detail.clone(),
+            remedy: remedy.clone(),
         }));
     }
     let probes = probes.is_ok();
@@ -560,8 +563,13 @@ mod tests {
     struct Uninstalled;
 
     impl MediaCheck for Uninstalled {
-        fn ready(&self) -> Result<(), String> {
-            Err("ffprobe could not be found on this machine — brew install ffmpeg".to_owned())
+        fn ready(&self) -> Result<(), Remedy> {
+            Err(Remedy::installable(
+                "Spoonstill needs FFmpeg to turn your photos into video, and it is not \
+                 installed yet.",
+                "ffmpeg",
+                "tried /nonexistent/ffprobe",
+            ))
         }
 
         fn check(&self, _path: &Path, _role: Role) -> Result<(), String> {
@@ -804,7 +812,25 @@ mod tests {
 
         let found = messages(project.errors());
         assert_eq!(found.len(), 1, "once, not once per photograph: {found:?}");
-        assert!(found[0].contains("brew install ffmpeg"), "{found:?}");
+        assert!(found[0].contains("FFmpeg"), "{found:?}");
+
+        // D-105: and it arrives as something the window can press, not as a
+        // command line the operator is left to run. A control surface that
+        // could only read `found[0]` would be back where the Voice screen was.
+        let tooling = project
+            .problems
+            .iter()
+            .find_map(|problem| match &problem.kind {
+                ProblemKind::ToolingMissing { remedy } => Some(remedy),
+                _ => None,
+            })
+            .expect("the missing tool is a ToolingMissing problem");
+        assert_eq!(tooling.install.as_deref(), Some("ffmpeg"), "{tooling:?}");
+        assert!(
+            !tooling.need.contains("brew "),
+            "a command line is not an instruction an operator can follow: {}",
+            tooling.need
+        );
         assert!(
             project.problems.iter().all(|p| p.scene.is_none()),
             "it is a fact about the machine, so it belongs to no scene"

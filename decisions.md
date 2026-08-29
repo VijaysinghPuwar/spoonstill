@@ -1861,6 +1861,95 @@ bare name in this codebase.** `spoonstill_media::tools::locate` is the only
 way a program name becomes something to spawn, and a name that resolves to
 nothing is handed back unchanged so the error still says what was looked for.
 
+### D-105 — A missing tool is something to press, not a sentence to read · Accepted
+
+Decided 2026-08-29, from a screenshot of the Voice screen. It is the third
+decision in three days about the same class of failure, and the first one about
+what the operator is *shown* rather than about what the code looks up.
+
+D-103 and D-104 fixed the finding. This fixes the telling. The report that
+prompted it was a photograph of this line, in grey, on an otherwise empty
+screen:
+
+```
+`edge-tts` is not on this machine. Install it with `pip install edge-tts`
+(or `brew install edge-tts`), press Install in Settings, or point
+SPOONSTILL_EDGE_TTS at it.
+```
+
+Four instructions. Three need a terminal. One is an environment variable. The
+fourth — the only one an operator could act on — pointed at a button one level
+up, under Settings, on a different screen. Below it, a language filter, a
+gender filter and a search box over nothing. **The screen reported a problem it
+could have ended.**
+
+That the machine in the screenshot *had* `edge-tts`, at
+`/opt/homebrew/bin/edge-tts`, is D-103's bug and was already fixed in the tree —
+the installed application was v0.1.0, built before either fix. Both facts
+matter and they are different: **the fix existed and had not shipped**, which
+is why D-102's version gate and a release are part of this decision rather than
+a follow-up.
+
+**A missing tool is now three fields, not one string.**
+`spoonstill_core::Remedy` carries:
+
+| field | who reads it | rule |
+|---|---|---|
+| `need` | the operator | one plain sentence, no paths, no flags, no backticks |
+| `install` | the window | a tool id, when this program can fetch it |
+| `detail` | the bundle, a disclosure | the path tried, the exit code, the last line of stderr |
+
+`Display` still prints all of it, so a terminal loses nothing — it only loses
+the *button*, and a terminal never had one. Nothing is deleted by this change:
+`SPOONSTILL_EDGE_TTS` and the exact path moved from the operator's sentence
+into `detail`, which is the half nobody has to read.
+
+**The fix lives where the problem is shown.** `drawFix` in `app.js` is the one
+component that draws a `Remedy`, and it appears on every screen that can report
+a missing tool: the Voice screen, the Render screen, and both Settings cards.
+It draws the sentence, an Install button, a Check again button, and the
+technical half behind a disclosure — and on success it awaits a caller-supplied
+reload, so **the screen the operator is already looking at becomes the screen
+that works**. They never navigate anywhere to apply a fix.
+
+**FFmpeg gets the button the voice service already had.** This is the part that
+was plainly wrong before: `edge-tts` had an Install button since D-092, while
+FFmpeg — which *every* render needs, and whose absence D-103 shows can present
+as six broken photographs — offered the string `brew install ffmpeg` and no way
+to run it. The screen reporting the more serious problem was the one that could
+do less about it. `spoonstill_media::tools::install` mirrors
+`Provider::install` exactly, D-104's re-location after a successful install
+included.
+
+**It is asked before it can fail, not after.** `ffmpeg_status` runs at project
+open and its answer reaches `renderBlocker()`, so a machine without FFmpeg
+shows a disabled Render button that explains itself next to the fix — D-089's
+rule, applied to the one dependency every render has. A check that cannot run
+is deliberately not a blocker: the render itself is still the authority.
+
+**Where it lives, and why.** `spoonstill_app::tooling` owns "which programs
+exist, how to check them, how to install them", because D-010 forbids the
+window from reaching `spoonstill-media` at all and a webview should not know
+which subsystem owns which binary. `still doctor` and `still doctor --install`
+are the CLI half, written the same day, because *if the CLI cannot do it, it
+does not exist.*
+
+**This does not reopen D-012.** D-012 refuses downloading a build nobody chose,
+silently, at render time. Every install here is the platform's own package
+manager — Homebrew, MacPorts, winget, Chocolatey, Scoop, pipx, pip — run
+because somebody pressed a button that said install. Nothing is fetched from
+us, and a test asserts no installer in either table reaches for a URL.
+
+**And the window's two silent failure modes are now tests.**
+`apps/desktop/tests/ui_contract.rs` asserts that every `el("id")` the frontend
+reaches for exists in the markup, and that every `invoke("cmd")` is registered
+in `main.rs`. Both fail invisibly in a webview: a listener attached to `null`
+throws and takes every listener declared after it, and the window opens looking
+correct with half its controls dead. This change alone deleted two buttons and
+renamed one command, so it created three chances to ship exactly that. It is
+D-088's rule — *anything in the window a test cannot assert has to be clicked* —
+paying for itself by making two more things assertable.
+
 ---
 
 ## Reference repositories

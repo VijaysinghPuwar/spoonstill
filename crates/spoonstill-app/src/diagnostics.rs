@@ -44,7 +44,7 @@ pub fn environment() -> Vec<EnvironmentLine> {
             &key,
             match provider.availability() {
                 crate::tts::Availability::Ready => "ready".to_owned(),
-                crate::tts::Availability::Missing(detail) => detail,
+                crate::tts::Availability::Missing(remedy) => remedy.to_string(),
             },
         ));
     }

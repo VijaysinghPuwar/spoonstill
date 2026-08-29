@@ -39,6 +39,10 @@ let filter = "all";
 // here is written into `project.yaml`, which this program only reads (D-013).
 // `chosenVoice` of null means "whatever the project says".
 let chosenVoice = null;
+// Why a render cannot start for a reason that is about this machine rather
+// than about this project — a missing FFmpeg. Empty when there is none
+// (D-105). Asked once per project open, not once per photograph (D-103).
+let ffmpegBlocker = "";
 let outDir = "";
 let outName = "";
 let outFull = "";
@@ -155,6 +159,9 @@ function goHome() {
 async function openSettings() {
   show("settings");
   setStatus("");
+  // FFmpeg first: a machine that cannot render at all should not be told
+  // about voices first (D-105).
+  await checkFfmpegSetting();
   await checkProvider();
   await loadFallbackVoice();
   await loadActivityLog();
@@ -200,38 +207,39 @@ async function checkProvider() {
     state.className = "state " + (status.ready ? "ready" : "missing");
     state.textContent = status.ready
       ? "Ready. Written lines can be spoken."
-      : status.detail;
-    // Offered only when it would do something. D-092.
-    el("app-provider-install").hidden = status.ready;
+      : status.need;
+    // Offered only when it would do something. D-092, D-105.
+    drawFix(el("app-provider-fix"), status, async () => {
+      await checkProvider();
+      await loadFallbackVoice();
+    });
   } catch (error) {
     state.className = "state missing";
     state.textContent = String(error);
-    el("app-provider-install").hidden = false;
+    el("app-provider-fix").hidden = true;
   }
 }
 
-// Fetch the provider's tooling through this machine's own package manager,
-// rather than printing a command and leaving the operator to find a terminal.
-async function installProvider() {
-  const button = el("app-provider-install");
-  const said = el("app-install-said");
-  const was = button.textContent;
-  button.disabled = true;
-  button.textContent = "Installing…";
-  said.hidden = false;
-  said.classList.remove("bad");
-  said.textContent = "Running your package manager…";
+// The other half of D-105: FFmpeg is checked and installed exactly the way the
+// voice service is. Until now the screen reporting the *more* serious of the
+// two problems was the one that could do less about it — a missing voice
+// service had a button, and a missing FFmpeg had the string
+// `brew install ffmpeg` and a suggestion to find a terminal.
+async function checkFfmpegSetting() {
+  const state = el("app-ffmpeg-state");
+  state.className = "state";
+  state.textContent = "Checking…";
   try {
-    const ran = await invoke("install_provider", { provider: "edge" });
-    said.textContent = `Installed with ${ran}`;
-    await checkProvider();
-    await loadFallbackVoice();
+    const status = await invoke("ffmpeg_status");
+    state.className = "state " + (status.ready ? "ready" : "missing");
+    state.textContent = status.ready
+      ? "Ready. Projects can be rendered."
+      : status.need;
+    drawFix(el("app-ffmpeg-fix"), status, () => checkFfmpegSetting());
   } catch (error) {
-    said.classList.add("bad");
-    said.textContent = String(error);
-  } finally {
-    button.disabled = false;
-    button.textContent = was;
+    state.className = "state missing";
+    state.textContent = String(error);
+    el("app-ffmpeg-fix").hidden = true;
   }
 }
 
@@ -347,6 +355,34 @@ async function load(path) {
   show("app");
   draw();
   if (project.scenes.length === 0) tab("scenes");
+  // Not awaited: whether this machine has FFmpeg is one spawn, and the grid
+  // should not wait on it to appear. It settles into the Render screen and
+  // the button a moment later.
+  guard(checkFfmpeg());
+}
+
+// Ask, once, whether this machine can render at all.
+//
+// D-105, and the prevention half of it. Every render needs FFmpeg; a machine
+// without it used to discover that as a wall of per-photograph probe failures
+// (D-103), and even after D-103 named it correctly the operator was handed a
+// command line and left to find a terminal. Asked here, at project open, the
+// answer reaches the Render screen as a disabled button that explains itself
+// (D-089) with the fix attached to the explanation.
+//
+// A check that cannot run is deliberately *not* a blocker: the render itself
+// is still the authority on whether FFmpeg works, and a window that refuses to
+// render because it could not ask is worse than one that tries and reports.
+async function checkFfmpeg() {
+  try {
+    const status = await invoke("ffmpeg_status");
+    ffmpegBlocker = status.ready ? "" : status.need;
+    drawFix(el("render-fix"), status, () => checkFfmpeg());
+  } catch {
+    ffmpegBlocker = "";
+    el("render-fix").hidden = true;
+  }
+  updateRender();
 }
 
 // ------------------------------------------------------------------- adding
@@ -664,6 +700,22 @@ function drawProblems() {
     const text = document.createElement("span");
     text.textContent = (problem.scene ? `scene ${problem.scene}: ` : "") + problem.message;
     li.append(sev, text);
+
+    // Nearly every problem in this list is about the operator's own files and
+    // there is nothing to press. A missing tool is the exception, and it is
+    // also the one an operator is least equipped to fix by hand — so it is the
+    // one that gets a button, here, in the list where it was reported (D-105).
+    if (problem.install) {
+      const said = document.createElement("span");
+      said.className = "fix-said";
+      said.hidden = true;
+      const fix = document.createElement("button");
+      fix.className = "primary small";
+      fix.textContent = "Install it for me";
+      fix.addEventListener("click", () =>
+        guard(runInstall(problem.install, fix, said, () => load(project.root))));
+      li.append(fix, said);
+    }
     list.appendChild(li);
   }
 }
@@ -683,6 +735,103 @@ function drawStatus() {
     el("counts").appendChild(loud);
   }
   setStatus(project.root);
+}
+
+
+// -------------------------------------------------------------- missing tools
+//
+// D-105. Every external program spoonstill needs can be absent, and being
+// absent used to produce one line of grey text holding four instructions,
+// three of which needed a terminal:
+//
+//   `edge-tts` is not on this machine. Install it with `pip install edge-tts`
+//   (or `brew install edge-tts`), press Install in Settings, or point
+//   SPOONSTILL_EDGE_TTS at it.
+//
+// It was shown on the Voice screen above an empty list, with the only button
+// that could act on it one level up under Settings. Rust now answers in three
+// separate fields — `need`, `install`, `detail` — and this is the one function
+// that draws them. Wherever a tool can be missing, this appears *there*: the
+// plain sentence, the button that ends it, and the technical half folded away.
+//
+// `onFixed` is awaited after a successful install and reloads whatever the
+// missing tool was blocking, so the screen the operator is already looking at
+// becomes the screen that works. They never navigate anywhere to apply a fix.
+function drawFix(host, status, onFixed) {
+  host.replaceChildren();
+  host.hidden = Boolean(status.ready);
+  if (status.ready) return;
+
+  const need = document.createElement("p");
+  need.className = "fix-need";
+  need.textContent = status.need || "Something spoonstill needs is not available.";
+
+  const actions = document.createElement("div");
+  actions.className = "fix-actions";
+
+  const said = document.createElement("p");
+  said.className = "fix-said";
+  said.hidden = true;
+
+  if (status.install) {
+    const install = document.createElement("button");
+    install.className = "primary";
+    install.textContent = "Install it for me";
+    install.addEventListener("click", () =>
+      guard(runInstall(status.install, install, said, onFixed)));
+    actions.appendChild(install);
+  }
+
+  const again = document.createElement("button");
+  again.textContent = "Check again";
+  again.addEventListener("click", () => guard(onFixed()));
+  actions.appendChild(again);
+
+  host.append(need, actions, said);
+
+  // Never the first thing anybody sees, and never thrown away either: this is
+  // the path that was tried and the line the tool printed, which is what a
+  // diagnostics report is made of.
+  if (status.detail) {
+    const more = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "Technical details";
+    const detail = document.createElement("p");
+    detail.className = "fix-detail mono wrap";
+    detail.textContent = status.detail;
+    more.append(summary, detail);
+    host.appendChild(more);
+  }
+}
+
+// Run this machine's own package manager, and say so while it happens.
+//
+// Homebrew on a cold cache genuinely takes minutes, so the button says what is
+// happening rather than going quiet — an operator who thinks the window has
+// frozen closes it, and closing it mid-install is how a half-installed tool
+// happens.
+async function runInstall(tool, button, said, onFixed) {
+  const was = button.textContent;
+  button.disabled = true;
+  button.textContent = "Installing…";
+  said.hidden = false;
+  said.classList.remove("bad");
+  said.textContent =
+    "Working. This uses the package manager already on your machine and can take " +
+    "a few minutes — you can leave this window open.";
+  try {
+    const ran = await invoke("install_tool", { tool });
+    said.textContent = `Done. ${ran}`;
+    // The whole point of the button: the screen repairs itself. Rust locates
+    // the binary again after installing (D-104) rather than trusting the path
+    // it resolved before the file existed.
+    await onFixed();
+  } catch (error) {
+    said.classList.add("bad");
+    said.textContent = String(error);
+    button.disabled = false;
+    button.textContent = was === "Installing…" ? "Try again" : was;
+  }
 }
 
 // ------------------------------------------------------------------- voices
@@ -781,14 +930,23 @@ async function loadVoices() {
       // to this screen. Re-asking costs one process spawn.
       voicesLoaded = false;
       state.className = "state missing";
-      state.textContent = status.detail;
+      // The plain sentence, and only that. The command lines and the
+      // environment variable that used to be on this line are in `detail`,
+      // behind the disclosure the component draws (D-105).
+      state.textContent = status.need;
+      // The button, here, rather than "press Install in Settings" — and when
+      // it succeeds the catalogue loads underneath it without the operator
+      // going anywhere.
+      drawFix(el("voice-fix"), status, () => loadVoices());
       drawVoiceChoice();
       return;
     }
+    el("voice-fix").hidden = true;
   } catch (error) {
     voicesLoaded = false;
     state.className = "state missing";
     state.textContent = String(error);
+    el("voice-fix").hidden = true;
     return;
   }
 
@@ -985,6 +1143,10 @@ async function preview(id) {
 // (D-089).
 function renderBlocker() {
   if (!project) return "Open a project first.";
+  // Before anything about the project, because a machine that cannot render
+  // cannot render a perfect project either — and this one has a button on the
+  // Render screen rather than a fix the operator has to go and find.
+  if (ffmpegBlocker) return ffmpegBlocker;
   if (project.has_errors) {
     const n = attention();
     return `${n} scene${n === 1 ? " needs" : "s need"} attention — see the list on Scenes.`;
@@ -1277,8 +1439,6 @@ el("rail-home").addEventListener("click", goHome);
 el("fill-back").addEventListener("click", goHome);
 el("settings-open").addEventListener("click", () => guard(openSettings()));
 el("settings-back").addEventListener("click", goHome);
-el("app-provider-recheck").addEventListener("click", () => guard(checkProvider()));
-el("app-provider-install").addEventListener("click", () => guard(installProvider()));
 el("app-voice").addEventListener("change", (e) => guard(setFallbackVoice(e.target.value)));
 el("app-voice-clear").addEventListener("click", () => guard(setFallbackVoice("")));
 el("activity-open").addEventListener("click", () => guard(openActivityLog(false)));
