@@ -104,6 +104,17 @@ struct ProjectView {
     scenes: Vec<SceneView>,
     problems: Vec<ProblemView>,
     has_errors: bool,
+    /// Whether this folder is genuinely empty — no scenes, and nothing wrong
+    /// with it beyond having none yet.
+    ///
+    /// The window's "Choose photos…" screen is for exactly that folder, and
+    /// **only** that folder. Deciding it from `scenes.is_empty()` alone was
+    /// D-103's second half: a project whose every image failed its probe also
+    /// has no scenes, so the window offered to add photos to a folder that was
+    /// already full of them and threw away the problem list that said why. The
+    /// answer is computed here rather than in the webview because "is this
+    /// project empty" is a fact about the project (D-010).
+    empty: bool,
     /// The default voice a spoken scene gets, from `project.yaml`.
     voice: String,
     /// The default provider.
@@ -505,6 +516,11 @@ async fn validate_project(
             output_path: destination.display().to_string(),
             geometry: format!("{}x{} @ {} fps", spec.width(), spec.height(), spec.fps()),
             has_errors: project.has_errors(),
+            empty: project.scenes.is_empty()
+                && project
+                    .problems
+                    .iter()
+                    .all(|p| matches!(p.kind, spoonstill_core::ProblemKind::NoScenes)),
             scenes,
             problems,
         })

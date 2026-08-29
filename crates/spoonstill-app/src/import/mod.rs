@@ -83,6 +83,24 @@ pub trait MediaCheck {
     /// A sentence an operator can act on — already mapped from FFmpeg's
     /// stderr, never raw.
     fn check(&self, path: &Path, role: Role) -> Result<(), String>;
+
+    /// Whether this check can run at all on this machine (D-103).
+    ///
+    /// Asked **once, before any file is looked at**. A check whose subprocess
+    /// is not installed fails identically for every file, and answering that
+    /// per file states one installable fact five hundred times while burying
+    /// it under the operator's own filenames. Answered here, it is one
+    /// project-level problem that names the missing tool.
+    ///
+    /// The default is "it can", so a check that needs nothing — every
+    /// in-memory one in the tests below — implements only [`MediaCheck::check`].
+    ///
+    /// # Errors
+    ///
+    /// A sentence naming what is missing and what installs it.
+    fn ready(&self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// The real check: ask `ffprobe`.
@@ -110,6 +128,10 @@ impl Default for ProbeCheck {
 }
 
 impl MediaCheck for ProbeCheck {
+    fn ready(&self) -> Result<(), String> {
+        self.tools.ready()
+    }
+
     fn check(&self, path: &Path, role: Role) -> Result<(), String> {
         let probed = probe(&self.tools, path, self.timeout).map_err(|e| e.to_string())?;
         match role {
@@ -256,6 +278,19 @@ pub fn load(root: &Path, media: &dyn MediaCheck) -> Result<Project, ImportError>
     let rows = rows::collect(&root, &settings).map_err(ImportError::Rows)?;
     problems.extend(rows.problems);
 
+    // Whether the probe can run at all is asked once, here, and not once per
+    // file (D-103). When it cannot, the rows still resolve — the operator sees
+    // their scenes, and one problem tells them what to install — rather than
+    // every image being reported as unusable media, which is both untrue and
+    // unactionable.
+    let probes = media.ready();
+    if let Err(detail) = &probes {
+        problems.push(Problem::in_project(ProblemKind::ToolingMissing {
+            detail: detail.clone(),
+        }));
+    }
+    let probes = probes.is_ok();
+
     let Validation {
         scenes,
         problems: validation_problems,
@@ -269,7 +304,7 @@ pub fn load(root: &Path, media: &dyn MediaCheck) -> Result<Project, ImportError>
     let files: Vec<ResolvedFiles> = rows
         .drafts
         .iter()
-        .map(|draft| resolve_files(&root, draft, media, &mut problems))
+        .map(|draft| resolve_files(&root, draft, media, probes, &mut problems))
         .collect();
 
     let mut resolved = Vec::with_capacity(scenes.len());
@@ -359,6 +394,7 @@ fn resolve_files(
     root: &Path,
     draft: &spoonstill_core::SceneDraft,
     media: &dyn MediaCheck,
+    probes: bool,
     problems: &mut Vec<Problem>,
 ) -> ResolvedFiles {
     // A row whose id is unusable has already been reported as such; its path
@@ -378,9 +414,9 @@ fn resolve_files(
 
     ResolvedFiles {
         image: cell(&draft.image)
-            .and_then(|path| resolve_file(root, &id, &path, Role::Image, media, problems)),
+            .and_then(|path| resolve_file(root, &id, &path, Role::Image, media, probes, problems)),
         audio: cell(&draft.audio)
-            .and_then(|path| resolve_file(root, &id, &path, Role::Audio, media, problems)),
+            .and_then(|path| resolve_file(root, &id, &path, Role::Audio, media, probes, problems)),
     }
 }
 
@@ -390,6 +426,7 @@ fn resolve_file(
     requested: &Path,
     role: Role,
     media: &dyn MediaCheck,
+    probes: bool,
     problems: &mut Vec<Problem>,
 ) -> Option<PathBuf> {
     let value = requested.display().to_string();
@@ -422,6 +459,14 @@ fn resolve_file(
             },
         ));
         return None;
+    }
+
+    // `probes` is false only when the tooling itself is missing, which is
+    // already one problem on this project. The file is taken at its extension
+    // for now — the render cannot start regardless, and the operator gets to
+    // see the film they have been building instead of an empty window.
+    if !probes {
+        return Some(resolved);
     }
 
     if let Err(detail) = media.check(&resolved, role) {
@@ -508,6 +553,19 @@ mod tests {
     impl MediaCheck for Accepting {
         fn check(&self, _path: &Path, _role: Role) -> Result<(), String> {
             Ok(())
+        }
+    }
+
+    /// A machine with no FFmpeg on it: the probe cannot start at all.
+    struct Uninstalled;
+
+    impl MediaCheck for Uninstalled {
+        fn ready(&self) -> Result<(), String> {
+            Err("ffprobe could not be found on this machine — brew install ffmpeg".to_owned())
+        }
+
+        fn check(&self, _path: &Path, _role: Role) -> Result<(), String> {
+            unreachable!("no file is probed when the probe cannot run")
         }
     }
 
@@ -722,6 +780,39 @@ mod tests {
 
         assert_eq!(project.scenes.len(), 2);
         assert!(project.problems.is_empty(), "{:?}", project.problems);
+    }
+
+    /// D-103. The bug this test exists for opened a folder of six good
+    /// photographs as **zero scenes and six errors**, one per photograph, each
+    /// saying `\`image\` "001.jpeg": ffprobe could not be executed` — while the
+    /// operator's real problem was that the window, launched from Finder,
+    /// never had Homebrew on its `PATH`.
+    ///
+    /// Two things have to be true afterwards. The scenes are still there, so
+    /// the window has something to show. And the missing tool is said **once**,
+    /// about the project, naming what to install.
+    #[test]
+    fn a_machine_with_no_ffmpeg_says_so_once_and_still_shows_the_scenes() {
+        let scratch = Scratch::new(&[("001.jpeg", ""), ("002.jpeg", ""), ("003.jpeg", "")]);
+        let project = super::load(&scratch.0, &Uninstalled).expect("the folder still loads");
+
+        assert_eq!(
+            project.scenes.len(),
+            3,
+            "the photographs are not the problem"
+        );
+
+        let found = messages(project.errors());
+        assert_eq!(found.len(), 1, "once, not once per photograph: {found:?}");
+        assert!(found[0].contains("brew install ffmpeg"), "{found:?}");
+        assert!(
+            project.problems.iter().all(|p| p.scene.is_none()),
+            "it is a fact about the machine, so it belongs to no scene"
+        );
+
+        // And it still stops the render: a film cannot be made without FFmpeg,
+        // and D-002 says so now rather than forty minutes in.
+        assert!(project.has_errors());
     }
 
     #[test]

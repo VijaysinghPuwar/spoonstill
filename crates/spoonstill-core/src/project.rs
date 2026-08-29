@@ -413,6 +413,17 @@ pub enum ProblemKind {
     },
     /// The project resolved to no scenes at all.
     NoScenes,
+    /// The tooling a check needs is not on this machine (D-103).
+    ///
+    /// **Project-level, and deliberately not per scene.** A probe that cannot
+    /// start says nothing whatever about the operator's photographs, and
+    /// reporting it once per file turns one installable fact into five hundred
+    /// errors that each appear to be about a different image. Produced by the
+    /// application layer, before any file is probed.
+    ToolingMissing {
+        /// What is missing and how to install it — already a sentence.
+        detail: String,
+    },
     /// A project-level setting in `project.yaml` is unusable. Produced by the
     /// application layer.
     UnusableSetting {
@@ -503,6 +514,7 @@ impl fmt::Display for ProblemKind {
             ProblemKind::NoScenes => {
                 f.write_str("no scenes — no manifest rows and no image/narration pairs found")
             }
+            ProblemKind::ToolingMissing { detail } => f.write_str(detail),
             ProblemKind::UnusableSetting {
                 field,
                 value,

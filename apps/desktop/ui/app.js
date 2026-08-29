@@ -335,7 +335,10 @@ async function load(path) {
     restoreChoices();
   }
 
-  if (project.scenes.length === 0) {
+  // "Choose photos…" is for a folder that has none — not for one whose photos
+  // are all there and could not be read (D-103). Rust decides which this is;
+  // a project with problems goes to the grid, where the problem list is.
+  if (project.empty) {
     el("fill-name").textContent = project.name;
     show("fill");
     setStatus(project.root);
@@ -343,6 +346,7 @@ async function load(path) {
   }
   show("app");
   draw();
+  if (project.scenes.length === 0) tab("scenes");
 }
 
 // ------------------------------------------------------------------- adding

@@ -1746,6 +1746,65 @@ trailer.** The author is the only contributor and intends the history to say so.
 
 ---
 
+### D-103 — The window looks for FFmpeg where the operator installed it · Accepted
+
+Decided 2026-08-29, from a bug report of the plainest possible kind: *"I open
+the application and open the project and it's not opening."*
+
+The application opened. The project opened. `recent-projects.json` recorded the
+folder, which only happens after `validate_project` has **succeeded**. What
+came back was a project with zero scenes, so the window showed "Choose
+photos…" — over a folder holding six photographs.
+
+**The cause is that a macOS app launched from Finder does not get the
+operator's `PATH`.** launchd hands a GUI process
+`/usr/bin:/bin:/usr/sbin:/sbin`, and Homebrew is on none of it. `Tools::from_env`
+returned the bare name `"ffprobe"`, the spawn found nothing, and every still
+failed the D-052 probe. The same folder, validated in a terminal one second
+later, reported six scenes and no problems — which is the signature of this
+whole class of bug and the reason it survived every test we have: the test
+suite runs under `cargo`, in a shell, and a shell has Homebrew on its `PATH`.
+
+Three things were wrong, and all three are fixed.
+
+**One — the search.** `Tools::from_env` now resolves each program to an
+absolute path: `PATH` first, then the install prefixes of the package managers
+the README already tells the operator to use — `/opt/homebrew/bin`,
+`/usr/local/bin`, `/opt/local/bin` on macOS, winget's and Chocolatey's and
+Scoop's shim directories on Windows. That list is short on purpose. It is not a
+hunt for any FFmpeg on the disk; it is the set of directories a GUI process is
+missing.
+
+This is not the thing D-012 refuses. D-012 refuses *downloading* a build nobody
+chose, because a render made against an unknown binary is not reproducible.
+Finding the build the operator did choose is the opposite: resolving to an
+absolute path is **more** reproducible than a bare name handed to whatever
+`PATH` the process inherited, and the located path is what the diagnostics
+bundle now records. When nothing is found the bare name is returned unchanged,
+so `MediaError::BinaryMissing` still names what was tried.
+
+**Two — a missing tool is one fact about the machine.** The probe is asked
+`ready()` once, before any file is looked at, and a machine with no FFmpeg
+produces one project-level `ToolingMissing` problem naming `brew install
+ffmpeg`. Before, it produced one error per photograph, each apparently about a
+different photograph and none about the thing the operator had to do. The rows
+still resolve, so the window shows the film they have been building alongside
+the one sentence that explains why it cannot render yet. D-002: a sentence now,
+not a failure forty minutes in.
+
+**Three — "Choose photos…" is for a folder with no photos.** The window chose
+that screen from `scenes.length === 0`, which is also true of a project whose
+every image failed to load — so it offered to add photos to a folder that was
+full of them, and discarded the problem list that said why. `ProjectView` now
+carries `empty`, decided in Rust (D-010): no scenes, **and** nothing wrong
+beyond having none yet. Anything else goes to the grid, where the problems
+panel is.
+
+The general lesson, which is the one worth keeping: **a GUI process and a
+terminal process are different environments, and every test we own runs in the
+second one.** Anything reached by name rather than by path works in `cargo
+test` and can fail in the shipped `.app`. Reach for binaries by absolute path.
+
 ## Reference repositories
 
 ### D-080 — A project is made and filled by the program, not by the operator's file manager · Accepted
