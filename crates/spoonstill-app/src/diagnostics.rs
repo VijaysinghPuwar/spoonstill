@@ -35,6 +35,30 @@ pub fn environment() -> Vec<EnvironmentLine> {
     // GPL-vs-LGPL difference (D-062) explains a whole class of report.
     lines.push(line("ffmpeg build", configuration_of(tools.ffmpeg())));
 
+    // The speech tool is located the same way and fails the same way
+    // (D-104), so a bundle that says where FFmpeg is and not where `edge-tts`
+    // is answers half of "the window says I have no voice service".
+    for provider in crate::tts::providers() {
+        let key = format!("{} tooling", provider.id());
+        lines.push(line(
+            &key,
+            match provider.availability() {
+                crate::tts::Availability::Ready => "ready".to_owned(),
+                crate::tts::Availability::Missing(detail) => detail,
+            },
+        ));
+    }
+
+    // The `PATH` this process was given, which is the whole of D-103 and
+    // D-104 in one line: a window launched from Finder has launchd's four
+    // directories here, and a terminal has twenty. Every report of "it works
+    // in the terminal and not in the app" is settled by comparing this field
+    // between the two.
+    lines.push(line(
+        "PATH",
+        std::env::var("PATH").unwrap_or_else(|_| "<unset>".to_owned()),
+    ));
+
     lines.push(line(
         "working directory",
         std::env::current_dir().map_or_else(|_| "<unknown>".into(), |p| p.display().to_string()),
@@ -137,6 +161,10 @@ mod tests {
             "ffmpeg",
             "ffmpeg path",
             "ffmpeg build",
+            // D-103 and D-104: which binaries this process could actually
+            // reach, and the `PATH` that explains why.
+            "edge tooling",
+            "PATH",
         ] {
             assert!(keys.contains(&expected), "{expected} missing from {keys:?}");
         }

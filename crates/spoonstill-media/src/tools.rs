@@ -172,16 +172,31 @@ pub fn locate(program: &str) -> PathBuf {
 /// else.
 ///
 /// Deliberately short. This is not a hunt for any FFmpeg anywhere on the disk —
-/// it is the handful of directories that `brew install ffmpeg` and
-/// `winget install Gyan.FFmpeg` write to, which is precisely the set a GUI
-/// process is missing from its `PATH`.
+/// it is the handful of directories that `brew install ffmpeg`,
+/// `winget install Gyan.FFmpeg` and `pipx install edge-tts` write to, which is
+/// precisely the set a GUI process is missing from its `PATH`.
+///
+/// The per-user half of the list is D-104's: `pipx` and `pip --user` are how
+/// the README and the window's own Install button fetch `edge-tts`, and they
+/// write under the home directory rather than under a system prefix. A GUI
+/// process is missing those for the same launchd reason it is missing
+/// Homebrew's, so the install succeeds and the tool stays unfindable.
 fn package_manager_dirs() -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"]
+        let mut dirs: Vec<PathBuf> = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"]
             .iter()
             .map(PathBuf::from)
-            .collect()
+            .collect();
+        if let Some(home) = home_dir() {
+            // pipx, then the versioned directory `python3 -m pip install
+            // --user` writes to — `~/Library/Python/3.14/bin` today and a
+            // different number after the next Python, which is why it is read
+            // rather than spelled out.
+            dirs.push(home.join(".local/bin"));
+            dirs.extend(subdirectories(&home.join("Library/Python"), "bin"));
+        }
+        dirs
     }
 
     #[cfg(target_os = "windows")]
@@ -196,15 +211,24 @@ fn package_manager_dirs() -> Vec<PathBuf> {
         if let Some(data) = std::env::var_os("ProgramData") {
             dirs.push(PathBuf::from(&data).join(r"chocolatey\bin"));
         }
-        if let Some(home) = std::env::var_os("USERPROFILE") {
-            dirs.push(PathBuf::from(&home).join(r"scoop\shims"));
+        if let Some(home) = home_dir() {
+            dirs.push(home.join(r"scoop\shims"));
+            // pipx's own shims, then `pip install --user`, whose directory
+            // carries the Python version: `%APPDATA%\Python\Python314\Scripts`.
+            dirs.push(home.join(r".local\bin"));
+        }
+        if let Some(roaming) = std::env::var_os("APPDATA") {
+            dirs.extend(subdirectories(
+                &PathBuf::from(&roaming).join("Python"),
+                "Scripts",
+            ));
         }
         dirs
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        [
+        let mut dirs: Vec<PathBuf> = [
             "/usr/local/bin",
             "/usr/bin",
             "/bin",
@@ -213,8 +237,45 @@ fn package_manager_dirs() -> Vec<PathBuf> {
         ]
         .iter()
         .map(PathBuf::from)
-        .collect()
+        .collect();
+        if let Some(home) = home_dir() {
+            dirs.push(home.join(".local/bin"));
+        }
+        dirs
     }
+}
+
+/// This user's home directory, from the environment and nothing else.
+///
+/// No `dirs` crate: `spoonstill-media` has three dependencies and this is one
+/// variable. A GUI process launched by launchd or Explorer does lose `PATH`,
+/// but it keeps `HOME` / `USERPROFILE` — that is what makes the per-user half
+/// of [`package_manager_dirs`] reachable at all.
+fn home_dir() -> Option<PathBuf> {
+    let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(key)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// `parent/*/leaf`, for the one case where a package manager puts a version
+/// number in the path.
+///
+/// Sorted, so the answer does not depend on the order the file system hands
+/// entries back, and so the *newest* Python's directory is searched last
+/// rather than arbitrarily — a machine with two of them has two `edge-tts`
+/// shims and either runs.
+fn subdirectories(parent: &Path, leaf: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path().join(leaf))
+        .filter(|dir| dir.is_dir())
+        .collect();
+    found.sort();
+    found
 }
 
 /// A file that exists and that this user may execute.
@@ -311,5 +372,63 @@ mod tests {
     #[test]
     fn a_directory_is_not_an_executable() {
         assert!(!is_executable(&std::env::temp_dir()));
+    }
+
+    /// D-104. `pipx install edge-tts` writes under the home directory, and a
+    /// Finder-launched window is missing that for the same reason it is
+    /// missing Homebrew's `bin`. If the per-user prefixes are not searched,
+    /// the window's own Install button succeeds and the tool stays
+    /// unfindable.
+    #[test]
+    fn the_per_user_install_prefixes_are_searched_too() {
+        let Some(home) = home_dir() else {
+            return; // A machine with no `HOME` is not one we can say this about.
+        };
+        let dirs = package_manager_dirs();
+
+        #[cfg(windows)]
+        let user_local = home.join(r".local\bin");
+        #[cfg(not(windows))]
+        let user_local = home.join(".local/bin");
+        assert!(
+            dirs.contains(&user_local),
+            "pipx's directory is missing: {dirs:?}"
+        );
+        assert!(
+            dirs.iter().all(|dir| dir.is_absolute()),
+            "a relative candidate would be resolved against the working \
+             directory, which is the bug this whole module exists for: {dirs:?}"
+        );
+    }
+
+    /// The versioned directory `pip install --user` writes to is read from the
+    /// disk rather than spelled out, because the number changes with Python.
+    #[test]
+    fn a_versioned_directory_is_found_by_reading_and_not_by_guessing() {
+        let scratch = std::env::temp_dir().join(format!(
+            "spoonstill-tools-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(scratch.join("3.14/bin")).expect("scratch");
+        std::fs::create_dir_all(scratch.join("3.9/bin")).expect("scratch");
+        // A version that installed nothing, and a stray file: neither is a
+        // directory to search.
+        std::fs::create_dir_all(scratch.join("3.13")).expect("scratch");
+        std::fs::write(scratch.join("README"), b"").expect("scratch");
+
+        let found = subdirectories(&scratch, "bin");
+        assert_eq!(
+            found,
+            vec![scratch.join("3.14/bin"), scratch.join("3.9/bin")],
+            "sorted, and only the ones that are really there"
+        );
+        assert!(
+            subdirectories(&scratch.join("no-such-thing"), "bin").is_empty(),
+            "a parent that does not exist is not an error"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 }

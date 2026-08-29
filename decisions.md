@@ -1805,6 +1805,64 @@ terminal process are different environments, and every test we own runs in the
 second one.** Anything reached by name rather than by path works in `cargo
 test` and can fail in the shipped `.app`. Reach for binaries by absolute path.
 
+---
+
+### D-104 — Every binary this program spawns is located, not named · Accepted
+
+Decided 2026-08-29, the same day as D-103 and for the same reason, because
+D-103 fixed one binary and the window spawns three kinds.
+
+D-103's closing line is *"reach for binaries by absolute path"*, and it was
+applied to `ffmpeg` and `ffprobe` only. `Edge::from_env` still returned the
+bare name `"edge-tts"`, and `Provider::install` still spawned bare `pipx`,
+`brew` and `python3`. Under launchd's `/usr/bin:/bin:/usr/sbin:/sbin` that is
+the identical failure one screen to the left:
+
+- **The voice service reported itself missing on a machine that had it.**
+  Measured here: `edge-tts` is at `/opt/homebrew/bin/edge-tts`, and
+  `command -v edge-tts` under a launchd `PATH` finds nothing. The window's
+  Voice screen showed "not installed" over a working installation, and D-094's
+  pre-flight refused the render before the pool started — correctly, on a false
+  premise.
+- **The Install button that exists to fix that could not.** D-092 added it so
+  the window would not print `pip install edge-tts` and send the operator to a
+  terminal. Its three candidates were spawned by bare name, so all three
+  failed to start and it reported *"`pipx` is not on this machine"* about a
+  machine with pipx, brew and python3 on it. The one recovery path in the GUI
+  was broken by the same cause as the problem it recovers from.
+- **And an install that did work would still have been called a failure.**
+  `install()` re-checks `self.availability()` afterwards, using the path
+  resolved when the provider was built — which is stale by exactly the amount
+  that matters, because the binary did not exist yet when `from_env` looked.
+
+So: `Edge::from_env` uses `spoonstill_media::tools::locate`, every installer is
+located before it is spawned, and after a successful install the tool is
+**located again** before success is claimed.
+
+**`locate` also searches the per-user prefixes now**, which is the other half.
+`brew` writes to `/opt/homebrew/bin`; `pipx` and `pip --user` write under the
+home directory — `~/.local/bin`, and `~/Library/Python/3.14/bin`, whose number
+changes with Python and is therefore read from the disk rather than spelled
+out (`subdirectories`). On Windows the same two are `~\.local\bin` and
+`%APPDATA%\Python\Python3xx\Scripts`. This stays inside D-103's rule that
+the list is short and is not a hunt: these are the directories the README and
+the Install button themselves write to. A GUI process keeps `HOME` /
+`USERPROFILE` even when it loses `PATH`, which is what makes them reachable.
+
+**The bundle now records what the process could reach and why.** `edge tooling`
+is the provider's own `availability()`, and **`PATH`** is the raw value this
+process was handed. That one line settles every report of this shape: a window
+launched from Finder shows four directories there and a terminal shows twenty,
+and the difference *is* the bug. It is the field that would have answered
+D-103 in one reading instead of a bug report saying "it's not opening".
+
+The rule, stated so it covers the next one: **`Command::new` is never given a
+bare name in this codebase.** `spoonstill_media::tools::locate` is the only
+way a program name becomes something to spawn, and a name that resolves to
+nothing is handed back unchanged so the error still says what was looked for.
+
+---
+
 ## Reference repositories
 
 ### D-080 — A project is made and filled by the program, not by the operator's file manager · Accepted

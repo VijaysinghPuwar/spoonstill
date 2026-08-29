@@ -414,6 +414,33 @@ these builds are unsigned, un-notarized, have no updater and bundle no FFmpeg,
 and the README says so in as many words. Do not delete an M5 deliverable
 because a release exists.
 
+**A binary is located, never named** (D-103, D-104). "I open the application
+and open the project and it's not opening" was a folder of six photographs
+opening as **zero scenes**: a macOS app launched from Finder gets launchd's
+`PATH`, `/usr/bin:/bin:/usr/sbin:/sbin`, Homebrew is on none of it, `ffprobe`
+was a bare name, and every still failed its D-052 probe. **Every test we own
+runs in a shell, which is why nothing caught it.**
+`spoonstill_media::tools::locate` now resolves a program to an absolute path —
+`PATH` first, then the short list of prefixes the package managers in the
+README write to, system *and* per-user (`~/.local/bin` for pipx,
+`~/Library/Python/3.x/bin` for `pip --user`, read from the disk because the
+number changes). This is not what D-012 refuses: D-012 refuses *downloading* a
+build nobody chose, and an absolute path is more reproducible than a bare name,
+not less. Three things go with it. A probe that cannot start is asked
+`ready()` **once, before any file is read**, so a machine with no FFmpeg
+reports one project-level `ToolingMissing` naming `brew install ffmpeg` rather
+than one error per photograph. `ProjectView.empty` is decided in Rust, so
+"Choose photos…" is for a folder with no photos and a project with problems
+goes to the grid where the problem list is. And D-104 applied the same rule to
+the *other* binaries the window spawns: `edge-tts` had the identical bug one
+screen to the left — the Voice screen said "not installed" over a working
+installation — and the Install button that exists to fix that spawned bare
+`pipx`, `brew` and `python3`, so the one GUI recovery path was broken by the
+same cause as the problem it recovers from. The diagnostics bundle now carries
+`edge tooling` and the raw **`PATH`**, which is the one line that settles this
+whole class of report. The rule: **`Command::new` is never given a bare name in
+this codebase.**
+
 **The tag is the version, and a tag can hold a commit the branch does not**
 (D-102). `[workspace.package] version` said `0.1.0` through the v0.1.1 and
 v0.1.2 releases, so every published binary answered `still --version` with
@@ -519,7 +546,8 @@ constant timeout, and D-097 before touching a release workflow's toolchain
 setup, D-098 before renaming an asset, D-099 before touching an installer's
 quarantine handling, D-100 before touching `arrange` or the Scenes rows, and
 D-102 before cutting a release, bumping a version, or writing a commit
-message**. D-054 through D-057 and D-075 through D-082 were added during M2 and
+message, and D-103/D-104 before spawning a program, touching `tools::locate`,
+the `MediaCheck::ready` pre-flight, or the window's empty-project screen**. D-054 through D-057 and D-075 through D-082 were added during M2 and
 are all Accepted — read D-056 before touching the import path, D-057 before
 touching concat or transitions, D-076/D-077 before touching the pool, D-078
 before changing what the finished film is asserted against, D-079 before

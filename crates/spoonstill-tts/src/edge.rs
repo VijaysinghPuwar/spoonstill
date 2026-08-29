@@ -65,6 +65,7 @@ use std::time::Duration;
 
 use spoonstill_media::atomic;
 use spoonstill_media::command::FfmpegCommand;
+use spoonstill_media::tools::locate;
 
 use crate::{Availability, Provider, Request, Spoken, TtsError, Voice, opening};
 
@@ -122,6 +123,9 @@ fn last_line(stderr: &str) -> String {
 /// `spoonstill_media::tools` (D-012: no auto-download, no candidate search).
 pub const EDGE_TTS_ENV: &str = "SPOONSTILL_EDGE_TTS";
 
+/// The command this provider runs, before it is located on a machine.
+const PROGRAM: &str = "edge-tts";
+
 /// The name used in `project.yaml`.
 pub const ID: &str = "edge";
 
@@ -134,6 +138,26 @@ fn how_to_install(program: &Path) -> String {
          {EDGE_TTS_ENV} at it.",
         program.display()
     )
+}
+
+/// Whether `program` can be run right now, and what to say if it cannot.
+///
+/// A free function rather than a method because [`Provider::install`] has to
+/// ask it about a path that is **not** `self.program`: the binary it just
+/// fetched did not exist when this provider was built, so the located path is
+/// stale by exactly the amount that matters (D-104).
+fn availability_of(program: &Path) -> Availability {
+    let mut command = FfmpegCommand::new(program);
+    command.arg("--version");
+    match command.spawn().and_then(|c| c.wait_until(LIMIT_VERSION)) {
+        Ok(finished) if finished.status.success() => Availability::Ready,
+        Ok(finished) => Availability::Missing(format!(
+            "`{} --version` failed: {}",
+            program.display(),
+            last_line(&finished.stderr)
+        )),
+        Err(_) => Availability::Missing(how_to_install(program)),
+    }
 }
 
 /// What a line's ceiling starts at, before its length is considered.
@@ -665,12 +689,21 @@ pub struct Edge {
 }
 
 impl Edge {
-    /// Use whichever binary the environment names, falling back to `PATH`.
+    /// Use whichever binary the environment names, else the one this machine
+    /// has.
+    ///
+    /// The override wins and is taken verbatim; otherwise
+    /// [`spoonstill_media::tools::locate`] resolves it to an absolute path.
+    /// **`PATH` alone is not enough** — D-103 for FFmpeg, D-104 for this: a
+    /// macOS app launched from Finder gets launchd's
+    /// `/usr/bin:/bin:/usr/sbin:/sbin`, and `pipx` and `brew` put `edge-tts`
+    /// on neither. The window reported the voice service as missing on a
+    /// machine that had it installed, and pressing Install did not help,
+    /// because the installers were reached by bare name too.
     #[must_use]
     pub fn from_env() -> Self {
         Edge {
-            program: std::env::var_os(EDGE_TTS_ENV)
-                .map_or_else(|| PathBuf::from("edge-tts"), PathBuf::from),
+            program: std::env::var_os(EDGE_TTS_ENV).map_or_else(|| locate(PROGRAM), PathBuf::from),
             retry: Retry::default(),
         }
     }
@@ -837,17 +870,7 @@ impl Provider for Edge {
     }
 
     fn availability(&self) -> Availability {
-        let mut command = FfmpegCommand::new(&self.program);
-        command.arg("--version");
-        match command.spawn().and_then(|c| c.wait_until(LIMIT_VERSION)) {
-            Ok(finished) if finished.status.success() => Availability::Ready,
-            Ok(finished) => Availability::Missing(format!(
-                "`{} --version` failed: {}",
-                self.program.display(),
-                last_line(&finished.stderr)
-            )),
-            Err(_) => Availability::Missing(how_to_install(&self.program)),
-        }
+        availability_of(&self.program)
     }
 
     fn default_voice(&self) -> &str {
@@ -872,23 +895,29 @@ impl Provider for Edge {
         let mut tried: Vec<String> = Vec::new();
 
         for (program, args) in INSTALLERS {
-            let mut command = FfmpegCommand::new(*program);
+            // Located, not named. A package manager is exactly as invisible to
+            // a Finder-launched window as the tool it installs (D-104), so an
+            // Install button reached by bare name reports "`pipx` is not on
+            // this machine" on a machine that has all three of them.
+            let mut command = FfmpegCommand::new(locate(program));
             command.args(*args);
             let shown = command.display();
 
             match command.spawn().and_then(|c| c.wait_until(INSTALL_TIMEOUT)) {
                 Ok(finished) if finished.status.success() => {
-                    // Present is not the same as runnable: a `pip --user`
-                    // install can land somewhere that is not on PATH, and
-                    // reporting success there would be reporting a lie.
-                    return match self.availability() {
+                    // Present is not the same as runnable, and the path this
+                    // provider was built with is stale by construction: the
+                    // binary did not exist when `from_env` looked. Locate it
+                    // again, and only then claim success.
+                    let installed = locate(PROGRAM);
+                    return match availability_of(&installed) {
                         Availability::Ready => Ok(shown),
                         Availability::Missing(detail) => Err(TtsError::Unavailable {
                             provider: ID.to_owned(),
                             detail: format!(
-                                "`{shown}` succeeded but {} still cannot be run \
-                                 — it is probably not on PATH. {detail}",
-                                self.program.display()
+                                "`{shown}` succeeded but {PROGRAM} still cannot be run \
+                                 — it landed somewhere this application does not look. \
+                                 {detail}"
                             ),
                         }),
                     };
@@ -1982,5 +2011,45 @@ aiohttp.client_exceptions.ClientProxyConnectionError: Cannot connect to host 127
         assert!(!looks_like_audio(b"{\"error\":\"429\"}"));
         assert!(!looks_like_audio(b"Traceback (most"));
         assert!(!looks_like_audio(b""));
+    }
+
+    /// D-104. The provider is reached by absolute path, or not at all.
+    ///
+    /// The failure this replaces: a window launched from Finder has launchd's
+    /// `PATH`, `pipx` puts `edge-tts` in `~/.local/bin`, and a bare name found
+    /// neither — so the operator was told to install a tool they had already
+    /// installed, and the Install button that was supposed to fix it reported
+    /// that `pipx` was not on the machine either.
+    ///
+    /// Skipped where this machine genuinely has no `edge-tts`: then the bare
+    /// name is the right answer, which is the assertion below it.
+    #[test]
+    fn an_installed_edge_tts_is_found_by_absolute_path() {
+        // Not `Edge::from_env()`: this developer's shell may export the
+        // override, and the override is deliberately verbatim.
+        let found = locate(PROGRAM);
+        if found == Path::new(PROGRAM) {
+            return;
+        }
+        assert!(found.is_absolute(), "{}", found.display());
+        assert_eq!(
+            found.file_name().and_then(|n| n.to_str()),
+            Some(if cfg!(windows) {
+                "edge-tts.exe"
+            } else {
+                PROGRAM
+            }),
+            "{}",
+            found.display()
+        );
+    }
+
+    /// And when it really is nowhere, the name survives so every message about
+    /// it — `how_to_install`, `BinaryMissing` — still says `edge-tts`.
+    #[test]
+    fn a_provider_that_is_nowhere_still_names_itself() {
+        let nowhere = Edge::at(PROGRAM);
+        assert!(how_to_install(nowhere.program()).contains(PROGRAM));
+        assert!(how_to_install(nowhere.program()).contains(EDGE_TTS_ENV));
     }
 }
