@@ -148,24 +148,34 @@ const INSTALL_HINT: &str = "your package manager's ffmpeg";
 /// still happens and [`crate::MediaError::BinaryMissing`] still names it.
 #[must_use]
 pub fn locate(program: &str) -> PathBuf {
-    let name = if cfg!(windows) {
-        format!("{program}.exe")
-    } else {
-        program.to_owned()
-    };
-
     let on_path = std::env::var_os("PATH")
         .into_iter()
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>());
 
-    for dir in on_path.chain(package_manager_dirs()) {
-        let candidate = dir.join(&name);
-        if is_executable(&candidate) {
-            return candidate;
-        }
-    }
+    locate_in(on_path.chain(package_manager_dirs()), program)
+        .unwrap_or_else(|| PathBuf::from(program))
+}
 
-    PathBuf::from(program)
+/// The search itself, over whichever directories the caller offers.
+///
+/// Separate from [`locate`] so the interesting case is testable without
+/// touching the process environment: **a caller that offers no `PATH` at all**
+/// is exactly the GUI process D-103 is about, and `set_var` is not something
+/// one test may do to every other test in the binary.
+fn locate_in(dirs: impl IntoIterator<Item = PathBuf>, program: &str) -> Option<PathBuf> {
+    let name = executable_name(program);
+    dirs.into_iter()
+        .map(|dir| dir.join(&name))
+        .find(|candidate| is_executable(candidate))
+}
+
+/// What the file is actually called on this platform.
+fn executable_name(program: &str) -> String {
+    if cfg!(windows) {
+        format!("{program}.exe")
+    } else {
+        program.to_owned()
+    }
 }
 
 /// The install prefixes of the package managers the README names, and nothing
@@ -320,40 +330,63 @@ mod tests {
         );
     }
 
-    /// The whole of D-103 in one test: a process whose `PATH` does not name
-    /// FFmpeg still finds it, as long as this machine has one at all.
+    /// The whole of D-103, deterministically: a search that is offered **no
+    /// `PATH`** still finds a binary sitting in one of the directories a
+    /// package manager writes to.
     ///
-    /// This is what a macOS app launched from Finder is — launchd hands it
-    /// `/usr/bin:/bin:/usr/sbin:/sbin` and nothing else. Skipped where the
-    /// machine genuinely has no FFmpeg, because then there is nothing to find
-    /// and the interesting assertion is the one above.
+    /// That is precisely a macOS app launched from Finder, which launchd hands
+    /// `/usr/bin:/bin:/usr/sbin:/sbin` and nothing else. The directory here is
+    /// a temporary one rather than the machine's real Homebrew, so this proves
+    /// the mechanism on a runner that has FFmpeg nowhere at all.
     #[test]
-    fn a_gui_path_still_finds_a_package_managers_ffmpeg() {
-        let Some(installed) = package_manager_dirs()
-            .into_iter()
-            .map(|dir| {
-                dir.join(if cfg!(windows) {
-                    "ffprobe.exe"
-                } else {
-                    "ffprobe"
-                })
-            })
-            .find(|candidate| is_executable(candidate))
-        else {
-            return;
-        };
+    fn a_process_with_no_useful_path_still_finds_an_installed_binary() {
+        let dir = std::env::temp_dir().join(format!("spoonstill-d103-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let planted = dir.join(executable_name("ffprobe"));
+        // Contents are irrelevant and deliberately not a script: this file is
+        // found, never run, and `no_shell_strings.rs` is right to object to a
+        // shell path appearing anywhere in this crate's source.
+        std::fs::write(&planted, "not a real program").expect("plant a binary");
+        make_executable(&planted);
 
-        // Not `set_var`: this test says what `locate` does when `PATH` is
-        // useless, and mutating the environment is unsound with other tests
-        // running in the same process. The `PATH` branch is empty here by
-        // construction, so the package-manager branch is what answers.
-        let found = package_manager_dirs()
-            .into_iter()
-            .map(|dir| dir.join("ffprobe"))
-            .find(|candidate| is_executable(candidate));
+        let found = locate_in([dir.clone()], "ffprobe").expect("the planted binary is found");
+        assert_eq!(found, planted);
+        assert!(found.is_absolute(), "{}", found.display());
 
-        assert_eq!(found.as_deref(), Some(installed.as_path()));
-        assert!(installed.is_absolute(), "{}", installed.display());
+        // And a program that is not in that directory is not invented.
+        assert_eq!(locate_in([dir.clone()], "ffmpeg"), None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Whatever this machine has, `locate` answers with something the spawn can
+    /// use: an absolute path when FFmpeg is installed, the bare name when it is
+    /// not — never a half-formed guess.
+    #[test]
+    fn locate_answers_with_an_absolute_path_or_the_bare_name() {
+        let found = locate("ffprobe");
+        assert!(
+            found.is_absolute() || found == Path::new("ffprobe"),
+            "{}",
+            found.display()
+        );
+        if found.is_absolute() {
+            assert!(is_executable(&found), "{}", found.display());
+        }
+    }
+
+    /// Give a planted file the execute bit, where the platform has one.
+    fn make_executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod +x");
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+        }
     }
 
     /// `ready` is the sentence an operator acts on, so it has to name both the
