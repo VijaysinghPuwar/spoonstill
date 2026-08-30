@@ -3,7 +3,7 @@
 #   irm https://raw.githubusercontent.com/VijaysinghPuwar/spoonstill/master/scripts/install.ps1 | iex
 #
 # What it does, in order, and nothing else:
-#   1. downloads the x64 build and the checksum published beside it, and verifies
+#   1. downloads the x64 build, and verifies it against the release's SHA256SUMS.txt
 #   2. installs still.exe under %LOCALAPPDATA%\Programs\spoonstill\bin
 #   3. puts that folder on the user PATH, if it is not there already
 #   4. checks for FFmpeg, and offers to install it through winget
@@ -57,12 +57,30 @@ try {
   Step "Downloading $Asset"
   $zip = Join-Path $Tmp $Asset
   Invoke-WebRequest -Uri "$Base/$Asset" -OutFile $zip -UseBasicParsing
-  $sumFile = "$zip.sha256"
-  Invoke-WebRequest -Uri "$Base/$Asset.sha256" -OutFile $sumFile -UseBasicParsing
+
+  # One list for the whole release rather than a `.sha256` beside every asset
+  # (D-133). The line for this file is found by name; a name that is not in the
+  # list is a failure and not a skip, or the check would pass by finding
+  # nothing to do.
+  $sumFile = Join-Path $Tmp 'SHA256SUMS.txt'
+  Invoke-WebRequest -Uri "$Base/SHA256SUMS.txt" -OutFile $sumFile -UseBasicParsing
 
   Step "Verifying checksum"
-  $expected = (Get-Content $sumFile -Raw).Trim().Split(' ')[0].ToLower()
-  $actual   = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+  $expected = $null
+  foreach ($line in Get-Content $sumFile) {
+    # Each line is `hash  name`, the shape `shasum -a 256` writes. Split on
+    # whitespace and compare the name **exactly**, so `still-Windows.zip`
+    # cannot be satisfied by some longer name that merely ends in it.
+    $parts = $line.Trim() -split '\s+', 2
+    if ($parts.Count -eq 2 -and $parts[1].TrimStart('*') -eq $Asset) {
+      $expected = $parts[0].ToLower()
+      break
+    }
+  }
+  if (-not $expected) {
+    Die "$Asset is not listed in SHA256SUMS.txt - refusing to install something the release does not vouch for."
+  }
+  $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
   if ($expected -ne $actual) {
     Die "Checksum mismatch. The download is not the published build - nothing installed."
   }

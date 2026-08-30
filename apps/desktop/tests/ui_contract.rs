@@ -65,6 +65,27 @@ fn code_only(text: &str) -> String {
         .join("\n")
 }
 
+/// Strip `/* … */` blocks, so a comment explaining a rule is not read as one.
+///
+/// The CSS counterpart of [`code_only`], and it earned its place immediately:
+/// the comment above the platform rule names the negated selector it exists to
+/// warn against, and without this the test that forbids that selector fails on
+/// the prose forbidding it.
+fn css_code_only(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("/*") {
+        out.push_str(&rest[..at]);
+        rest = &rest[at + 2..];
+        match rest.find("*/") {
+            Some(end) => rest = &rest[end + 2..],
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Every `el("literal")` in `text`, ignoring ids built by concatenation.
 ///
 /// `el("pane-" + name)` names a whole family of elements and says nothing
@@ -218,4 +239,43 @@ fn every_command_that_writes_names_the_project_it_means() {
              project it means and will refuse it: {window}"
         );
     }
+}
+
+/// The traffic-light reservation is macOS's, and it says so.
+///
+/// `titleBarStyle: "Overlay"` is macOS-only — Tauri's `title_bar_style` is
+/// behind `#[cfg(target_os = "macos")]`, so Windows ignores it silently and
+/// keeps its native title bar. The 82px at the left of `.titlebar` is room for
+/// traffic lights that only exist under overlay; unguarded, it is a gap under
+/// a Windows title bar with nothing in it.
+///
+/// Asserted rather than clicked for D-088's reason twice over: there is no
+/// Windows machine here, and a webview accepts a wrong layout without a word.
+/// The negated form of the CSS rule is the trap this pins shut — `data-os` does
+/// not exist until `app.js` runs, so `:not([data-os="macos"])` would match in
+/// that gap and shove the mark under the traffic lights on every macOS launch.
+#[test]
+fn the_traffic_light_padding_is_asked_for_by_platform() {
+    let css = css_code_only(&read("styles.css"));
+    let js = code_only(&read("app.js"));
+
+    assert!(
+        js.contains("dataset.os"),
+        "app.js no longer tells the stylesheet which platform it is on, so the \
+         macOS traffic-light padding is applied on Windows too"
+    );
+
+    assert!(
+        css.contains(r#"[data-os="windows"]"#),
+        "styles.css no longer gives the 82px traffic-light reservation back on \
+         Windows, where there are no traffic lights to reserve it for"
+    );
+
+    // The default has to remain macOS: the attribute is absent until the module
+    // loads, and a rule keyed on its absence fires in that window.
+    assert!(
+        !css.contains(r#":not([data-os="macos"])"#),
+        "the platform rule is negated, so it matches before app.js sets the \
+         attribute and macOS flashes its title bar under the traffic lights"
+    );
 }

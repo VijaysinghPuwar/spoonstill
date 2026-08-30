@@ -18,6 +18,27 @@ const { invoke, Channel, convertFileSrc } = window.__TAURI__.core;
 // Same command, same capability check in Rust.
 const dialog = (options) => invoke("plugin:dialog|open", { options });
 
+// Which operating system is drawing this window, as an attribute the
+// stylesheet can branch on.
+//
+// `titleBarStyle: "Overlay"` in tauri.conf.json is **macOS only** — Tauri's
+// `title_bar_style` is behind `#[cfg(target_os = "macos")]`, so on Windows it
+// is ignored without a word and the window keeps its native title bar. The
+// stylesheet reserves 82px at the left of `.titlebar` for the traffic lights
+// that overlay puts there; on Windows there are no traffic lights and that
+// reservation is dead space under a title bar we did not ask for. Same shape
+// as D-088: a macOS assumption that a webview accepts silently.
+//
+// The default is macOS, so that machine renders exactly as it did before this
+// line existed and never flashes; a non-Mac corrects itself as the module
+// loads. It cannot be an inline script in index.html — the CSP is
+// `script-src 'self'`, which forbids one.
+document.documentElement.dataset.os = /Mac|iPhone|iPad/.test(navigator.userAgent)
+  ? "macos"
+  : /Windows/.test(navigator.userAgent)
+    ? "windows"
+    : "other";
+
 const el = (id) => document.getElementById(id);
 const MEDIA = [
   "jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp", "heic",

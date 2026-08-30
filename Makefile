@@ -12,7 +12,10 @@ export PATH := /opt/homebrew/opt/rustup/bin:$(PATH)
 CARGO ?= cargo
 
 .DEFAULT_GOAL := help
-.PHONY: help test tts-live lint fmt fixtures brand check clean gates gates-m0 gates-m1 gates-m2
+# Scratch for `make demo`. Outside the tree: it holds a render, not a fixture.
+DEMO_DIR ?= $(CURDIR)/target/demo
+
+.PHONY: help test tts-live lint fmt fixtures brand demo check clean gates gates-m0 gates-m1 gates-m2
 
 help: ## Show available targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -36,6 +39,20 @@ fmt: ## Reformat the workspace in place
 
 brand: ## Regenerate every logo asset from its one description (D-079)
 	@python3 scripts/gen-brand.py
+
+demo: ## Rebuild README.md's demo GIF from a real render (D-134)
+	@command -v ffmpeg >/dev/null || { echo "needs ffmpeg"; exit 1; }
+	python3 scripts/gen-demo.py $(DEMO_DIR)
+	cargo build --release -p spoonstill-cli
+	./target/release/still render $(DEMO_DIR) --out $(DEMO_DIR)/demo.mp4 \
+	  --subtitles boxed --voice en-GB-RyanNeural
+	ffmpeg -hide_banner -loglevel error -y -i $(DEMO_DIR)/demo.mp4 \
+	  -vf "fps=10,scale=640:-1:flags=lanczos,palettegen=max_colors=96:stats_mode=diff" \
+	  $(DEMO_DIR)/palette.png
+	ffmpeg -hide_banner -loglevel error -y -i $(DEMO_DIR)/demo.mp4 -i $(DEMO_DIR)/palette.png \
+	  -lavfi "fps=10,scale=640:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" \
+	  assets/demo/render.gif
+	@ls -lh assets/demo/render.gif | awk '{print "  assets/demo/render.gif", $$5}'
 
 fixtures: ## Generate the synthetic test fixtures (see scripts/gen-fixtures.sh)
 	@bash scripts/gen-fixtures.sh

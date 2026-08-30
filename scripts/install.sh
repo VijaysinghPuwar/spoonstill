@@ -5,7 +5,7 @@
 #
 # What it does, in order, and nothing else:
 #   1. works out which build this machine needs
-#   2. downloads that build and the checksum published beside it, and verifies
+#   2. downloads that build, and verifies it against the release's SHA256SUMS.txt
 #   3. installs the `still` binary into ~/.local/bin
 #   4. installs the window into /Applications, without the Gatekeeper dialog
 #   5. checks for FFmpeg, and offers to install it through Homebrew
@@ -86,14 +86,27 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 step "Downloading $ASSET"
-curl -fSL --progress-bar -o "$tmp/$ASSET"        "$BASE/$ASSET" \
+curl -fSL --progress-bar -o "$tmp/$ASSET" "$BASE/$ASSET" \
   || die "Could not download $BASE/$ASSET"
-curl -fsSL              -o "$tmp/$ASSET.sha256"  "$BASE/$ASSET.sha256" \
-  || die "Could not download the checksum for $ASSET. Refusing to install unverified."
+
+# One list for the whole release rather than a `.sha256` beside every asset
+# (D-133), so the release page is five downloads and not eleven. `verify` picks
+# out this file's line; a name that is not in the list is a failure and not a
+# skip, which is the whole point of checking.
+SUMS="SHA256SUMS.txt"
+curl -fsSL -o "$tmp/$SUMS" "$BASE/$SUMS" \
+  || die "Could not download $SUMS. Refusing to install unverified."
+
+verify() {
+  line=$(grep -E "[ *]$1\$" "$tmp/$SUMS" || true)
+  [ -n "$line" ] \
+    || die "$1 is not listed in $SUMS — refusing to install something the release does not vouch for."
+  ( cd "$tmp" && printf '%s\n' "$line" | shasum -a 256 -c - >/dev/null ) \
+    || die "Checksum mismatch on $1. The download is not the published build — nothing installed."
+}
 
 step "Verifying checksum"
-( cd "$tmp" && shasum -a 256 -c "$ASSET.sha256" >/dev/null ) \
-  || die "Checksum mismatch. The download is not the published build — nothing installed."
+verify "$ASSET"
 
 # --- 3. install --------------------------------------------------------------
 
@@ -120,11 +133,9 @@ if [ -n "$SKIP_APP" ]; then
 else
   APP="spoonstill-macOS.dmg"
   step "Downloading $APP"
-  if curl -fSL --progress-bar -o "$tmp/$APP" "$BASE/$APP" \
-     && curl -fsSL -o "$tmp/$APP.sha256" "$BASE/$APP.sha256"; then
+  if curl -fSL --progress-bar -o "$tmp/$APP" "$BASE/$APP"; then
 
-    ( cd "$tmp" && shasum -a 256 -c "$APP.sha256" >/dev/null ) \
-      || die "Checksum mismatch on $APP. Nothing installed."
+    verify "$APP"
 
     mnt="$tmp/mnt"
     mkdir -p "$mnt"

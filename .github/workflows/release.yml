@@ -96,8 +96,6 @@ jobs:
           2. If SmartScreen objects: **More info > Run anyway**
           3. Launch spoonstill from the Start Menu
 
-          The `.msi` is the same app for anyone who deploys with one.
-
           ## Get the command line
 
           The CLI is the complete control surface — the window owns no logic
@@ -153,9 +151,11 @@ jobs:
           On Windows, SmartScreen says the publisher is unknown: **More info >
           Run anyway**.
 
-          Signing and notarization are M5 work rather than an oversight. Every
-          asset has a `.sha256` beside it, and the installers refuse to install
-          anything whose checksum does not match.
+          Signing and notarization are M5 work rather than an oversight.
+          `SHA256SUMS.txt` lists the checksum of every file here, and the
+          installers refuse to install anything that does not match its line.
+          You do not need to do anything with it — it is there so the install
+          can check itself, and so you can, if you want to.
           NOTES
           )"
 
@@ -303,7 +303,7 @@ jobs:
           - os: windows-2022
             target: x86_64-pc-windows-msvc
             rust-targets: x86_64-pc-windows-msvc
-            bundles: nsis,msi
+            bundles: nsis
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -351,16 +351,14 @@ jobs:
         shell: bash
         run: |
           out="dist"; mkdir -p "$out"
-          # Tauri names its bundles `spoonstill_0.1.0_x64_en-US.msi`, which
-          # carries a version the tag already states and a locale nobody chose.
-          # Renamed on the way out (D-098): the person downloading is choosing
-          # an operating system, so the file is named after one.
+          # Tauri names its bundles `spoonstill_0.1.0_x64-setup.exe`, which
+          # carries a version the tag already states and an architecture nobody
+          # chose. Renamed on the way out (D-098): the person downloading is
+          # choosing an operating system, so the file is named after one.
           find "target/${{ matrix.target }}/release/bundle" -type f -name '*.dmg' \
                -exec cp {} "$out/spoonstill-macOS.dmg" \;
           find "target/${{ matrix.target }}/release/bundle" -type f -name '*-setup.exe' \
                -exec cp {} "$out/spoonstill-Windows-Installer.exe" \;
-          find "target/${{ matrix.target }}/release/bundle" -type f -name '*.msi' \
-               -exec cp {} "$out/spoonstill-Windows-Installer.msi" \;
           ls -1 "$out" | grep . || { echo "::error::the bundler produced nothing"; exit 1; }
           cd "$out"
           sum() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1"; else sha256sum "$1"; fi; }
@@ -389,16 +387,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          # The exact set, not a count (D-125). A count of twelve is satisfied
-          # by twelve *wrong* files — a leg that uploaded a stale asset from a
+          # The exact set, not a count (D-125). A count is satisfied by that
+          # many *wrong* files — a leg that uploaded a stale asset from a
           # re-run, or a rename that D-098 warns turns every installer into a
           # 404. These names are the contract `install.sh` and `install.ps1`
           # construct, and a test in the workspace asserts they still agree.
+          #
+          # This is what the build jobs upload. It is **not** what the finished
+          # release shows: the five `.sha256` files are folded into one
+          # `SHA256SUMS.txt` below and then deleted (D-133).
           expected=$(cat <<'NAMES'
           spoonstill-Windows-Installer.exe
           spoonstill-Windows-Installer.exe.sha256
-          spoonstill-Windows-Installer.msi
-          spoonstill-Windows-Installer.msi.sha256
           spoonstill-macOS.dmg
           spoonstill-macOS.dmg.sha256
           still-Windows.zip
@@ -436,5 +436,23 @@ jobs:
             sha256sum -c "$sum"
           done
 
-          echo "12 assets, every checksum verified"
+          # One checksum file, not five beside five downloads (D-133). The
+          # release page is read by someone choosing which file to click, and
+          # a `.sha256` twin after every real asset doubled that list without
+          # answering the only question they have. The verification above is
+          # unchanged — the sums are still computed by the job that built each
+          # binary, and still checked here before anything is published.
+          cat *.sha256 | sort -k2 > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release upload "$TAG" SHA256SUMS.txt --clobber
+
+          # And then the twins go, so the finished page is five downloads and
+          # one list. Deleted only after SHA256SUMS.txt is up: a failure
+          # between the two leaves a release with too many checksums rather
+          # than none.
+          for sum in *.sha256; do
+            gh release delete-asset "$TAG" "$sum" --yes
+          done
+
+          echo "5 assets and one SHA256SUMS.txt, every checksum verified"
           gh release edit "$TAG" --draft=false --latest

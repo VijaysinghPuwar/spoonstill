@@ -1,6 +1,6 @@
 [package]
 name = "spoonstill-tts"
-description = "TTS provider trait plus ElevenLabs and Edge implementations."
+description = "The TTS provider trait, and the Edge implementation. ElevenLabs is not written yet."
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true

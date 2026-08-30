@@ -1,6 +1,6 @@
 [package]
 name = "spoonstill-state"
-description = "SQLite render state, checkpoints, and the cache index."
+description = "The JSON Lines event log and the diagnostics bundle. No SQLite yet — that is M3."
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true

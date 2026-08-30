@@ -10,15 +10,21 @@
 
 use std::path::{Path, PathBuf};
 
-/// Every asset a finished release carries, without the `.sha256` companions.
-const ASSETS: [&str; 6] = [
+/// Every asset a finished release carries, without `SHA256SUMS.txt`.
+///
+/// Five, not six: the `.msi` was the same Windows app as the `.exe` and asked
+/// the person downloading to choose between two things that install the same
+/// program (D-133).
+const ASSETS: [&str; 5] = [
     "still-macOS-AppleSilicon.tar.gz",
     "still-macOS-Intel.tar.gz",
     "still-Windows.zip",
     "spoonstill-macOS.dmg",
     "spoonstill-Windows-Installer.exe",
-    "spoonstill-Windows-Installer.msi",
 ];
+
+/// The one file that carries every checksum (D-133).
+const SUMS: &str = "SHA256SUMS.txt";
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -34,6 +40,10 @@ fn read(relative: &str) -> String {
 
 /// The publish gate lists the exact set, so every asset — and every checksum
 /// beside it — has to appear in it.
+///
+/// The gate's list is what the **build jobs upload**, which is still one
+/// `.sha256` per asset: they are computed by the job that built each binary and
+/// verified here, and only then folded into one file (D-133).
 #[test]
 fn the_publish_gate_lists_every_asset_and_its_checksum() {
     let workflow = read(".github/workflows/release.yml");
@@ -102,6 +112,74 @@ fn the_installers_ask_for_the_names_the_release_publishes() {
         windows.contains("still-Windows.zip"),
         "install.ps1 does not mention still-Windows.zip"
     );
+}
+
+/// D-133. The finished release page is five downloads and one list.
+///
+/// The build jobs still write a `.sha256` per asset and the publish gate still
+/// verifies every one of them — that check is what catches a corrupted upload,
+/// and it happens before anybody can download anything. What changed is the
+/// *page*: the five twins are folded into `SHA256SUMS.txt` and then deleted, so
+/// someone choosing a file to click reads five names instead of eleven.
+///
+/// Three ways this breaks silently, one assertion each: the gate stops making
+/// the file (installers 404), it stops deleting the twins (the page is noisy
+/// again and nobody notices, because everything still works), or an installer
+/// keeps asking for the per-asset name that no longer exists.
+#[test]
+fn the_release_publishes_one_checksum_file_and_deletes_the_twins() {
+    let workflow = read(".github/workflows/release.yml");
+
+    assert!(
+        workflow.contains(&format!("> {SUMS}"))
+            && workflow.contains(&format!("upload \"$TAG\" {SUMS}")),
+        "{SUMS} is never built or never uploaded, so both installers download a \
+         404 and refuse to install anything"
+    );
+    assert!(
+        workflow.contains("gh release delete-asset"),
+        "the per-asset .sha256 files are uploaded and never removed, so the \
+         release page is back to a checksum twin after every download"
+    );
+
+    // Both installers read the one file, and neither constructs the old name.
+    for installer in ["scripts/install.sh", "scripts/install.ps1"] {
+        let text = read(installer);
+        assert!(
+            text.contains(SUMS),
+            "{installer} does not download {SUMS}, so it has nothing to verify \
+             against"
+        );
+        assert!(
+            !text.contains("$Asset.sha256") && !text.contains("$ASSET.sha256"),
+            "{installer} still asks for a per-asset checksum, which the release \
+             no longer publishes — it would 404 and refuse to install"
+        );
+    }
+}
+
+/// The `.msi` is gone, and nothing may quietly ask for it again (D-133).
+///
+/// It bundled the same Windows application as the `.exe`. Two installers for
+/// one program is a question put to the person downloading that they have no
+/// way to answer, and `tauri.conf.json` producing one that the workflow never
+/// collects would be a silent build cost.
+#[test]
+fn nothing_still_builds_or_expects_the_windows_msi() {
+    for file in [
+        ".github/workflows/release.yml",
+        "apps/desktop/tauri.conf.json",
+        "scripts/install.sh",
+        "scripts/install.ps1",
+        "README.md",
+    ] {
+        let text = read(file);
+        assert!(
+            !text.contains(".msi"),
+            "{file} still refers to a .msi, which is no longer built — either \
+             the reference is dead or the bundle target came back"
+        );
+    }
 }
 
 /// D-128. The Windows installer cannot be run from here, so what can be

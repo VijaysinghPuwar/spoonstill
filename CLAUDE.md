@@ -180,7 +180,7 @@ cargo run --release -p spoonstill-desktop
 
 ### State as of 2026-08-30 — an audit, worked through end to end
 
-**Twenty-five decisions landed in one session, D-107 through D-131.** They came
+**Twenty-eight decisions landed in one session, D-107 through D-134.** They came
 from an external audit of the whole tree, and the working rule was: *reproduce
 it before believing it, fix it, prove the test fails without the fix.* Several
 findings did not survive contact — where the audit was wrong, the decision says
@@ -215,16 +215,77 @@ The whole set, in one line each, newest last:
 | D-129 | eighteen warnings nobody read become one gate that fails |
 | D-130 | the caption rasterizer is measured, and then it is fast |
 | D-131 | coverage went where the defects were |
+| D-132 | Windows is checked by compiling for Windows |
+| D-133 | the release page is five downloads and one list |
+| D-134 | the README opens with a real render, and it is generated |
 
 **Everything is one commit.** The cache keys changed (D-107, D-118), so the
 first render of any existing project re-renders every segment once. That is
 correct and it is a one-time cost — about 7½ minutes for 200 scenes here.
 
+**Windows is checked by compiling for Windows** (D-132). Two defects on the
+platform D-071 puts in scope and nothing here has ever run, both found by
+thirty seconds of machine time rather than by reading:
+
+```bash
+rustup target add x86_64-pc-windows-msvc
+RUSTFLAGS="-D warnings" cargo check --target x86_64-pc-windows-msvc --all-targets \
+  -p spoonstill-core -p spoonstill-media -p spoonstill-state \
+  -p spoonstill-tts -p spoonstill-app -p spoonstill-cli
+```
+
+(`apps/desktop` is left out: `tauri-winres` wants `llvm-rc`, which this machine
+has no linker for. A host limitation, not a code one.) First, D-128 gave
+`windows_quote` a `dead_code` exemption and never wrote the symmetric one, so
+`posix_quote` is dead code on Windows and `ci.yml`'s `RUSTFLAGS: -D warnings`
+would have failed the Windows leg on the **next push** — it had never failed
+because it had never been pushed. Second, `titleBarStyle: "Overlay"` is
+macOS-only (`title_bar_style` is `#[cfg(target_os = "macos")]` in the pinned
+`tauri-runtime-wry`), so Windows keeps its native title bar and `.titlebar`'s
+82px of traffic-light room became an empty indent beneath it. `app.js` writes
+the platform onto the root element and the stylesheet gives that padding back;
+the rule is **positive** (`[data-os="windows"]`) because the negated form would
+match in the moment before the module loads and flash macOS. Absent means
+macOS, so that machine is unchanged. `ui_contract.rs` pins all three.
+
+**Run that cross-check before cutting a tag.** It is the step this project did
+not have, and it is what stands between a green macOS run and a release whose
+Windows leg dies on a lint.
+
+**The release page is five downloads and one list** (D-133). v0.1.4 showed
+fourteen rows, six of them `.sha256` twins nobody downloads and a `.msi` that
+installs the same Windows app as the `.exe` — a question put to the person
+downloading that they cannot answer. The build jobs still checksum each asset
+and the publish gate still verifies every one **before** undrafting; after that
+it folds them into `SHA256SUMS.txt`, uploads it, and only then deletes the
+twins. Both installers read the one file and refuse a name that is not in it —
+a check that passes by finding nothing to check is not a check. Six rows now,
+counting the two source archives GitHub attaches and will not let anyone
+remove.
+
+**The README opens with a real render** (D-134). `assets/demo/render.gif` —
+four scenes, fifteen seconds, motion, cuts on the spoken line, captions burned
+in — produced by `make demo`, which runs the actual `still render` through the
+actual filter chain. The stills are **generated** by `scripts/gen-demo.py`, the
+way the logo is (D-079): the author's photographs are their work, and stock
+would be showing off someone else's picture. 640px/10fps/96 colours was picked
+by measuring — 720px is 6.2 MB, and at 560px the burned caption starts to break
+down, which is the one detail the frame exists to prove. Not in `make gates`
+and not in CI: it needs the voice service, and a gate that fails on somebody
+else's afternoon is a gate people learn to ignore.
+
+Two neighbouring suggestions from the same outside read were **not** taken, and
+D-134 says why: a licence is D-062 and the author's to choose, and a desktop
+end-to-end test is D-131's stated omission rather than an oversight. Also
+fixed while there: `spoonstill-state` and `spoonstill-tts` had `description`
+fields advertising SQLite and ElevenLabs, **neither of which exists** — the
+exact thing the top of this file warns about.
+
 #### If you are checking this work
 
 Run `make gates` first: **M0 8/8, M1 8/8, M2 13/13**, plus `cargo fmt --check`,
 `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test
---workspace` (461 tests). Then `cargo audit --deny warnings` (D-129), which is
+--workspace` (462 tests). Then `cargo audit --deny warnings` (D-129), which is
 new and is the one check that can fail without the code changing.
 
 Each decision names its own reproduction, and most can be re-run in a scratch

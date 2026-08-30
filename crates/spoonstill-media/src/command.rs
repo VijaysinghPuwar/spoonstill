@@ -513,6 +513,14 @@ fn needs_no_quoting(arg: &str) -> bool {
 }
 
 /// Quote one argument for a POSIX shell. Display only.
+///
+/// Carries the same exemption as [`windows_quote`], for the same reason and in
+/// the opposite direction: on Windows [`shell_quote`] never reaches this, so
+/// the lib build has it as dead code. D-128 kept both dialects compiled
+/// everywhere so the tests can run both on whatever machine is to hand — and
+/// an exemption written for only one of them makes that true on only one of
+/// them. Without this, `-D warnings` fails the Windows build.
+#[cfg_attr(windows, allow(dead_code))]
 fn posix_quote(arg: &str) -> String {
     if needs_no_quoting(arg) {
         arg.to_owned()

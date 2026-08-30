@@ -3669,6 +3669,223 @@ now, and each was run against the unfixed code first:
   bound commands are unit-tested at the seam and not clicked. Both decisions say
   so in their own text.
 
+### D-132 — Windows is checked by compiling for Windows, not by reading the code · Accepted
+
+Decided 2026-08-30, immediately after D-107..D-131, while checking that the
+audit's own work was safe to publish. Two defects, both on the platform D-071
+puts in scope and nothing here has ever run, and **both found the same way**:
+by adding the target to the pinned toolchain and building against it.
+
+```
+rustup target add x86_64-pc-windows-msvc
+RUSTFLAGS="-D warnings" cargo check --target x86_64-pc-windows-msvc --all-targets \
+  -p spoonstill-core -p spoonstill-media -p spoonstill-state \
+  -p spoonstill-tts -p spoonstill-app -p spoonstill-cli
+```
+
+That is thirty seconds of machine time and it is the check this project did not
+have. `apps/desktop` is excluded because `tauri-winres` needs `llvm-rc` to
+compile a Windows resource file and this machine has no such linker — a host
+limitation, not a code one, and the reason the exclusion is by crate rather
+than by silencing anything.
+
+#### `posix_quote` was dead code on Windows, and CI denies warnings
+
+D-128 split `shell_quote` into two dialects and put
+`#[cfg_attr(not(windows), allow(dead_code))]` on `windows_quote` so the POSIX
+machine everyone develops on would not warn about the half it never calls. The
+symmetric exemption was never written. On Windows `shell_quote` never reaches
+`posix_quote`, so the lib build has it as dead code — and `ci.yml` sets
+`RUSTFLAGS: -D warnings` for every job.
+
+**This had never failed because it had never been pushed**: `posix_quote` is
+introduced by 82cae5e, which was still local. The next push would have failed
+the Windows leg on a lint, in a commit whose own decision text says both
+dialects are *"compiled and tested on every platform"* — true of the tests,
+which name both functions directly, and false of the library.
+
+The fix is one attribute and its reason. What makes it worth a decision is the
+generalisation: **an exemption written for one platform makes a claim true on
+one platform.** D-128 wanted both dialects compiled everywhere; that is now
+what happens, and the command above is what says so.
+
+#### `titleBarStyle: "Overlay"` is macOS-only, and 82px of the title bar knew it
+
+`.titlebar` carried `padding: 0 12px 0 82px`, and the comment above it is
+honest about why: *"the traffic lights are the system's, overlaid — hence the
+82px."* Traffic lights are overlaid because `tauri.conf.json` asks for
+`titleBarStyle: "Overlay"`.
+
+Checked in the pinned runtime rather than assumed — `plan/tauri`, and
+`tauri-runtime-wry/src/lib.rs:1123`:
+
+```rust
+  #[cfg(target_os = "macos")]
+  fn title_bar_style(mut self, style: TitleBarStyle) -> Self {
+```
+
+So on Windows the setting is ignored **without a word**, the window keeps its
+native title bar, and the 82px becomes an empty indent under a bar we did not
+ask for, with the app mark floating in the middle of the strip. Exactly D-088's
+shape: a macOS assumption that a webview accepts silently, on the one platform
+nobody here can look at.
+
+`app.js` now writes the platform onto the root element and the stylesheet gives
+the padding back where there are no traffic lights to reserve it for. Three
+things about that, each of which was a choice:
+
+- **It is JavaScript, not an inline `<script>`.** The CSP is
+  `script-src 'self'` (D-083), which forbids one. The cost is that the
+  attribute is absent for the moment before the module runs.
+- **The rule is written positively — `[data-os="windows"]`, not
+  `:not([data-os="macos"])`.** The negated form matches during that moment, so
+  every macOS launch would flash the mark under the traffic lights. **Absent
+  means macOS**, which is what the file already assumed, so that machine is
+  pixel-identical to before this decision.
+- **Windows keeps its native title bar** rather than gaining a drawn one.
+  Custom minimize/maximize/close buttons are a bigger change than the defect
+  justifies, and a strip under a native title bar is an ordinary toolbar.
+
+`ui_contract.rs` asserts all three — that `app.js` still sets the attribute,
+that the stylesheet still has the Windows rule, and that the rule has not been
+rewritten into its negated form. It fails against each of the three states it
+forbids. It also needed `css_code_only`, a `/* … */` stripper, because the
+first version of the test failed on the comment explaining which selector not
+to use.
+
+#### The limit, stated
+
+Neither of these is *run* here. The compile is real and the contract test is
+real; what proves the title bar is a Windows machine, and there is still not one
+— consistent with D-071 and with D-131's note that GUI automation does not exist
+in this project. What has changed is that the compile-for-Windows step is
+written down as something to do before a release, rather than something nobody
+had thought to try.
+
+### D-133 — The release page is five downloads and one list · Accepted
+
+Decided 2026-08-30, from the author looking at the v0.1.4 release page and
+saying that a lot of it *"might make a less technical person confuse"*.
+
+Fourteen rows. Six of them were files nobody downloads:
+
+```
+spoonstill-macOS.dmg                    6.23 MB
+spoonstill-macOS.dmg.sha256               87 B
+spoonstill-Windows-Installer.exe        2.32 MB
+spoonstill-Windows-Installer.exe.sha256   99 B
+spoonstill-Windows-Installer.msi        3.47 MB
+spoonstill-Windows-Installer.msi.sha256   99 B
+…
+```
+
+A `.sha256` twin after every asset **doubles the list without answering the one
+question the reader has**, which is *which file do I click*. And the `.msi` is
+a second Windows installer for the same application — a question put to the
+person downloading that they have no way to answer, and that D-098 says should
+never have been theirs to answer.
+
+Two changes, and one thing deliberately not changed.
+
+#### One `SHA256SUMS.txt`, made where the verifying already happened
+
+The build jobs still compute a `.sha256` per asset, and the publish gate still
+verifies every one of them against the file it names before undrafting. **That
+check is the one that catches a corrupted upload and it is untouched** — it
+matters that the sum is computed by the job that built the binary rather than
+by whatever last touched it. What changed is what survives: after verifying,
+the gate concatenates the sums into `SHA256SUMS.txt`, uploads it, and deletes
+the twins.
+
+Order is load-bearing. The upload happens **before** the deletion, so a failure
+between the two leaves a release with too many checksums rather than none.
+
+Both installers read the one file and pick out their own line. A name that is
+**not** in the list is a failure, not a skip — a check that passes by finding
+nothing to check is not a check. `install.sh` greps the line and pipes it to
+`shasum -c -`; `install.ps1` splits each line and compares the name exactly,
+so `still-Windows.zip` cannot be satisfied by a longer name that ends in it.
+Verified locally against a fake release: a good asset passes, a tampered one is
+refused, and an unlisted one is refused.
+
+#### The `.msi` is gone
+
+Removed from `tauri.conf.json`'s bundle targets, from the workflow's collect
+step, and from the release notes. NSIS's `.exe` installs the same application
+and is the one a person double-clicks. An `.msi` is for deploying across an
+estate, which is not this product — and building one nobody collects would be
+a silent cost.
+
+Result: **six rows instead of fourteen** — five downloads, one list, and the
+two source archives GitHub attaches on its own and does not let anyone remove.
+
+#### What did not change
+
+The verification. It would have been easy to compute the sums in the publish
+job from what it downloaded, which would have made this a smaller diff and
+quietly deleted the property D-125 added: a checksum computed after the upload
+proves the file matches itself. The sums are still made where the binary is.
+
+`release_assets.rs` grew two tests, because all of this is spread across a
+workflow, two shell scripts and a JSON file, none of which type-check against
+each other. One asserts the gate still makes the file **and** still deletes the
+twins — the second is the one that fails silently, since a release with the
+extra files works perfectly and is merely the thing this decision removed. The
+other asserts nothing anywhere mentions a `.msi`, in either direction: a dead
+reference or a returning bundle target both fail it.
+
+### D-134 — The README opens with a real render, and it is generated · Accepted
+
+Decided 2026-08-30, from an outside read of the repository as a portfolio
+piece: the architecture and the testing are stronger than the *presentation*,
+and the first thing missing is that **nothing on the page shows the program
+working**. A renderer whose README has no render is asking to be taken on
+trust.
+
+So `assets/demo/render.gif` sits under the badges: four scenes, fifteen
+seconds, motion, cuts on the spoken line, and captions burned in.
+
+Three things about it, each of which was the decision:
+
+- **It is a real render.** `make demo` runs `still render --subtitles boxed`
+  through the same filter chain, the same caption rasterizer and the same
+  concat every operator gets. It is not a mock-up, and it cannot drift from
+  what the program does without the command that rebuilds it failing.
+- **The stills are generated, not photographed.** `scripts/gen-demo.py`
+  describes them — a graded ground, a ring off centre, a few rules — the same
+  way `gen-brand.py` describes the logo (D-079). The author's own photographs
+  are their work rather than this repository's, and stock photography would be
+  showing off someone else's picture. These show what the program *does to* a
+  picture, which is the thing being demonstrated.
+- **640px, 10fps, 96 colours, 3.4 MB.** Measured against 720px (6.2 MB, too
+  heavy to sit at the top of a page) and 560px (2.0 MB, where the burned
+  caption starts to break down). The caption is the one detail that has to
+  survive the palette, because it is the feature the frame is proving.
+
+The demo is deliberately **not** in `make gates` and not in CI. It needs the
+network for the voice service, and a gate that fails because a provider is
+having an afternoon is a gate people learn to ignore (the reasoning D-094
+already applies to `tts-live`).
+
+#### The two neighbouring suggestions that were not taken
+
+The same outside read asked for a licence and a desktop end-to-end test. Both
+are refused **here** because both are already decided elsewhere, and this file
+outranks a review:
+
+- **A licence is D-062 and it is the author's to choose.** It is entangled with
+  the FFmpeg question — an LGPL build has to exist before the shipped binary's
+  terms can be stated — and picking one to make a page look finished is exactly
+  the kind of decision this file exists to stop being made in passing.
+  `THIRD-PARTY-NOTICES.md` and `still licences` already cover what ships inside
+  the binary (D-124); what is undecided is spoonstill's own terms, and the
+  README says so.
+- **A desktop end-to-end test is D-131's stated omission**, not an oversight.
+  There is no GUI automation in this project, D-115 and D-127 are tested at the
+  seam and say so in their own text, and `ui_contract.rs` covers the two joints
+  that fail silently. Adding a single clicked flow would be the least valuable
+  test in the suite and the most fragile.
+
 ---
 
 ## Reference repositories

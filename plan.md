@@ -746,11 +746,27 @@ Because these creep in as "small additions":
 
 Updated **2026-08-30**, after an external audit was worked through end to end.
 
-**The audit is closed.** Twenty-five decisions, D-107 through D-131 — the list
+**The audit is closed.** Twenty-six decisions, D-107 through D-132 — the list
 is in `CLAUDE.md` under "State as of 2026-08-30", and each decision carries its
 own reproduction. `make gates` is 8/8, 8/8, 13/13; `cargo test --workspace` is
-461; `cargo audit --deny warnings` is new and green. Nothing it found changes
+462; `cargo audit --deny warnings` is new and green. Nothing it found changes
 M3's shape, and M3 has still not been started.
+
+**D-132 was not in the audit — it came from checking the audit.** Building the
+workspace for `x86_64-pc-windows-msvc` found two Windows defects in the audit's
+own commit: `posix_quote` is dead code there, which `RUSTFLAGS: -D warnings`
+would have failed the Windows CI leg on at the next push, and the title bar's
+82px traffic-light indent is macOS-only room drawn under a native Windows title
+bar. **Add the cross-check to the pre-release routine** — the exact command is
+in `CLAUDE.md`, it takes about thirty seconds, and it is the difference between
+a green macOS run and a release whose Windows leg dies on a lint.
+
+**Shipped as v0.1.5.** v0.1.4 predates every one of these decisions, so anyone
+who downloaded from the releases page had none of them. Version bumped in
+`Cargo.toml` and `tauri.conf.json` together, which is what D-102's first
+workflow step checks against the tag. The release page itself is shorter as of
+D-133: five downloads and one `SHA256SUMS.txt`, no `.sha256` twins and no
+`.msi`.
 
 Four of its findings did **not** survive being tested, and the decisions say so
 rather than quietly fixing something that was not broken: FFmpeg is not orphaned

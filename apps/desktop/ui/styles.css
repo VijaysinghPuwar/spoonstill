@@ -133,6 +133,21 @@ body {
   border-bottom: 1px solid var(--line);
 }
 
+/* The 82px above is the traffic lights' room, and they are macOS's. Overlay is
+   ignored on Windows (Tauri's `title_bar_style` is `#[cfg(target_os =
+   "macos")]`), so the window keeps its native title bar and that padding is a
+   gap under it with nothing in it. `data-os` is set at the top of app.js.
+
+   Written as the positive case rather than `:not([data-os="macos"])` on
+   purpose: the attribute does not exist until the module runs, and a negated
+   rule would match in that gap and shunt the mark under the traffic lights on
+   every macOS launch. Absent means macOS, which is what this file already
+   assumed. */
+:root[data-os="windows"] .titlebar,
+:root[data-os="other"] .titlebar {
+  padding-left: 12px;
+}
+
 .title {
   flex: 1;
   min-width: 0;

@@ -13,6 +13,14 @@ Drop in your files, press Render, walk away.
 [![release](https://img.shields.io/github/v/release/VijaysinghPuwar/spoonstill?include_prereleases&label=download)](https://github.com/VijaysinghPuwar/spoonstill/releases/latest)
 [![platforms](https://img.shields.io/badge/macOS-%C2%B7%20Windows-black)](#download)
 
+<br>
+
+<img src="assets/demo/render.gif" width="640" alt="Four stills, each panning slowly, cut on the narration spoken over it, with the words burned into the frame">
+
+<sub>Four scenes, 15 seconds, rendered by `still render --subtitles boxed`.
+Narration spoken by a neural voice from the text beside each photo; the motion,
+the cuts and the captions are all the renderer's. Rebuild it with `make demo`.</sub>
+
 </div>
 
 ---
