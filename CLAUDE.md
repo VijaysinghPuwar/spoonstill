@@ -248,9 +248,17 @@ the rule is **positive** (`[data-os="windows"]`) because the negated form would
 match in the moment before the module loads and flash macOS. Absent means
 macOS, so that machine is unchanged. `ui_contract.rs` pins all three.
 
-**Run that cross-check before cutting a tag.** It is the step this project did
-not have, and it is what stands between a green macOS run and a release whose
-Windows leg dies on a lint.
+A **third** defect followed, and only the Windows runner could find it:
+`display_quoting_survives_a_hostile_filename` asserted the POSIX escape against
+`shell_quote`, which is the platform-dependent function, so it failed the first
+Windows leg that ever got far enough to run a test. The dialect tests
+themselves were always right — what was wrong is a test going through the
+platform-dependent path and expecting one platform's answer.
+
+**Run that cross-check before cutting a tag, and wait for the Windows CI leg
+before pushing the tag.** Compiling for Windows catches lints and type errors;
+only the runner catches a wrong expectation. Both are cheap; neither replaces
+the other.
 
 **The release page is five downloads and one list** (D-133). v0.1.4 showed
 fourteen rows, six of them `.sha256` twins nobody downloads and a `.msi` that

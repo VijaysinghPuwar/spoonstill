@@ -3753,14 +3753,38 @@ forbids. It also needed `css_code_only`, a `/* … */` stripper, because the
 first version of the test failed on the comment explaining which selector not
 to use.
 
+#### And a third, which only the Windows runner could find
+
+The cross-compile above is a `cargo check`. It does not *run* anything, so it
+caught both defects above and was blind to this one:
+`display_quoting_survives_a_hostile_filename` asserted the POSIX escape
+`'\''` against the output of `shell_quote`, which is the platform-dependent
+one. On Windows that returns the doubled form and the test failed — on the
+first Windows CI leg that ever executed it, because the dead-code lint above
+had been failing the job before any test ran.
+
+The dialects themselves were never the problem: D-128's own
+`an_embedded_apostrophe_is_escaped_the_way_each_shell_reads_it` checks
+`posix_quote` **and** `windows_quote` directly, on every platform, and it
+passed throughout. What was missing is that a test going through the
+*platform-dependent* function has to expect the platform's answer. It now
+picks the escape with `cfg!(windows)` and asserts the whole quoted run rather
+than the absence of a fragment — the old form would also have been satisfied by
+a bug that simply dropped the dangerous text.
+
+So the honest ordering is: **compiling for Windows catches lints and type
+errors; only the Windows runner catches a wrong expectation.** Both are cheap,
+and neither substitutes for the other.
+
 #### The limit, stated
 
-Neither of these is *run* here. The compile is real and the contract test is
-real; what proves the title bar is a Windows machine, and there is still not one
-— consistent with D-071 and with D-131's note that GUI automation does not exist
-in this project. What has changed is that the compile-for-Windows step is
-written down as something to do before a release, rather than something nobody
-had thought to try.
+The title bar is still not *seen*. The compile is real, the contract test is
+real, and the Windows job now runs the whole suite green — but what proves a
+title bar is a Windows machine, and there is still not one, consistent with
+D-071 and with D-131's note that GUI automation does not exist here. What has
+changed is that compiling for Windows is written down as a pre-release step,
+and that the Windows CI leg is known to have actually executed the test suite
+rather than dying on a lint before it started.
 
 ### D-133 — The release page is five downloads and one list · Accepted
 

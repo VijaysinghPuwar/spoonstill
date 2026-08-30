@@ -610,15 +610,34 @@ mod tests {
     }
 
     /// Quoting for display must not be forgeable by the filename itself.
+    ///
+    /// The escape belongs to the platform, because [`display`] does (D-128):
+    /// POSIX closes the quote and reopens it, PowerShell doubles the
+    /// apostrophe. Both dialects are checked directly, on every platform, by
+    /// `an_embedded_apostrophe_is_escaped_the_way_each_shell_reads_it`. What
+    /// this test adds is that `display` reaches **whichever one belongs
+    /// here** — the version that hardcoded the POSIX form passed on macOS for
+    /// months and failed the first Windows CI leg that ever ran it.
+    ///
+    /// [`display`]: FfmpegCommand::display
     #[test]
     fn display_quoting_survives_a_hostile_filename() {
         let hostile = "it's; rm -rf $(pwd) `x`.jpg";
         let mut c = FfmpegCommand::new("ffmpeg");
         c.input(Path::new(hostile));
         let shown = c.display();
-        assert!(shown.contains(r"'\''"), "apostrophe not escaped: {shown}");
-        // The dangerous text is inside quotes, so a paste cannot execute it.
-        assert!(!shown.contains("; rm -rf $(pwd)") || shown.contains(r"'it'\''s;"));
+
+        let escaped = if cfg!(windows) { "it''s" } else { r"it'\''s" };
+        assert!(shown.contains(escaped), "apostrophe not escaped: {shown}");
+
+        // And the whole hostile string is inside one pair of quotes, so a paste
+        // cannot execute any of it. Asserting the entire quoted form rather
+        // than the absence of a fragment: the old test passed if the dangerous
+        // text was simply missing, which a truncating bug would also satisfy.
+        assert!(
+            shown.contains(&format!("'{escaped}; rm -rf $(pwd) `x`.jpg'")),
+            "the hostile filename is not contained in one quoted run: {shown}"
+        );
     }
 
     #[test]
