@@ -69,9 +69,38 @@ step "Installing spoonstill for macOS ${dim}($TARGET)${reset}"
 
 api="https://api.github.com/repos/$REPO/releases/latest"
 if [ "$VERSION" = "latest" ]; then
-  TAG=$(curl -fsSL "$api" | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -n1)
-  [ -n "$TAG" ] || die "No published release found at https://github.com/$REPO/releases.
-Until one exists, build from source: cargo build --release -p spoonstill-cli"
+  # The failure is captured, not propagated. `set -euo pipefail` is on, so a
+  # curl that exits non-zero — an anonymous rate-limit 403, an offline machine,
+  # a repository with no releases — used to kill the script *at this line*, and
+  # the message below could never print. What the operator saw was
+  # `curl: (56) The requested URL returned error: 403` and nothing else, which
+  # is the one thing D-123 says an installer must not do.
+  #
+  # An API token is used when one happens to be in the environment. Nobody
+  # installing this needs one; it is here because the anonymous limit is per
+  # IP, and behind one office NAT or on a CI runner that limit is shared with
+  # strangers.
+  auth=""
+  token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  [ -n "$token" ] && auth="Authorization: Bearer $token"
+
+  if [ -n "$auth" ]; then
+    body=$(curl -fsSL -H "$auth" "$api" 2>/dev/null) || body=""
+  else
+    body=$(curl -fsSL "$api" 2>/dev/null) || body=""
+  fi
+
+  TAG=$(printf '%s' "$body" | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -n1)
+  [ -n "$TAG" ] || die "Could not ask GitHub which release is the latest.
+
+  That request is unauthenticated and GitHub limits it per IP address, so this
+  is usually a shared network rather than anything wrong with your machine.
+
+  Install a known version instead, which skips the question entirely:
+      SPOONSTILL_VERSION=v0.1.5 curl -fsSL <this script> | bash
+
+  Releases: https://github.com/$REPO/releases
+  Or build from source: cargo build --release -p spoonstill-cli"
 else
   TAG="$VERSION"
 fi

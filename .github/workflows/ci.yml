@@ -5,6 +5,12 @@ on:
     branches: [master]
   pull_request:
 
+# Read-only by default. Only `installer-macos` uses the token at all, to ask
+# which release is the latest without sharing the anonymous per-IP rate limit
+# with every other runner on that address (D-136). Nothing here writes.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings

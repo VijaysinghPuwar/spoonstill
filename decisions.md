@@ -4656,6 +4656,47 @@ first: `still --version` prints `still 0.1.5`, so matching on the tag with its
 bundle is `spoonstill.app`; and `gh release view --json tagName` returns
 `v0.1.5`.
 
+**The first real run found a defect in `install.sh`, which is the whole point.**
+The macOS job failed on its first line of network work:
+
+```
+==> Installing spoonstill for macOS (aarch64-apple-darwin)
+curl: (56) The requested URL returned error: 403
+```
+
+403 is the *anonymous* GitHub API rate limit, which is per IP address and
+therefore shared with every other job on that runner. But the rate limit is the
+occasion, not the defect. The defect is this:
+
+```sh
+TAG=$(curl -fsSL "$api" | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -n1)
+[ -n "$TAG" ] || die "No published release found at ..."
+```
+
+The script runs under `set -euo pipefail`. A `curl -f` that exits non-zero kills
+it **at that line**, so the carefully written `die` on the next line could never
+print. It was reachable only when curl *succeeded* and returned something
+unparseable — which is close to never. Every likely failure (a rate-limited
+403, an offline laptop, a repository with no releases, DNS) produced a bare
+`curl: (56)` and exit code 56.
+
+That is D-123's rule — *an installer says why it failed* — broken in the
+installer's very first network call, and it is the exact failure D-123 was
+written about: not a vague diagnosis but a **wrong** one, since the operator is
+shown a transport error for what is usually a shared office network.
+
+Reproduced both ways before and after, by pointing `SPOONSTILL_REPO` at a
+repository with no releases: the old script prints `curl: (56) ... 404` and
+exits 56; the new one names the rate limit, offers
+`SPOONSTILL_VERSION=v0.1.5` as the way past it, and exits 1. The failure is now
+captured rather than propagated, and an API token is used when one is already in
+the environment — nobody installing this needs one, but a CI runner and an
+office NAT both do.
+
+`install.ps1` did **not** have this defect and passed on its first execution
+ever, which is the other half of the answer: two scripts written to do the same
+job, and only running them both showed which one was wrong.
+
 **One hazard is known and left to the runner to answer.** `install.ps1` sets
 `$ErrorActionPreference = 'Stop'`, and PowerShell 7.4 defaults
 `$PSNativeCommandUseErrorActionPreference` to true, which makes a *native*
