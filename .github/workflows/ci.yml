@@ -111,3 +111,113 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+  # --- The installers, actually executed ------------------------------------
+  #
+  # `install.ps1` had never run anywhere — not on the author's machine, which
+  # has no PowerShell (D-128), and not in CI. `install.sh` had never run in CI
+  # either. Both are the first thing a stranger executes, both are piped
+  # straight into a shell, and neither had one proving run behind it. That is
+  # the only place in this project where code reaches a person having never
+  # been executed at all.
+  #
+  # Like `audit` above, these jobs depend on the outside world: they install
+  # from the **latest published release**, so they fail if that release is
+  # missing or malformed. That is deliberate. D-098 and D-125 are both about a
+  # release that looks complete while every installer 404s, and this is the
+  # only check that would notice — the publish gate asserts the asset *names*,
+  # while this asserts that downloading and verifying them actually works.
+  #
+  # Both run the script from the checkout, not from `raw.githubusercontent`, so
+  # a pull request tests its own change rather than what is already on master.
+  installer-macos:
+    name: installer · macOS
+    runs-on: macos-14
+    env:
+      # Not `$HOME/.local/bin`: installing somewhere the runner does not
+      # already have on PATH is what makes the script's closing PATH advice
+      # reachable, instead of skipped because the directory was already listed.
+      SPOONSTILL_INSTALL_DIR: ${{ runner.temp }}/spoonstill-bin
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Run install.sh
+        run: bash scripts/install.sh
+
+      # The installed binary must run, and it must be the version the release
+      # says it is. `still --version` answering the wrong number is exactly
+      # D-102, and this catches it from the outside — on a downloaded artifact,
+      # rather than from the workspace manifest that D-102 already pins.
+      - name: The installed CLI runs, and is the released version
+        run: |
+          set -euo pipefail
+          still="$SPOONSTILL_INSTALL_DIR/still"
+          test -x "$still" || { echo "::error::install.sh left no executable at $still"; exit 1; }
+          got=$("$still" --version)
+          tag=$(gh release view --json tagName -q .tagName)
+          echo "still --version -> $got"
+          echo "latest release   -> $tag"
+          case "$got" in
+            *"${tag#v}"*) ;;
+            *) echo "::error::'$got' does not carry the released version $tag (D-102)"; exit 1 ;;
+          esac
+
+      # D-099: the whole reason install.sh clears the quarantine attribute is
+      # that the dialog an unsigned .dmg produces offers "Move to Trash" as its
+      # brightest button, and "right-click > Open" stopped working in macOS 15.
+      # If the attribute survives, the operator meets that dialog.
+      - name: The window was installed, and is not quarantined
+        run: |
+          set -euo pipefail
+          app=""
+          for dir in "/Applications" "$HOME/Applications"; do
+            found=$(find "$dir" -maxdepth 1 -iname '*spoonstill*.app' -print -quit 2>/dev/null || true)
+            if [ -n "$found" ]; then app="$found"; break; fi
+          done
+          test -n "$app" || { echo "::error::install.sh installed no .app"; exit 1; }
+          echo "installed at $app"
+          if xattr -p com.apple.quarantine "$app" >/dev/null 2>&1; then
+            echo "::error::$app is still quarantined (D-099)"; exit 1
+          fi
+          echo "no com.apple.quarantine attribute"
+
+  installer-windows:
+    name: installer · Windows
+    runs-on: windows-2022
+    env:
+      SPOONSTILL_INSTALL_DIR: ${{ runner.temp }}\spoonstill-bin
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Run install.ps1
+        shell: pwsh
+        run: ./scripts/install.ps1
+
+      # D-128: `install.ps1` tested PATH membership by substring, so a
+      # `...\spoonstill\bin-old` entry counted as `...\spoonstill\bin` and the
+      # real folder was never added — `still` not found after an install that
+      # reported success. That fix is executed here for the first time.
+      - name: The installed CLI runs, and its folder is on the user PATH
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $still = Join-Path $env:SPOONSTILL_INSTALL_DIR 'still.exe'
+          if (-not (Test-Path $still)) {
+            Write-Host "::error::install.ps1 left no still.exe at $still"
+            exit 1
+          }
+          $got = & $still --version
+          Write-Host "still --version -> $got"
+
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          $wanted = $env:SPOONSTILL_INSTALL_DIR.TrimEnd('\')
+          $onPath = $false
+          foreach ($entry in ($userPath -split ';')) {
+            if ($entry.Trim().TrimEnd('\') -eq $wanted) { $onPath = $true; break }
+          }
+          if (-not $onPath) {
+            Write-Host "::error::$wanted was not added to the user PATH (D-128)"
+            exit 1
+          }
+          Write-Host "on the user PATH"
