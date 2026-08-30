@@ -182,6 +182,46 @@ fn nothing_still_builds_or_expects_the_windows_msi() {
     }
 }
 
+/// The publish step leaves the checkout, so it names the repository (D-133).
+///
+/// `gh` resolves which repository it means by asking `git`, and the step
+/// verifies checksums inside `mktemp -d` on purpose — a downloaded asset must
+/// not be confusable with a built one. From there `git` has nothing to answer
+/// with and every `gh` call dies with "not a git repository".
+///
+/// This is not hypothetical: D-125 added the download-and-verify block and it
+/// had never executed, because v0.1.4 was built before it existed and the gate
+/// it replaced counted assets without fetching any. The first tag that reached
+/// it — v0.1.5 — built all six binaries and then failed to publish them.
+///
+/// Asserted rather than trusted because the failure is invisible until a tag
+/// is cut, which is the most expensive moment to discover it.
+#[test]
+fn the_publish_step_names_the_repository_because_it_leaves_the_checkout() {
+    let workflow = read(".github/workflows/release.yml");
+    let undraft = workflow
+        .split("- name: Undraft")
+        .nth(1)
+        .expect("the publish job's Undraft step");
+
+    // Everything before the script body is the step's own env block.
+    let env = undraft.split("run: |").next().unwrap_or_default();
+    assert!(
+        env.contains("GH_REPO:"),
+        "the Undraft step does not set GH_REPO, and it runs `gh` from a temp \
+         directory — every call there fails with \"not a git repository\""
+    );
+
+    // And it really does leave the checkout, or the assertion above is guarding
+    // nothing and should be reconsidered rather than kept as decoration.
+    assert!(
+        undraft.contains("mktemp -d"),
+        "the Undraft step no longer works in a temp directory — if the \
+         verification moved back into the checkout, GH_REPO is no longer what \
+         makes this work and this test is now lying about why"
+    );
+}
+
 /// D-128. The Windows installer cannot be run from here, so what can be
 /// checked is checked.
 ///

@@ -271,6 +271,14 @@ a check that passes by finding nothing to check is not a check. Six rows now,
 counting the two source archives GitHub attaches and will not let anyone
 remove.
 
+Cutting the tag then found one more, older than D-133: the publish job verifies
+checksums inside `mktemp -d`, and `gh` asks `git` which repository it means, so
+every call there failed with *"not a git repository"* — six green build legs and
+nothing published. That block is **D-125's** and had never executed, because
+v0.1.4 predates it and the gate it replaced counted assets without fetching
+any. `GH_REPO: ${{ github.repository }}` on the step fixes it, and a test
+asserts both that it is set and that the step still leaves the checkout.
+
 **The README opens with a real render** (D-134). `assets/demo/render.gif` —
 four scenes, fifteen seconds, motion, cuts on the spoken line, captions burned
 in — produced by `make demo`, which runs the actual `still render` through the

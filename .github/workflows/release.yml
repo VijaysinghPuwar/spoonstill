@@ -384,6 +384,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.draft.outputs.tag }}
+          # `gh` works out which repository it means by asking git, and this
+          # step deliberately leaves the checkout — the checksums are verified
+          # in a temp directory so a downloaded asset cannot be confused with a
+          # built one. From there `git` has nothing to answer with and every
+          # `gh` call fails with "not a git repository".
+          #
+          # Naming the repository outright is what makes the step independent
+          # of its working directory. D-125 added the download-and-verify block
+          # and it had never run: v0.1.4 was built before it existed, and the
+          # gate it replaced counted files without fetching any.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 

@@ -3843,6 +3843,34 @@ a silent cost.
 Result: **six rows instead of fourteen** — five downloads, one list, and the
 two source archives GitHub attaches on its own and does not let anyone remove.
 
+#### The publish job leaves the checkout, so it names the repository
+
+Cutting v0.1.5 built all six binaries and then failed to publish them:
+
+```
+failed to run git: fatal: not a git repository (or any of the parent directories): .git
+```
+
+`gh` works out which repository it means by asking `git`, and the step
+verifies checksums inside `mktemp -d` on purpose — a downloaded asset must not
+be confusable with a built one. From that directory `git` has nothing to
+answer with, and the first `gh release download` dies.
+
+**The cause is older than this decision.** D-125 added the
+download-and-verify block, and it had never executed: v0.1.4 was built from a
+commit before it existed, and the gate it replaced counted assets without
+fetching any. So the first tag that reached the new code was the first tag to
+find the bug — with six green build legs above it, which is exactly the shape
+that makes it look like the publish step is at fault rather than the working
+directory.
+
+`GH_REPO: ${{ github.repository }}` on the step is the fix: naming the
+repository outright is what makes it independent of where it runs. A test
+asserts both halves — that the step sets `GH_REPO`, **and** that it still uses
+`mktemp -d`, because if the verification ever moves back into the checkout then
+`GH_REPO` is no longer what makes this work and the test would otherwise sit
+there claiming a reason that had stopped being true.
+
 #### What did not change
 
 The verification. It would have been easy to compute the sums in the publish
