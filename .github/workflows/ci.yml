@@ -134,15 +134,20 @@ jobs:
     name: installer · macOS
     runs-on: macos-14
     env:
-      # Not `$HOME/.local/bin`: installing somewhere the runner does not
-      # already have on PATH is what makes the script's closing PATH advice
-      # reachable, instead of skipped because the directory was already listed.
-      SPOONSTILL_INSTALL_DIR: ${{ runner.temp }}/spoonstill-bin
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      # Not `$HOME/.local/bin`: installing somewhere the runner does not
+      # already have on PATH is what makes the script's closing PATH advice
+      # reachable, instead of skipped because the directory was already listed.
+      #
+      # Set per step rather than on the job: the `runner` context is not
+      # available in a job-level `env`, and a workflow that references it there
+      # is rejected whole — no jobs, no logs (D-136).
       - name: Run install.sh
+        env:
+          SPOONSTILL_INSTALL_DIR: ${{ runner.temp }}/spoonstill-bin
         run: bash scripts/install.sh
 
       # The installed binary must run, and it must be the version the release
@@ -150,6 +155,8 @@ jobs:
       # D-102, and this catches it from the outside — on a downloaded artifact,
       # rather than from the workspace manifest that D-102 already pins.
       - name: The installed CLI runs, and is the released version
+        env:
+          SPOONSTILL_INSTALL_DIR: ${{ runner.temp }}/spoonstill-bin
         run: |
           set -euo pipefail
           still="$SPOONSTILL_INSTALL_DIR/still"
@@ -185,13 +192,13 @@ jobs:
   installer-windows:
     name: installer · Windows
     runs-on: windows-2022
-    env:
-      SPOONSTILL_INSTALL_DIR: ${{ runner.temp }}\spoonstill-bin
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Run install.ps1
         shell: pwsh
+        env:
+          SPOONSTILL_INSTALL_DIR: ${{ runner.temp }}\spoonstill-bin
         run: ./scripts/install.ps1
 
       # D-128: `install.ps1` tested PATH membership by substring, so a
@@ -200,6 +207,8 @@ jobs:
       # reported success. That fix is executed here for the first time.
       - name: The installed CLI runs, and its folder is on the user PATH
         shell: pwsh
+        env:
+          SPOONSTILL_INSTALL_DIR: ${{ runner.temp }}\spoonstill-bin
         run: |
           $ErrorActionPreference = 'Stop'
           $still = Join-Path $env:SPOONSTILL_INSTALL_DIR 'still.exe'

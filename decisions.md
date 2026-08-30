@@ -4604,6 +4604,105 @@ opens can now be locked on the platform where it never could. The racy half
 passed too, but one green run of a race proves nothing on its own and is not
 what this rests on.
 
+### D-136 — The installers are executed, not just shipped · Accepted
+
+Decided 2026-08-30, from an outside read pointing out that `install.ps1` has
+never run anywhere. That is exactly true, and worse than it sounds:
+
+- It has never run on this machine, which has **no PowerShell** — D-128 says so
+  in as many words and calls the file "reviewed, not run".
+- It has never run in CI. Neither has `install.sh`.
+- Both are the first thing a stranger executes, and both are executed by being
+  **piped straight into a shell**.
+
+So the one piece of this project that reaches a person first is the one piece
+that had never been executed at all. Every other line here is covered by 469
+tests; these two files were covered by reading.
+
+**Two jobs in `ci.yml`, one per platform.** Each runs the script *from the
+checkout* rather than from `raw.githubusercontent`, so a pull request tests its
+own change instead of what is already on `master`.
+
+macOS asserts four things, each of them a decision that had no runtime proof:
+
+- the CLI is executable where the script said it put it;
+- `still --version` carries the **released** tag — which is D-102 checked from
+  the outside, on a downloaded artifact, rather than from the workspace
+  manifest D-102 already pins;
+- the window was installed;
+- `com.apple.quarantine` is **gone** (D-099). That attribute surviving is the
+  difference between the app opening and the operator meeting a dialog whose
+  brightest button is *Move to Trash*.
+
+Windows asserts the CLI runs and that its folder is on the user PATH **by
+whole-entry comparison** — which is D-128's substring bug (`…\spoonstill\bin-old`
+counting as `…\spoonstill\bin`, so the real folder was never added and `still`
+was not found after an install that reported success) being executed for the
+first time since it was fixed.
+
+**These jobs depend on the outside world, deliberately.** They install from the
+*latest published release*, so they fail if that release is missing or
+malformed. That is the same bargain as the `audit` job (D-129): a check that can
+go red without our code changing is a check that is watching something real.
+D-098 and D-125 are both about a release that looks complete while every
+installer 404s — the publish gate asserts the asset **names**, and nothing until
+now asserted that downloading and verifying them actually works.
+
+**Expectations were verified locally before pushing, not guessed** — D-132's
+lesson is that compiling catches type errors while only a runner catches a wrong
+expectation, and a CI assertion is nothing but an expectation. Checked here
+first: `still --version` prints `still 0.1.5`, so matching on the tag with its
+`v` stripped is right; `tauri.conf.json`'s `productName` is `spoonstill`, so the
+bundle is `spoonstill.app`; and `gh release view --json tagName` returns
+`v0.1.5`.
+
+**One hazard is known and left to the runner to answer.** `install.ps1` sets
+`$ErrorActionPreference = 'Stop'`, and PowerShell 7.4 defaults
+`$PSNativeCommandUseErrorActionPreference` to true, which makes a *native*
+command's non-zero exit throw. If `winget` is present on the runner and
+`winget install Gyan.FFmpeg` fails, the script may die at a step that is meant
+to be advisory — the FFmpeg install is explicitly best-effort, because D-062
+and D-012 say FFmpeg is the operator's. If that happens it is a real defect for
+real Windows users, not a CI artifact, and the fix belongs in `install.ps1`.
+This is written down before the first run rather than after it, so that the
+outcome is a test of the prediction.
+
+**The first push of this job failed before any of it ran, and that is the more
+useful half of the decision.** The workflow referenced `${{ runner.temp }}` in a
+**job-level** `env:`. The `runner` context is not available there — only
+`github`, `inputs`, `matrix`, `needs`, `secrets`, `strategy` and `vars` are — so
+GitHub rejected the file whole. What that looks like is worth writing down,
+because it is nothing like a test failure: **no jobs, no logs, no annotations**,
+one red tick, and `gh run view --log-failed` answering *"log not found"*.
+
+From which the rule: **CI cannot check its own syntax.** A workflow GitHub
+refuses to parse runs zero jobs, so any validation step placed *inside* the
+workflow is exactly the thing that does not execute. This check has to happen
+before the push or it does not happen — which makes it the mirror image of
+D-129, where the point was to move a check *into* CI.
+
+So `make workflows` is a local target, wired into `make lint`. It fails loudly
+when `actionlint` is absent rather than skipping quietly, because a gate that
+passes by not looking is D-125's asset count all over again. It was verified the
+way everything else here is: the defect was put back, the gate failed and named
+the line and the context, and it passed once the defect was removed.
+
+The sharpest detail is that **`actionlint` was already installed on this
+machine** when the bad workflow was pushed. The tool was there; nothing ran it.
+`.github/` was simply the corner of the tree that no gate covered — the same
+observation D-125 made about asset names living in three files nothing
+type-checked, one directory over.
+
+**What this does not cover.** The `.msi` is gone (D-133), the DMG's contents are
+checked by name and not launched, and no GUI is driven — D-131's stated omission
+stands. `make workflows` runs `actionlint -shellcheck=`: the expression and
+context analysis is the part that decides whether a workflow can run at all,
+while `release.yml`'s four shellcheck notes (`ls | grep`, unquoted globs) are
+style in scripts handling asset names we control, and failing the gate on them
+would teach people to skip it. It also does not test the *published* one-liner,
+which fetches from a mutable `master` URL; that is a separate question and it is
+still open.
+
 ### D-074 — The `kenburns-batch` master brief does not exist on this machine · Accepted
 
 Searched 2026-08-26: no file matching `*kenburns*` anywhere under `~/Desktop`,

@@ -15,7 +15,7 @@ CARGO ?= cargo
 # Scratch for `make demo`. Outside the tree: it holds a render, not a fixture.
 DEMO_DIR ?= $(CURDIR)/target/demo
 
-.PHONY: help test tts-live lint fmt fixtures brand demo check clean gates gates-m0 gates-m1 gates-m2
+.PHONY: help test tts-live lint workflows fmt fixtures brand demo check clean gates gates-m0 gates-m1 gates-m2
 
 help: ## Show available targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -30,9 +30,24 @@ tts-live: ## Exercise the Edge provider against the real service (D-094)
 	@# the thing that goes stale.
 	$(CARGO) test -p spoonstill-tts --test edge_live -- --ignored --nocapture
 
-lint: ## clippy with warnings denied, plus a formatting check
+lint: ## clippy with warnings denied, a format check, and the workflows
 	$(CARGO) clippy --workspace --all-targets -- -D warnings
 	$(CARGO) fmt --all --check
+	@$(MAKE) --no-print-directory workflows
+
+workflows: ## Validate .github/workflows — this one cannot be done in CI (D-136)
+	@# A workflow GitHub rejects runs **no jobs at all**: no logs, no
+	@# annotations, one red tick and nothing to read. So CI can never catch its
+	@# own syntax errors, and this check has to happen before the push.
+	@# `runner.temp` in a job-level `env:` is exactly that failure, and
+	@# actionlint was already installed on this machine when it happened.
+	@if command -v actionlint >/dev/null 2>&1; then \
+	  actionlint -shellcheck= .github/workflows/*.yml && echo "  workflows OK"; \
+	else \
+	  echo "  actionlint is not installed — the workflows were NOT checked."; \
+	  echo "  brew install actionlint   (or see https://github.com/rhysd/actionlint)"; \
+	  exit 1; \
+	fi
 
 fmt: ## Reformat the workspace in place
 	$(CARGO) fmt --all
