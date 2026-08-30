@@ -647,3 +647,50 @@ run that reuses every cached artifact. That is D-077, and it is gate 3 of
 `scripts/m2-gates.sh` rather than a claim in a comment — motion is seeded
 before the pool starts, each worker writes its own content-addressed path, and
 results are collected by input index.
+
+---
+
+## 11. A hundred scenes, measured 2026-08-30
+
+Everything in §10 was measured on fixtures. This is the same machine running a
+project the size a person actually makes, because §10's own lesson — and the
+race and the 3x regression that fixture-sized runs hid before it — is that four
+scenes prove very little.
+
+**The project.** 100 photographs of seven different sizes between 1600x900 and
+3520x1620, each paired with its own recorded narration of 2.0 to 4.8 seconds.
+Supplied recordings rather than speech, so this measures the render pool and not
+somebody else's network. Import and validation are included because at this size
+they stop being free.
+
+| | |
+|---|---|
+| `still new` with 200 files | **0.06 s** |
+| `still validate` (probes all 200) | **5.7 s** |
+| cold render, no captions, default `--jobs` | **59.2 s** at 730% CPU |
+| the film | 10 200 frames, **340.021 s** against 340.000 s expected |
+| output | 97 MB |
+
+The duration lands **21 ms** over 340 s, which is inside one frame at 30fps —
+the same accuracy §7 measured on a single scene, held across a hundred joins.
+
+**With captions burned in** (`--subtitles punch`, a caption beside every
+recording per D-106, lines from four words to twenty-one):
+
+| | |
+|---|---|
+| `--jobs 1`, cold | **2 m 02.8 s** |
+| `--jobs 8`, cold | **1 m 02.2 s** |
+| both films | `1d4d16d8…3c94f` — **byte-identical** |
+
+Two things worth keeping from that. The speedup from one worker to eight is
+**1.97x**, not 8x, which is §10's flattening curve appearing again at a hundred
+scenes rather than four. And **D-077 holds at this size**: gate 3 asserts
+byte-identical films across `--jobs` on a four-scene fixture, and the property
+survives a hundred captioned scenes, where the pool actually saturates and every
+worker is rasterizing text.
+
+**Caching, measured on the four-scene project in the same session:** a second
+render of an unchanged project is **0.58 s** against 5.2 s cold. Editing one
+narration re-speaks and re-renders **that scene only** — three reused, one not
+(D-107). A pure reorder reuses **nothing**, and that is D-140.
