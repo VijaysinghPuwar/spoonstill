@@ -3871,6 +3871,46 @@ asserts both halves — that the step sets `GH_REPO`, **and** that it still uses
 `GH_REPO` is no longer what makes this work and the test would otherwise sit
 there claiming a reason that had stopped being true.
 
+#### And the fold itself welded two assets together
+
+v0.1.5 published, and its `SHA256SUMS.txt` had **four lines for five assets**:
+
+```
+fe227e6b…  still-Windows.zip2e5aade4…  still-macOS-AppleSilicon.tar.gz
+```
+
+The Windows packaging step wrote its checksum with `-NoNewline`, so the file
+had no line terminator and `cat` ran the next asset's row onto the end of it.
+Effect, with both binaries perfectly good and only the manifest wrong:
+`still-Windows.zip` was no longer findable, so **`install.ps1` refused to
+install at all**, and `still-macOS-AppleSilicon.tar.gz` matched a three-field
+line and **failed its checksum** — the two most likely machines.
+
+This is D-122's defect exactly — *"three header lines, two welded onto other
+rows"* — in a different file, four decisions later. Writing a row without
+terminating it is the same mistake whether the file is a log or a manifest.
+
+It survived the publish job's own verification because that loop checks each
+`.sha256` **individually**, and every one of them is valid alone. Only the
+concatenation was broken, and nothing looked at the concatenation.
+
+`-NoNewline` was not simply wrong, which is why it was there: dropping it makes
+`Out-File` end the line with **CRLF**, and `shasum -c` on macOS would then hunt
+for a filename ending in `\r`. The newline is written explicitly as `` `n ``.
+
+Three defences, because the producer is a PowerShell step on a platform nobody
+here runs: it writes an explicit newline; the fold uses `awk 1`, which
+re-terminates every record, so a file arriving unterminated becomes its own
+line rather than joining another; and the result is **counted and shaped** —
+one line per asset, two fields each — before it is uploaded.
+
+**Reproduced before fixing, and the reproduction needed the runner's locale.**
+On macOS the glob folds case and `still-Windows.zip.sha256` sorts last, so
+nothing follows it and the weld does not happen; under `LC_ALL=C`, which is the
+Ubuntu runner, it sorts before `still-macOS-*` and the bug appears — four
+lines, the same welded row. The fold produces five clean lines and the new
+guard rejects the old output.
+
 #### What did not change
 
 The verification. It would have been easy to compute the sums in the publish

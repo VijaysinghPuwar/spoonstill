@@ -253,8 +253,16 @@ jobs:
           $files = @("target/${{ matrix.target }}/release/still.exe", "THIRD-PARTY-NOTICES.md")
           Compress-Archive -Path $files -DestinationPath $name -Force
           $hash = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
-          # Same two-field shape `shasum -c` writes, so one installer format serves both.
-          "$hash  $name" | Out-File -FilePath "$name.sha256" -Encoding ascii -NoNewline
+          # Same two-field shape `shasum -c` writes, so one installer format
+          # serves both — and it ends in a newline (D-133). `-NoNewline` alone
+          # produced a file with no line terminator, which `cat` then welded
+          # onto the next asset's row when the sums were folded into
+          # SHA256SUMS.txt: `still-Windows.zip` stopped being findable and
+          # `still-macOS-AppleSilicon.tar.gz` became a three-field line. The
+          # newline is written explicitly as `n rather than by dropping
+          # `-NoNewline`, because Out-File would then end the line with CRLF
+          # and `shasum -c` on macOS would look for a filename ending in \r.
+          "$hash  $name`n" | Out-File -FilePath "$name.sha256" -Encoding ascii -NoNewline
           "ASSET=$name" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       # Only where it can actually execute: the arm64 runner has no Rosetta, so
@@ -453,7 +461,27 @@ jobs:
           # answering the only question they have. The verification above is
           # unchanged — the sums are still computed by the job that built each
           # binary, and still checked here before anything is published.
-          cat *.sha256 | sort -k2 > SHA256SUMS.txt
+          # `awk 1`, not `cat`: it re-terminates every record, so a sum file
+          # that arrives without a trailing newline becomes its own line
+          # instead of being welded onto the next one. The producer above is
+          # fixed too; this is the half that cannot be broken again by a
+          # packaging step nobody re-reads.
+          awk 1 *.sha256 | sort -k2 > SHA256SUMS.txt
+
+          # The file is the contract both installers verify against, so it is
+          # checked here rather than discovered by an operator: one line per
+          # asset, each of exactly two fields.
+          want=$(ls -1 *.sha256 | wc -l | tr -d " ")
+          got=$(wc -l < SHA256SUMS.txt | tr -d " ")
+          if [ "$want" != "$got" ]; then
+            echo "::error::SHA256SUMS.txt has $got lines for $want assets — rows have been welded together"
+            exit 1
+          fi
+          if awk "NF != 2 { exit 1 }" SHA256SUMS.txt; then :; else
+            echo "::error::SHA256SUMS.txt has a line that is not 'hash  name'"
+            cat -A SHA256SUMS.txt
+            exit 1
+          fi
           cat SHA256SUMS.txt
           gh release upload "$TAG" SHA256SUMS.txt --clobber
 

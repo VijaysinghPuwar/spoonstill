@@ -222,6 +222,57 @@ fn the_publish_step_names_the_repository_because_it_leaves_the_checkout() {
     );
 }
 
+/// Folding the checksums cannot weld two rows together (D-133).
+///
+/// v0.1.5 published a `SHA256SUMS.txt` with four lines for five assets:
+///
+/// ```text
+/// fe227e6b…  still-Windows.zip2e5aade4…  still-macOS-AppleSilicon.tar.gz
+/// ```
+///
+/// The Windows packaging step wrote its `.sha256` with `-NoNewline`, so `cat`
+/// ran the next asset's row onto the end of it. `still-Windows.zip` stopped
+/// being findable and `install.ps1` refused to install at all;
+/// `still-macOS-AppleSilicon.tar.gz` matched a three-field line and failed its
+/// checksum. Both binaries were perfectly good — only the manifest was wrong.
+///
+/// It survived the publish job's own verification because that loop checks
+/// each `.sha256` **individually**, and each one is valid on its own. Only the
+/// concatenation is broken, which is why the fold now has a check of its own.
+///
+/// Three defences, because the producer is a PowerShell step nobody re-reads:
+/// it writes an explicit newline, the fold re-terminates every record, and the
+/// result is counted before it is uploaded.
+#[test]
+fn the_checksum_fold_cannot_weld_two_assets_into_one_line() {
+    let workflow = read(".github/workflows/release.yml");
+
+    assert!(
+        !workflow.contains("cat *.sha256"),
+        "the sums are folded with `cat`, so a file without a trailing newline \
+         welds onto the next one and that asset becomes unfindable"
+    );
+    assert!(
+        workflow.contains("awk 1 *.sha256"),
+        "the fold no longer re-terminates each record"
+    );
+
+    // The producer, which is where the missing newline actually came from.
+    assert!(
+        workflow.contains(r#""$hash  $name`n""#),
+        "the Windows packaging step no longer writes a newline after its \
+         checksum line — `-NoNewline` without an explicit `n is what broke \
+         v0.1.5"
+    );
+
+    // And the result is verified before anyone can download it.
+    assert!(
+        workflow.contains("rows have been welded together"),
+        "nothing counts the lines in SHA256SUMS.txt, so a welded file would \
+         publish again exactly as it did before"
+    );
+}
+
 /// D-128. The Windows installer cannot be run from here, so what can be
 /// checked is checked.
 ///
