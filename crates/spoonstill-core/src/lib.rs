@@ -17,6 +17,7 @@
 /// project's name and its on-disk footprint is this one string.
 pub const STATE_DIR: &str = ".spoonstill";
 
+pub mod captions;
 pub mod diagnostics;
 pub mod geometry;
 pub mod hash;
@@ -26,6 +27,7 @@ pub mod project;
 pub mod remedy;
 pub mod timing;
 
+pub use captions::{Cue, Placement, Rgba, SubtitleSpec, SubtitleTheme, ThemeStyle, Weight};
 pub use diagnostics::{Diagnostics, Event, Severity};
 pub use geometry::{Aspect, GeometryError, OutputSpec, PRESCALE_FACTOR, SourceGeometry};
 pub use motion::{Anchor, MotionKind, MotionSpec, build_filter};

@@ -176,6 +176,10 @@ struct ManifestRow {
     zoom_direction: Option<String>,
     #[serde(default)]
     zoom_anchor: Option<String>,
+    /// D-106. Outside D-020's exactly-one rule, because it is not a source of
+    /// audio — it is what the viewer reads while the audio plays.
+    #[serde(default)]
+    caption: Option<String>,
 }
 
 fn from_manifest(path: &Path) -> Result<Rows, RowsError> {
@@ -237,6 +241,7 @@ fn from_manifest(path: &Path) -> Result<Rows, RowsError> {
             voice: non_empty(row.voice),
             zoom_direction: non_empty(row.zoom_direction),
             zoom_anchor: non_empty(row.zoom_anchor),
+            caption: non_empty(row.caption),
         });
     }
 
@@ -322,10 +327,14 @@ fn from_convention(root: &Path, settings: &Settings) -> Result<Rows, RowsError> 
             continue;
         };
 
-        // A stem with both a `.txt` and an `.mp3` is D-020's two-source case.
-        // It is carried into the draft as written and reported by validation,
-        // rather than resolved here by precedence — picking one is how a
-        // project renders the wrong narration (D-055).
+        // A stem with both a `.txt` and an `.mp3` used to be D-020's two-source
+        // case, reported as a conflict. It is not one (D-106): a recording is
+        // the narration and the writing beside it is what the narration *says*,
+        // which is a caption. Nothing is guessed and nothing is ambiguous —
+        // the recording is still the only audio source, so D-020 holds — and
+        // the alternative was that an operator who records their own voiceover
+        // could never have subtitles at all. This turns an error into a
+        // working scene, so it cannot break a project that renders today.
         let text = match &group.text {
             Some(name) => match read_line(&root.join(name)) {
                 Ok(text) => Some(text),
@@ -345,6 +354,14 @@ fn from_convention(root: &Path, settings: &Settings) -> Result<Rows, RowsError> 
         let duration = (group.audio.is_none() && text.is_none() && group.text.is_none())
             .then_some(settings.silent_seconds);
 
+        // With a recording present the writing is the caption; without one it
+        // is the script to speak.
+        let (text, caption) = if group.audio.is_some() {
+            (None, text)
+        } else {
+            (text, None)
+        };
+
         drafts.push(SceneDraft {
             id: group.stem,
             image: Some(image),
@@ -354,6 +371,7 @@ fn from_convention(root: &Path, settings: &Settings) -> Result<Rows, RowsError> 
             voice: None,
             zoom_direction: None,
             zoom_anchor: None,
+            caption,
         });
     }
 
@@ -588,17 +606,45 @@ mod tests {
         assert!(rows.problems.is_empty(), "{:?}", rows.problems);
     }
 
-    /// Both partners present is D-020's two-source case. It is carried, not
-    /// resolved by precedence — validation reports it with both cells named.
+    /// Both partners present is **not** D-020's two-source case (D-106).
+    ///
+    /// It used to be reported as a conflict, which meant an operator who
+    /// records their own voiceover could never have subtitles: the only place
+    /// to put the words was the cell that also means "speak these". The
+    /// recording is the narration and the writing beside it is the caption, so
+    /// there is still exactly one audio source and nothing is guessed.
     #[test]
-    fn a_stem_with_both_partners_is_carried_for_validation_to_reject() {
+    fn a_stem_with_a_recording_and_writing_captions_the_recording() {
         let scratch = Scratch::new(&[("001.png", ""), ("001.txt", "hello"), ("001.mp3", "")]);
         let rows = scratch.collect();
 
         assert_eq!(rows.drafts.len(), 1);
-        assert_eq!(rows.drafts[0].text.as_deref(), Some("hello"));
-        assert_eq!(rows.drafts[0].audio.as_deref(), Some("001.mp3"));
-        assert_eq!(rows.drafts[0].duration, None, "not a silent scene either");
+        let draft = &rows.drafts[0];
+        assert_eq!(
+            draft.audio.as_deref(),
+            Some("001.mp3"),
+            "the recording narrates"
+        );
+        assert_eq!(
+            draft.caption.as_deref(),
+            Some("hello"),
+            "the writing captions"
+        );
+        assert_eq!(
+            draft.text, None,
+            "D-020 still holds: the recording is the only audio source"
+        );
+        assert_eq!(draft.duration, None, "not a silent scene either");
+    }
+
+    /// Writing with no recording is still a script to speak, not a caption.
+    /// The two halves of the rule above, so neither can drift into the other.
+    #[test]
+    fn a_stem_with_writing_alone_is_still_a_script() {
+        let scratch = Scratch::new(&[("001.png", ""), ("001.txt", "hello")]);
+        let draft = &scratch.collect().drafts[0];
+        assert_eq!(draft.text.as_deref(), Some("hello"));
+        assert_eq!(draft.caption, None);
     }
 
     #[test]

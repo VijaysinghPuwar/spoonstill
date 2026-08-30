@@ -24,6 +24,7 @@
 
 pub mod atomic;
 pub mod audio;
+pub mod caption;
 pub mod command;
 pub mod concat;
 pub mod error;
@@ -33,6 +34,7 @@ pub mod scene;
 pub mod tools;
 
 pub use audio::{Normalized, measure, normalize, silence};
+pub use caption::{Canvas, CaptionImage, render_cue};
 pub use command::{FfmpegChild, FfmpegCommand, Finished, Progress};
 pub use concat::{Film, concat};
 pub use error::MediaError;

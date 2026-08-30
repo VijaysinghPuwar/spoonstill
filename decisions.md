@@ -1950,6 +1950,212 @@ renamed one command, so it created three chances to ship exactly that. It is
 D-088's rule — *anything in the window a test cannot assert has to be clicked* —
 paying for itself by making two more things assertable.
 
+### D-106 — Subtitles are burned in, drawn by us, and chosen from six themes · Accepted
+
+Decided 2026-08-29, asked for by the author: *an option to add subtitles or
+not, in the project configuration, with multiple themes to select from.*
+
+**This supersedes D-072's recorded default.** D-072 filed captions as
+*"SRT in V1.1"* and reasoned that a sidecar file is nearly free because the
+text is already present. That is still true and still worth doing one day. It
+is not what was asked for: a sidecar `.srt` is a second file that most places a
+film gets posted will ignore. What is on screen has to be *in the picture*.
+D-072 stays Open for word-level karaoke, which still depends on provider word
+boundaries and is unchanged by this.
+
+#### Why we rasterize the text ourselves
+
+FFmpeg burns subtitles two ways and **this machine's FFmpeg can do neither.**
+Measured here on 2026-08-29 against ffmpeg 8.0.1:
+
+```
+$ ffmpeg -filters | grep -cE 'subtitles|drawtext'
+0
+$ ffmpeg -vf "drawtext=text=hi" ...
+[AVFilterGraph] No such filter: 'drawtext'
+```
+
+Homebrew core split the formula. `brew install ffmpeg` — which is what
+`README.md`, `scripts/install.sh`, `still doctor --install` and D-105's Install
+button all reach for — now installs the **slim** build. Its own caveat says so:
+*"ffmpeg-full includes additional tools and libraries that are not included in
+the regular ffmpeg formula."* No `libass`, no `libfreetype`; therefore no
+`subtitles` filter and no `drawtext` filter.
+
+So a subtitle feature built on either one would be unavailable to every macOS
+operator who followed our own installation instructions, and its remedy would
+be *"install a second, much larger FFmpeg"*. Against that, the alternative is:
+
+- **We draw the pixels and FFmpeg composites them with `overlay`**, which is a
+  core filter present in every build there has ever been. `spoonstill-core`'s
+  `captions` module owns the pure part — themes, cue splitting, timing — and
+  `spoonstill_media::caption` owns the rasterizer: wrapping by real glyph
+  metrics, outline by disc dilation, shadow by three box blurs, backdrop by a
+  signed-distance rounded rectangle, composited source-over.
+- **One new dependency, `fontdue`** — pure Rust, no `std` requirement, no
+  `parallel` feature (a nested rayon pool would fight the D-076 worker budget
+  for the cores that budget exists to ration). It rasterizes a glyph;
+  everything above that is ours.
+- **Three font weights are bundled**, Inter Regular / SemiBold / Bold, SIL Open
+  Font License 1.1, in `crates/spoonstill-media/assets/fonts/`. Bundled rather
+  than found on the machine, because a system font makes a theme mean something
+  different on macOS than on Windows and makes the film depend on what the
+  operator happens to have installed — the opposite of every other thing here,
+  where the output is a function of the inputs (D-077).
+
+The cost is a rasterizer we maintain and no complex-script shaping. The benefit
+is that **subtitles work on the FFmpeg the operator already has**, which is the
+difference between a feature and a feature request.
+
+#### Where it goes in the filter graph
+
+After the motion chain's own tail, untouched:
+
+```
+[0:v]<build_filter output>[vbase];
+[vbase][2:v]overlay=x=0:y=<y>:enable='gte(t,S)*lt(t,E)'[vcap0];
+[vcap0][3:v]overlay=...[v];
+```
+
+D-033's `setsar=1` is still the last filter before `format=yuv420p` and D-037's
+colour pinning is still where it was. `overlay` inherits SAR and colour and
+changes neither — **asserted, not assumed**: the segment still has to pass
+`assert_matches_profile` before it is moved into place (D-041), so a subtitled
+segment that drifted in pixel format, range, primaries, SAR or timescale never
+reaches the concat. That existing gate is why this change needed no new
+profile check.
+
+Three details that are each a defect avoided:
+
+- **The window is `gte(t,S)*lt(t,E)`, not `between(t,S,E)`.** `between` is
+  closed at both ends, so two consecutive cues are both enabled on the frame
+  they share — and since their bands differ in height, the earlier one shows
+  under the later one for exactly one frame. Half-open windows tile.
+- **A cue is one `rawvideo` input and one `overlay`, not one frame per frame.**
+  `overlay`'s default `repeatlast` holds a single-frame overlay for as long as
+  its `enable` window says. `MAX_CUES` bounds a scene at 60 so that D-095's
+  hour-in-one-row cannot turn one scene into a thousand inputs; past that the
+  text is cut into fewer, longer cues rather than truncated.
+- **No path ever enters the filter graph.** The bands arrive as *inputs*, via
+  the argument vector, and the graph carries only input indices and numbers. A
+  filter graph is one string FFmpeg parses itself, where `:` separates options
+  and `\` escapes — so `C:\Users\a b\x.rgba` is not a path it can be made to
+  read, it is a syntax error with a drive letter in it. This is the tax every
+  tool that burns ASS subtitles pays, and `subtitles=filename=` is exactly
+  where it is paid. We do not pay it, and
+  `no_path_ever_enters_the_filter_graph` is what keeps it that way. **This is
+  the main reason the design is the same design on Windows and macOS** (D-071).
+
+#### Where the words come from
+
+A scene is captioned when it has words, and there are three ways it can:
+
+1. an explicit `caption` — a new manifest column, and a new `SceneSpec` field;
+2. failing that, the script it speaks (`AudioSource::Tts`'s own text), because
+   requiring the operator to type the same sentence twice is the clerical work
+   D-080 exists to refuse;
+3. and nothing otherwise.
+
+**A `.txt` beside a recording is now the caption, not a conflict.** In
+convention mode `001.jpg` + `001.wav` + `001.txt` used to be D-020's
+two-source case and was reported as an error. It is not one: the recording is
+the narration and the writing beside it is *what the narration says*. D-020
+still holds — the recording is still the only audio source — and nothing is
+guessed. Without this, an operator who records their own voiceover could never
+have subtitles at all, which is most of the author's own work. It turns an
+error into a working scene, so no project that renders today can break.
+
+`caption` is deliberately **outside** D-020's exactly-one rule, because it is
+not a source of audio; it is what the viewer reads while the audio plays.
+
+#### The six themes, and "no subtitles" as one of the choices
+
+`classic` (white, black edge, soft shadow, no box), `boxed` (rounded
+translucent plate), `band` (full-width bar, flush to the edge), `card` (the one
+light theme — near-black on warm off-white), `punch` (heavy yellow, thick edge,
+for muted social video), `minimal` (small, light, shadow only). Six because
+they span the actual decision, which is *how much of the photograph the caption
+is allowed to cover*.
+
+Every length in a theme is a **fraction of the frame**, never a pixel, so one
+theme is one design at 720p, at 4K and in all three of D-070's aspects. A test
+asserts every theme is legible by construction: no theme may have plain fill
+with no outline, no shadow and no backdrop, because such a theme is unreadable
+over some sky in some scene.
+
+**Off is the default, and off is a row in the list.** Burning text into the
+picture is irreversible — it is in the pixels, and an operator who did not want
+it re-renders the whole film — while the reverse mistake costs one flag. So
+`subtitles.enabled` defaults to `false`. And on the window's Subtitles screen
+*"No subtitles"* is the first row of the same list the themes are in, not a
+switch beside it: off is a real choice, and on this screen it is the usual one.
+
+Surfaces, all of them overrides for one run — `project.yaml` is an input and
+nothing writes to it (D-013):
+
+```yaml
+subtitles:
+  enabled: true
+  theme: boxed      # or classic, band, card, punch, minimal
+  position: bottom  # or top
+```
+
+```
+still subtitles                          # the themes, and what each is for
+still render DIR --subtitles boxed       # on, this run, with this look
+still render DIR --no-subtitles          # off, this run
+```
+
+The window's chooser previews a theme by calling the **renderer**
+(`spoonstill_app::subtitles::preview`) and painting its RGBA into a canvas — not
+by imitating it in CSS. A preview drawn a second way can be wrong about the one
+thing it is for, which is legibility. The response is eight bytes of
+little-endian width and height followed by straight RGBA, so the picture and its
+shape cannot disagree.
+
+#### The cache key, and what it costs
+
+The subtitle spec joins the segment cache key (D-043): theme, placement, and
+every cue's text and timing to the millisecond. Measured on the 100-scene
+project: changing the theme misses every captioned scene and **hits every scene
+that has no words**, because for those the bytes really are the same. A scene
+with no cues emits no overlay chain at all, so its graph is byte-identical to
+the one it had before this feature existed.
+
+Cues are timed against the **narration** duration, not the padded segment
+duration, so the caption leaves the screen when the speaking stops and D-022's
+padding is silent in both senses. Time is shared out by character count, which
+is the honest approximation available without word boundaries.
+
+Cost, measured here 2026-08-29, cold cache, `--jobs 4`:
+
+| project | without | with (`boxed`) | memory |
+|---|---|---|---|
+| 100 scenes, 960x540 | 21.6 s | 25.6 s | +6 MB |
+| 40 scenes, 1920x1080 | 24.0 s | 25.2 s | +1 MB |
+
+**About 5% at 1080p**, because x264 dominates and the caption is drawn once per
+cue rather than once per frame. The first measurement was 3x worse until two
+things were fixed: the font was being re-parsed for every cue, and `balance()`
+re-measured the same glyphs a few hundred times per caption. Both are cached
+now — `OnceLock` per weight, and a `(char, px)` advance map per call.
+
+#### Found on the way, and fixed: a race in the atomic move
+
+Rendering a hundred scenes that shared one recording failed with *"replacing
+the existing file at …/cache/audio/file-….wav: No such file or directory"*.
+`move_into_place` did `if to.exists() { remove_file(to)? }`, and two workers
+that resolve to one cache entry both see it and both remove it; the loser fails
+the whole render about a file it had just been told was there. `NotFound` on
+that remove is now success, because what the call wants is for the destination
+to be gone.
+
+This is not a subtitle bug and it predates this change. It is recorded here
+because of how it was found and because of who it hits: **five hundred scenes
+narrated from one long recording is the ordinary case at the design point**,
+not a contrived one, and no test in the suite ran enough identical scenes at
+once to open the window.
+
 ---
 
 ## Reference repositories
@@ -2439,12 +2645,19 @@ is true today; "verified on Windows" is not, until CI has run green there.
 
 ## Open — do not guess
 
-### D-072 — Captions in M-scope? · Open
+### D-072 — Captions in M-scope? · Open, and its default is superseded by D-106
 
-Default: **SRT in V1.1**, not V1 — the text is already present so it is nearly
-free. Word-level karaoke via Edge TTS word boundaries is a genuine
-differentiator for this genre and a real project; it is V1.1+ and depends on
-D-023's internal build.
+Default was: **SRT in V1.1**, not V1 — the text is already present so it is
+nearly free. **That default no longer holds.** D-106 burns subtitles into the
+picture, which is what was asked for and what a sidecar `.srt` cannot do at the
+places a film gets posted. A sidecar file is still worth having one day and is
+still nearly free; it is now an addition to D-106 rather than the plan.
+
+What remains genuinely Open here is **word-level karaoke** via Edge TTS word
+boundaries — a real differentiator for this genre, V1.1+, and dependent on
+D-023's internal build. D-106's cue timings are proportional to character count
+precisely because word boundaries are the thing we do not have, and a supplied
+recording does not have them at all.
 
 ### D-073 — Project name is `spoonstill`; binary is `still` · Accepted
 

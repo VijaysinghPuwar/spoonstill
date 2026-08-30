@@ -274,6 +274,14 @@ pub struct SceneDraft {
     pub zoom_direction: Option<String>,
     /// `zoom_anchor`, as written.
     pub zoom_anchor: Option<String>,
+    /// `caption` — the words to burn on screen, when they are not the same
+    /// thing as the narration (D-106).
+    ///
+    /// **Not an audio source**, and deliberately outside D-020's exactly-one
+    /// rule: a scene narrated by a recording has no `text`, and without this
+    /// column it could never carry a subtitle. A scene that *is* narrated by
+    /// `text` needs nothing here — the script is the caption.
+    pub caption: Option<String>,
 }
 
 /// A row that passed the pure rules: it has an image, exactly one audio
@@ -294,6 +302,14 @@ pub struct SceneSpec {
     pub source: AudioSource,
     /// Motion, where the operator expressed a preference.
     pub motion: MotionRequest,
+    /// What to put on screen if the project burns subtitles (D-106).
+    ///
+    /// Resolved here rather than at render time so that one rule decides it in
+    /// one place: an explicit `caption`, else the spoken script, else nothing.
+    /// A scene with a supplied recording and no `caption` has no subtitle, and
+    /// that is a fact the operator can be told at validation rather than
+    /// discovering in the finished film.
+    pub caption: Option<String>,
 }
 
 /// Everything wrong with one project, in one list.
@@ -629,13 +645,36 @@ pub fn validate_draft(
     let motion = validate_motion(&id, draft, &mut problems);
 
     match (image, source) {
-        (Some(image), Some(source)) if problems.is_empty() => Ok(SceneSpec {
-            id,
-            image,
-            source,
-            motion,
-        }),
+        (Some(image), Some(source)) if problems.is_empty() => {
+            let caption = resolve_caption(draft, &source);
+            Ok(SceneSpec {
+                id,
+                image,
+                source,
+                motion,
+                caption,
+            })
+        }
         _ => Err(problems),
+    }
+}
+
+/// What this scene would say on screen: the explicit `caption`, else the
+/// spoken script, else nothing.
+///
+/// The script is used without the operator asking because it is already the
+/// words being said — requiring them to be typed twice is the kind of clerical
+/// work D-080 exists to refuse. An explicit `caption` wins because a scene
+/// whose subtitle should differ from its narration is a deliberate act.
+fn resolve_caption(draft: &SceneDraft, source: &AudioSource) -> Option<String> {
+    if let Some(caption) = draft.caption.as_deref().map(str::trim)
+        && !caption.is_empty()
+    {
+        return Some(caption.to_owned());
+    }
+    match source {
+        AudioSource::Tts { text, .. } => Some(text.clone()),
+        AudioSource::File { .. } | AudioSource::Silent { .. } => None,
     }
 }
 

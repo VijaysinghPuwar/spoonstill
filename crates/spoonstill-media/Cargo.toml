@@ -20,5 +20,17 @@ spoonstill-core = { workspace = true }
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# D-106: captions are rasterized by us, not by FFmpeg. Homebrew core's `ffmpeg`
+# formula — the one README.md and `still doctor --install` tell an operator to
+# install — is the slim build: no libass, no libfreetype, so neither
+# `subtitles` nor `drawtext` exists. Burning text with either would mean the
+# feature is unavailable on the FFmpeg we already require. fontdue is pure
+# Rust, no_std-capable, ~1200 lines of dependency, and rasterizes a glyph;
+# everything above that — wrapping, outline, shadow, backdrop, compositing —
+# is ours in src/caption.rs. `parallel` is left off deliberately: this runs
+# inside the D-076 worker pool, and a nested rayon pool would compete with it
+# for the cores that pool exists to budget.
+fontdue = { version = "0.9", default-features = false, features = ["std"] }
+
 [lints]
 workspace = true

@@ -20,10 +20,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use spoonstill_core::captions::SubtitleSpec;
 use spoonstill_core::diagnostics::{Diagnostics, Event};
 use spoonstill_core::{MotionSpec, OutputSpec, SAMPLE_RATE, build_filter, timing};
 
 use crate::atomic::{ensure_parent, move_into_place, partial_path};
+use crate::caption;
 use crate::command::{FfmpegCommand, Progress};
 use crate::error::MediaError;
 use crate::probe::{self, DEFAULT_PROBE_TIMEOUT, ProbeResult};
@@ -77,6 +79,14 @@ pub struct SceneRequest {
     pub scene_index: u32,
     /// Encoder settings.
     pub encode: EncodeSettings,
+    /// Burned-in subtitles, or `None` for a scene with none (D-106).
+    ///
+    /// A spec with no cues means the same thing as `None` and costs the same:
+    /// no extra input, no `overlay`, and a filter graph byte-identical to the
+    /// one a project without subtitles produces. That equality is what lets an
+    /// operator turn subtitles on, look, and turn them off again without
+    /// re-rendering anything (D-043).
+    pub subtitles: Option<SubtitleSpec>,
 }
 
 impl SceneRequest {
@@ -92,6 +102,7 @@ impl SceneRequest {
             project_id: "single-scene".to_string(),
             scene_index: 0,
             encode: EncodeSettings::default(),
+            subtitles: None,
         }
     }
 }
@@ -137,6 +148,117 @@ impl Cancel {
     #[must_use]
     pub fn is_requested(&self) -> bool {
         self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// The caption bands for one scene, written to disk for the length of the run.
+///
+/// FFmpeg reads each band as a one-frame `rawvideo` input and `overlay`'s
+/// default `repeatlast` holds it for as long as its `enable` window says. That
+/// is why a cue costs one input and one filter rather than one frame per frame.
+///
+/// The files are removed by [`Drop`], so a failed render, a cancelled render
+/// and a panicking one all leave the same nothing behind. They live beside the
+/// temporary segment rather than in the system temp directory, for the same
+/// reason it does (D-042): one directory, one filesystem, one thing to clean.
+struct Captions {
+    bands: Vec<Band>,
+}
+
+/// One cue: where its pixels are, how big they are, and when it is on screen.
+struct Band {
+    path: PathBuf,
+    width: u32,
+    height: u32,
+    y: u32,
+    start: f64,
+    end: f64,
+}
+
+impl Drop for Captions {
+    fn drop(&mut self) {
+        for band in &self.bands {
+            let _ = std::fs::remove_file(&band.path);
+        }
+    }
+}
+
+impl Captions {
+    /// Draw every cue and write it beside `temporary`.
+    ///
+    /// An empty spec produces an empty `Captions`, which produces no inputs and
+    /// no filters — see [`SceneRequest::subtitles`].
+    fn write(
+        spec: Option<&SubtitleSpec>,
+        output: OutputSpec,
+        temporary: &Path,
+    ) -> Result<Captions, MediaError> {
+        let mut captions = Captions { bands: Vec::new() };
+        let Some(spec) = spec else {
+            return Ok(captions);
+        };
+
+        for (index, cue) in spec.cues.iter().enumerate() {
+            let image = caption::render_cue(&cue.text, spec.theme, spec.placement, output);
+            let path = temporary.with_extension(format!("cap{index:02}.rgba"));
+            // Partially written bands are already covered: this returns Err and
+            // the whole struct drops, taking every file with it.
+            std::fs::write(&path, image.canvas.bytes()).map_err(|source| MediaError::Io {
+                doing: "writing a subtitle band",
+                path: path.clone(),
+                source,
+            })?;
+            captions.bands.push(Band {
+                path,
+                width: image.canvas.width(),
+                height: image.canvas.height(),
+                y: image.y,
+                start: cue.start,
+                end: cue.end,
+            });
+        }
+        Ok(captions)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.bands.is_empty()
+    }
+
+    /// The overlay half of the filter graph, chained onto `input`.
+    ///
+    /// Every band goes on at `x=0` because every band is the full frame width,
+    /// which is what keeps this a position and not a layout calculation.
+    ///
+    /// The window is `gte(t,start)*lt(t,end)` rather than `between(t,start,end)`
+    /// because `between` is closed at both ends: two consecutive cues would
+    /// both be enabled on the frame they share, and since their bands differ in
+    /// height the earlier one would show under the later one for exactly one
+    /// frame. Half-open windows tile.
+    fn graph(&self, first_input: usize) -> String {
+        let mut graph = String::new();
+        for (index, band) in self.bands.iter().enumerate() {
+            let from = if index == 0 {
+                "[vbase]".to_string()
+            } else {
+                format!("[vcap{}]", index - 1)
+            };
+            let to = if index == self.bands.len() - 1 {
+                "[v]".to_string()
+            } else {
+                format!("[vcap{index}]")
+            };
+            // The single quotes are FFmpeg's, not a shell's — there is no shell
+            // (D-011). They are what stops FFmpeg's own parser from reading the
+            // commas inside `gte(t,...)` as filter separators.
+            graph.push_str(&format!(
+                "{from}[{input}:v]overlay=x=0:y={y}:enable='gte(t,{start:.3})*lt(t,{end:.3})'{to};",
+                input = first_input + index,
+                y = band.y,
+                start = band.start,
+                end = band.end,
+            ));
+        }
+        graph
     }
 }
 
@@ -247,6 +369,17 @@ fn render_scene_inner(
     let temporary = partial_path(&request.out);
     ensure_parent(&temporary)?;
 
+    // The caption bands are drawn before FFmpeg starts and deleted when this
+    // binding drops, on every path out of this function.
+    let captions = Captions::write(request.subtitles.as_ref(), request.output, &temporary)?;
+    if !captions.is_empty() {
+        log.record(
+            &Event::info("render", "subtitles drawn")
+                .with("scene_index", request.scene_index.to_string())
+                .with("cues", captions.bands.len().to_string()),
+        );
+    }
+
     let result = run_ffmpeg(
         tools,
         request,
@@ -254,6 +387,7 @@ fn render_scene_inner(
         frames,
         &expected,
         &temporary,
+        &captions,
         cancel,
         log,
         on_progress,
@@ -293,6 +427,7 @@ fn run_ffmpeg(
     frames: u32,
     expected: &SegmentProfile,
     temporary: &Path,
+    captions: &Captions,
     cancel: &Cancel,
     log: &dyn Diagnostics,
     on_progress: &mut dyn FnMut(Progress),
@@ -306,7 +441,25 @@ fn run_ffmpeg(
     // timestamps so the segment starts at zero.
     let audio_chain =
         format!("[1:a]aresample={SAMPLE_RATE},apad,atrim=end_sample={samples},asetpts=N/SR/TB[a]");
-    let graph = format!("[0:v]{filter}[v];{audio_chain}");
+
+    // D-106: the subtitle overlays go *after* the motion chain's own tail, so
+    // D-033's `setsar=1` is still the last filter before `format=yuv420p` and
+    // D-037's colour pinning is still where it was. `overlay` inherits the
+    // frame's SAR and colour properties and changes neither — asserted, not
+    // assumed: the profile check in `validate` below reads them back off the
+    // finished file (D-041).
+    //
+    // With no cues this is byte-identical to the graph a project without
+    // subtitles produces, which is what makes the cache key honest.
+    let graph = if captions.is_empty() {
+        format!("[0:v]{filter}[v];{audio_chain}")
+    } else {
+        // 0 is the still and 1 is the narration, so the bands start at 2.
+        format!(
+            "[0:v]{filter}[vbase];{overlays}{audio_chain}",
+            overlays = captions.graph(2)
+        )
+    };
 
     let mut command = FfmpegCommand::new(tools.ffmpeg());
     command
@@ -315,7 +468,23 @@ fn run_ffmpeg(
         // is the five-hour "hang", and it is unreachable from here because
         // nothing in this function can add that flag.
         .input(&request.image)
-        .input(&request.audio)
+        .input(&request.audio);
+
+    // One `rawvideo` input per cue. Raw rather than an encoded image because
+    // it needs no decoder to be present and no alpha-capable codec to be
+    // chosen; the bands are transient files beside the segment, and the
+    // largest of them is a few hundred kilobytes.
+    for band in &captions.bands {
+        command
+            .args(["-f", "rawvideo", "-pixel_format", "rgba"])
+            .arg("-video_size")
+            .arg(format!("{}x{}", band.width, band.height))
+            .arg("-framerate")
+            .arg(fps.to_string())
+            .input(&band.path);
+    }
+
+    command
         .arg("-filter_complex")
         .arg(&graph)
         .args(["-map", "[v]", "-map", "[a]"])
@@ -470,6 +639,119 @@ fn hash_file(path: &Path) -> Result<String, MediaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The Windows rule for D-106, pinned.**
+    ///
+    /// A caption band reaches FFmpeg as an *input*, never as a path inside the
+    /// filter graph. That is the whole reason this design works on both
+    /// platforms (D-071): a filter graph is one string that FFmpeg parses
+    /// itself, where `:` separates options, `,` separates filters and `\`
+    /// escapes — so `C:\Users\vijay\project\.seg.cap00.rgba` is not a path
+    /// FFmpeg can be made to read, it is a syntax error with a drive letter in
+    /// it. The `subtitles=filename=` filter has exactly this problem, and
+    /// working around it is the tax every tool that burns ASS subtitles pays.
+    ///
+    /// We do not pay it, and this test is what keeps it that way.
+    #[test]
+    fn no_path_ever_enters_the_filter_graph() {
+        // Fictional paths, deliberately hostile in both platforms' idioms.
+        // `Captions::drop` removes them, which for a path that does not exist
+        // is the no-op it is written to be.
+        let captions = Captions {
+            bands: vec![
+                Band {
+                    path: PathBuf::from(r"C:\Users\a b\.seg.partial-1-0.cap00.rgba"),
+                    width: 1920,
+                    height: 140,
+                    y: 880,
+                    start: 0.0,
+                    end: 1.5,
+                },
+                Band {
+                    path: PathBuf::from("/home/a b/it's a 'project'/.seg.cap01.rgba"),
+                    width: 1920,
+                    height: 96,
+                    y: 900,
+                    start: 1.5,
+                    end: 3.0,
+                },
+            ],
+        };
+        let graph = captions.graph(2);
+
+        for forbidden in ["rgba", "C:", "/home", "a b", "it's", "\\"] {
+            assert!(
+                !graph.contains(forbidden),
+                "a path reached the filter graph ({forbidden:?}): {graph}"
+            );
+        }
+        // What it does carry: input indices and numbers.
+        assert!(
+            graph.contains("[2:v]") && graph.contains("[3:v]"),
+            "{graph}"
+        );
+        assert!(
+            graph.contains("y=880") && graph.contains("y=900"),
+            "{graph}"
+        );
+    }
+
+    /// Half-open windows, so two consecutive cues never both draw on the frame
+    /// they share. `between()` is closed at both ends and would.
+    #[test]
+    fn the_overlay_chain_tiles_and_ends_at_the_video_label() {
+        let captions = Captions {
+            bands: vec![
+                Band {
+                    path: PathBuf::from("a"),
+                    width: 8,
+                    height: 4,
+                    y: 10,
+                    start: 0.0,
+                    end: 1.5,
+                },
+                Band {
+                    path: PathBuf::from("b"),
+                    width: 8,
+                    height: 4,
+                    y: 12,
+                    start: 1.5,
+                    end: 3.0,
+                },
+                Band {
+                    path: PathBuf::from("c"),
+                    width: 8,
+                    height: 4,
+                    y: 14,
+                    start: 3.0,
+                    end: 4.25,
+                },
+            ],
+        };
+        let graph = captions.graph(2);
+
+        assert!(graph.starts_with("[vbase][2:v]overlay="), "{graph}");
+        assert!(
+            graph.contains("enable='gte(t,1.500)*lt(t,3.000)'"),
+            "the middle cue's window is not half-open: {graph}"
+        );
+        assert!(
+            graph.contains("[v];") && graph.ends_with("[v];"),
+            "the chain must end at the label the render maps: {graph}"
+        );
+        assert_eq!(graph.matches("overlay=").count(), 3, "{graph}");
+        // Each overlay feeds the next, and only the last is [v].
+        assert_eq!(graph.matches("[vcap").count(), 4, "{graph}");
+    }
+
+    /// No cues is no graph at all, which is what makes a subtitle-less scene
+    /// byte-identical to one rendered before this feature existed.
+    #[test]
+    fn no_cues_is_no_overlay_chain() {
+        let captions = Captions { bands: Vec::new() };
+        assert!(captions.is_empty());
+        assert_eq!(captions.graph(2), "");
+    }
 
     /// D-036 defaults, pinned. Changing these invalidates every cached segment
     /// and belongs in decisions.md.

@@ -67,6 +67,13 @@ struct SceneView {
     seconds: Option<f64>,
     /// The voice this scene would be spoken in, for a `tts` scene.
     voice: String,
+    /// What this scene would put on screen if subtitles are on (D-106).
+    ///
+    /// Empty for a scene with no words — a supplied recording with no `.txt`
+    /// beside it and no `caption` column. The Subtitles screen counts these,
+    /// because "subtitles are on and four of my nine scenes have none" is a
+    /// fact an operator should meet before the render rather than after it.
+    caption: String,
     /// Whether this scene can render. Kept as a field rather than assumed,
     /// because a provider that is not installed is still a row the grid must
     /// be able to mark.
@@ -111,6 +118,12 @@ struct ProjectView {
     /// The two of them, joined by Rust.
     output_path: String,
     geometry: String,
+    /// Whether `project.yaml` asks for burned-in subtitles (D-106).
+    subtitles: bool,
+    /// Which theme it names, resolved to a real one.
+    subtitle_theme: String,
+    /// Which edge they sit against.
+    subtitle_placement: String,
     scenes: Vec<SceneView>,
     problems: Vec<ProblemView>,
     has_errors: bool,
@@ -526,6 +539,7 @@ async fn validate_project(
                     narration,
                     voice,
                     seconds,
+                    caption: scene.spec.caption.clone().unwrap_or_default(),
                 }
             })
             .collect();
@@ -593,6 +607,9 @@ async fn validate_project(
                 .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
             output_path: destination.display().to_string(),
             geometry: format!("{}x{} @ {} fps", spec.width(), spec.height(), spec.fps()),
+            subtitles: project.settings.subtitles,
+            subtitle_theme: project.settings.subtitle_theme.as_str().to_owned(),
+            subtitle_placement: project.settings.subtitle_placement.as_str().to_owned(),
             has_errors: project.has_errors(),
             empty: project.scenes.is_empty()
                 && project
@@ -924,6 +941,62 @@ struct RenderRequest {
     out_dir: Option<String>,
     /// The film's file name, alongside `out_dir`. Both or neither.
     out_name: Option<String>,
+    /// Burn subtitles for this run, whatever `project.yaml` says (D-106).
+    /// `None` leaves the project's own answer alone.
+    subtitles: Option<bool>,
+    /// Which look, for this run.
+    subtitle_theme: Option<String>,
+}
+
+/// The subtitle themes, for the window's chooser (D-106).
+#[tauri::command]
+fn subtitle_themes() -> Vec<ThemeView> {
+    spoonstill_app::subtitles::themes()
+        .into_iter()
+        .map(|choice| ThemeView {
+            id: choice.id.to_owned(),
+            description: choice.description.to_owned(),
+            default: choice.default,
+        })
+        .collect()
+}
+
+/// One theme, drawn over a stand-in photograph, as raw RGBA.
+///
+/// Raw rather than a PNG because nothing in this program encodes a PNG and
+/// nothing should have to: the webview paints it straight into a `<canvas>`
+/// with `putImageData`, which wants exactly these bytes. The first eight are
+/// the width and height as little-endian `u32`s, so one response carries the
+/// picture and its shape and the two cannot disagree.
+///
+/// It is the *renderer's* preview (`spoonstill_app::subtitles::preview`), not
+/// a CSS imitation — see that module for why that matters.
+#[tauri::command]
+async fn subtitle_preview(
+    text: String,
+    theme: String,
+    position: String,
+    short_edge: u32,
+) -> Result<tauri::ipc::Response, String> {
+    let preview = tauri::async_runtime::spawn_blocking(move || {
+        spoonstill_app::subtitles::preview(&text, &theme, &position, short_edge)
+    })
+    .await
+    .map_err(|e| format!("the preview thread failed: {e}"))??;
+
+    let mut body = Vec::with_capacity(preview.rgba.len() + 8);
+    body.extend_from_slice(&preview.width.to_le_bytes());
+    body.extend_from_slice(&preview.height.to_le_bytes());
+    body.extend_from_slice(&preview.rgba);
+    Ok(tauri::ipc::Response::new(body))
+}
+
+/// One theme in the window's list.
+#[derive(Debug, Clone, Serialize)]
+struct ThemeView {
+    id: String,
+    description: String,
+    default: bool,
 }
 
 /// Render the whole project, reporting each scene as it lands.
@@ -942,7 +1015,24 @@ async fn render_project(
         voice,
         out_dir,
         out_name,
+        subtitles,
+        subtitle_theme,
     } = request;
+
+    // Refused here rather than deep in the render, for the same reason the
+    // output path is: a name the window should never have sent is a bug worth
+    // seeing, not a silent fallback to the default look (D-055).
+    let subtitle_theme = match subtitle_theme.filter(|t| !t.is_empty()) {
+        None => None,
+        Some(name) => Some(
+            spoonstill_core::captions::SubtitleTheme::parse(&name).ok_or_else(|| {
+                format!(
+                    "{name:?} is not one of {}",
+                    spoonstill_core::captions::SubtitleTheme::names()
+                )
+            })?,
+        ),
+    };
 
     // Resolved and refused here, before the lock is taken and before a single
     // frame is encoded — the same check the box on screen ran as it was typed.
@@ -975,6 +1065,8 @@ async fn render_project(
                 // `project.yaml` (D-013).
                 voice: voice.filter(|v| !v.is_empty()),
                 out,
+                subtitles,
+                subtitle_theme,
                 ..defaults
             };
 
@@ -1194,6 +1286,8 @@ fn main() {
             set_narration,
             remove_scene,
             move_scene,
+            subtitle_themes,
+            subtitle_preview,
             render_project,
             cancel_render,
             open_film,

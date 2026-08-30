@@ -39,6 +39,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use spoonstill_core::captions::{self, SubtitleSpec, SubtitleTheme};
 use spoonstill_core::diagnostics::{Diagnostics, Event};
 use spoonstill_core::project::MotionRequest;
 use spoonstill_core::{MotionSpec, OutputSpec, STATE_DIR, hash, timing};
@@ -79,6 +80,14 @@ pub struct RenderProjectOptions {
     pub voice: Option<String>,
     /// The same, for the provider.
     pub provider: Option<String>,
+    /// Burn subtitles for this run, whatever `project.yaml` says (D-106).
+    ///
+    /// An override for one run, exactly like [`Self::voice`] and for the same
+    /// reason: `project.yaml` is an input and the renderer never writes to it
+    /// (D-013). `None` means "whatever the project decided".
+    pub subtitles: Option<bool>,
+    /// The same, for which look.
+    pub subtitle_theme: Option<SubtitleTheme>,
 }
 
 impl RenderProjectOptions {
@@ -98,6 +107,8 @@ impl RenderProjectOptions {
             force: false,
             voice: None,
             provider: None,
+            subtitles: None,
+            subtitle_theme: None,
         }
     }
 }
@@ -702,7 +713,8 @@ fn render_segments(
 
         let index32 = u32::try_from(index).unwrap_or(u32::MAX);
         let motion = motion_for(&scene.spec.motion, &project_id, index32, &content, project);
-        let key = segment_key(&content, frames, motion, output, encode);
+        let subtitles = subtitles_for(project, options, scene, narration);
+        let key = segment_key(&content, frames, motion, output, encode, subtitles.as_ref());
 
         plans.push(Plan {
             request: SceneRequest {
@@ -714,6 +726,7 @@ fn render_segments(
                 project_id: project_id.clone(),
                 scene_index: index32,
                 encode: encode.clone(),
+                subtitles,
             },
             id: scene.spec.id.as_str().to_owned(),
             frames,
@@ -863,21 +876,65 @@ fn motion_for(
     }
 }
 
+/// What this scene puts on screen, if anything (D-106).
+///
+/// Three things have to be true for a scene to carry a subtitle: the project
+/// (or this run) asked for one, the scene has words, and the scene has time.
+/// Any of them missing yields `None`, and `None` renders exactly the segment a
+/// project without subtitles renders — same filter graph, same cache key, same
+/// bytes.
+///
+/// The cues are cut against the **narration** duration rather than the padded
+/// segment duration, so the caption leaves the screen when the speaking stops
+/// (D-022's padding stays silent in both senses).
+fn subtitles_for(
+    project: &Project,
+    options: &RenderProjectOptions,
+    scene: &ResolvedScene,
+    narration: f64,
+) -> Option<SubtitleSpec> {
+    let enabled = options.subtitles.unwrap_or(project.settings.subtitles);
+    if !enabled {
+        return None;
+    }
+    let theme = options
+        .subtitle_theme
+        .unwrap_or(project.settings.subtitle_theme);
+    let text = scene.spec.caption.as_deref()?;
+
+    let cues = captions::cues(text, narration, theme.style().max_chars);
+    if cues.is_empty() {
+        return None;
+    }
+    Some(SubtitleSpec {
+        theme,
+        placement: project.settings.subtitle_placement,
+        cues,
+    })
+}
+
 /// The segment cache key (D-043).
 ///
 /// Everything that changes the bytes: the image content, the resolved length,
-/// the move, the output geometry, and the encoder settings. Nothing that does
-/// not — not the path, not the scene id, not the machine.
+/// the move, the output geometry, the encoder settings, and the subtitles
+/// burned into the picture. Nothing that does not — not the path, not the
+/// scene id, not the machine.
 fn segment_key(
     content: &str,
     frames: u32,
     motion: MotionSpec,
     output: OutputSpec,
     encode: &EncodeSettings,
+    subtitles: Option<&SubtitleSpec>,
 ) -> u64 {
     let geometry = format!("{}x{}@{}", output.width(), output.height(), output.fps());
     let encoder = format!("{}:{}", encode.preset, encode.crf);
     let motion_text = format!("{}:{:016x}", motion.descriptor(), motion.seed);
+
+    // A scene with no subtitles contributes the empty string, so turning the
+    // feature on for a project whose scenes have no words is a cache hit —
+    // which is the honest answer, because the bytes really are the same.
+    let subtitle_text = subtitles.map_or_else(String::new, |spec| spec.key_fields().join("\u{1f}"));
 
     hash::fnv1a_fields(&[
         content.as_bytes(),
@@ -885,6 +942,7 @@ fn segment_key(
         motion_text.as_bytes(),
         geometry.as_bytes(),
         encoder.as_bytes(),
+        subtitle_text.as_bytes(),
         // The segment profile is part of what a segment *is* (D-040): a
         // change to the pinned colour or timescale must miss the cache.
         profile::PIX_FMT.as_bytes(),
@@ -1052,6 +1110,7 @@ mod tests {
                     settings: TtsSettings::default(),
                 },
                 motion: MotionRequest::default(),
+                caption: Some(text.to_owned()),
             },
             image: PathBuf::from("001.jpg"),
             audio: None,
@@ -1176,22 +1235,22 @@ mod tests {
     fn the_segment_key_changes_with_everything_that_changes_the_segment() {
         let motion = MotionSpec::new(MotionKind::ZoomIn, 0.1, Anchor::Center);
         let encode = EncodeSettings::default();
-        let base = segment_key("aaaaaaaaaaaaaaaa", 112, motion, output(), &encode);
+        let base = segment_key("aaaaaaaaaaaaaaaa", 112, motion, output(), &encode, None);
 
         assert_eq!(
             base,
-            segment_key("aaaaaaaaaaaaaaaa", 112, motion, output(), &encode),
+            segment_key("aaaaaaaaaaaaaaaa", 112, motion, output(), &encode, None),
             "the same scene must key the same, or nothing is ever reused"
         );
 
         assert_ne!(
             base,
-            segment_key("bbbbbbbbbbbbbbbb", 112, motion, output(), &encode),
+            segment_key("bbbbbbbbbbbbbbbb", 112, motion, output(), &encode, None),
             "different image"
         );
         assert_ne!(
             base,
-            segment_key("aaaaaaaaaaaaaaaa", 113, motion, output(), &encode),
+            segment_key("aaaaaaaaaaaaaaaa", 113, motion, output(), &encode, None),
             "one more frame"
         );
         assert_ne!(
@@ -1201,7 +1260,8 @@ mod tests {
                 112,
                 MotionSpec::new(MotionKind::ZoomOut, 0.1, Anchor::Center),
                 output(),
-                &encode
+                &encode,
+                None
             ),
             "a different move"
         );
@@ -1212,7 +1272,8 @@ mod tests {
                 112,
                 motion,
                 OutputSpec::new(Aspect::Portrait9x16, 1080, 30).unwrap(),
-                &encode
+                &encode,
+                None
             ),
             "a different aspect"
         );
@@ -1226,7 +1287,8 @@ mod tests {
                 &EncodeSettings {
                     preset: "slow".to_owned(),
                     crf: 18
-                }
+                },
+                None
             ),
             "a different preset"
         );
@@ -1242,6 +1304,7 @@ mod tests {
             MotionSpec::new(MotionKind::ZoomIn, 0.1, Anchor::Center),
             output(),
             &EncodeSettings::default(),
+            None,
         );
         let name = format!("seg-{:04}-{key:016x}.mp4", 7);
         assert!(

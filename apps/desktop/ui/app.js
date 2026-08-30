@@ -25,7 +25,7 @@ const MEDIA = [
   "txt", "md",
 ];
 
-const TABS = ["scenes", "voice", "output", "render"];
+const TABS = ["scenes", "voice", "subtitles", "output", "render"];
 
 // The only things the frontend remembers: which project is on screen, what the
 // last render produced, and what the operator has chosen for the *next* render.
@@ -39,6 +39,15 @@ let filter = "all";
 // here is written into `project.yaml`, which this program only reads (D-013).
 // `chosenVoice` of null means "whatever the project says".
 let chosenVoice = null;
+// The subtitle decision for the next render (D-106). Both null means "whatever
+// the project says"; neither is ever written into `project.yaml` (D-013).
+let chosenSubtitles = null;
+let chosenTheme = null;
+let themes = [];
+let themesLoaded = false;
+// The last preview asked for, so a burst of clicks paints the last one rather
+// than whichever request happens to come back last.
+let previewToken = 0;
 // Why a render cannot start for a reason that is about this machine rather
 // than about this project — a missing FFmpeg. Empty when there is none
 // (D-105). Asked once per project open, not once per photograph (D-103).
@@ -79,6 +88,7 @@ function tab(name) {
   for (const button of el("tabs").children) button.classList.toggle("on", button.dataset.tab === name);
   for (const pane of TABS) el("pane-" + pane).hidden = pane !== name;
   if (name === "voice") loadVoices();
+  if (name === "subtitles") loadThemes();
 }
 
 // --------------------------------------------------------------------- home
@@ -340,6 +350,7 @@ async function load(path) {
   if (opening) {
     voices = [];
     voicesLoaded = false;
+    themesLoaded = false;
     restoreChoices();
   }
 
@@ -1212,17 +1223,24 @@ async function browseOutput() {
 function rememberChoices() {
   if (!project) return;
   try {
-    localStorage.setItem("choices:" + project.root, JSON.stringify({ chosenVoice, outDir, outName }));
+    localStorage.setItem(
+      "choices:" + project.root,
+      JSON.stringify({ chosenVoice, outDir, outName, chosenSubtitles, chosenTheme }),
+    );
   } catch { /* storage unavailable */ }
 }
 
 function restoreChoices() {
   chosenVoice = null;
+  chosenSubtitles = null;
+  chosenTheme = null;
   let dir = project.output_dir ?? "";
   let name = project.output_name ?? "";
   try {
     const saved = JSON.parse(localStorage.getItem("choices:" + project.root) ?? "{}");
     if (typeof saved.chosenVoice === "string") chosenVoice = saved.chosenVoice;
+    if (typeof saved.chosenSubtitles === "boolean") chosenSubtitles = saved.chosenSubtitles;
+    if (typeof saved.chosenTheme === "string") chosenTheme = saved.chosenTheme;
     if (typeof saved.outDir === "string" && saved.outDir) dir = saved.outDir;
     if (typeof saved.outName === "string" && saved.outName) name = saved.outName;
   } catch { /* nothing remembered, or storage is unavailable */ }
@@ -1303,6 +1321,10 @@ async function render() {
         voice: chosenVoice || (projectNamesNoVoice() ? appDefaultVoice : null),
         outDir: el("out-dir").value,
         outName: el("out-name").value,
+        // D-106, and the same override rule as the voice above it: null means
+        // "whatever project.yaml says", and nothing here writes to that file.
+        subtitles: chosenSubtitles,
+        subtitleTheme: chosenTheme,
       },
       onProgress: progress,
     });
@@ -1458,6 +1480,9 @@ el("reveal-2").addEventListener("click", () => guard(invoke("reveal_project")));
 el("preview").addEventListener("click", () => preview(null));
 el("voice-default").addEventListener("click", () => chooseVoice(null));
 el("voice-search").addEventListener("input", drawVoices);
+el("subs-default").addEventListener("click", resetSubtitles);
+el("subs-position").addEventListener("change", drawPreview);
+el("subs-text").addEventListener("input", drawPreview);
 el("locale").addEventListener("change", drawVoices);
 el("gender").addEventListener("change", drawVoices);
 
@@ -1468,6 +1493,146 @@ el("out-default").addEventListener("click", () => guard(resetOutput()));
 
 for (const button of [...el("tabs").children, el("go-voice"), el("go-output")]) {
   button.addEventListener("click", () => tab(button.dataset.tab));
+}
+
+// --------------------------------------------------------------- subtitles
+
+// D-106. The same shape as the Voice screen: a list, a selection that says so
+// in words rather than by highlight alone (D-091), and a real preview.
+
+async function loadThemes() {
+  if (!themesLoaded) {
+    try {
+      themes = await invoke("subtitle_themes");
+      themesLoaded = true;
+    } catch (error) {
+      note(String(error), true);
+      return;
+    }
+  }
+  drawThemes();
+}
+
+const subtitlesOn = () =>
+  chosenSubtitles === null ? Boolean(project && project.subtitles) : chosenSubtitles;
+
+const effectiveTheme = () =>
+  chosenTheme || (project && project.subtitle_theme) || "classic";
+
+function drawThemes() {
+  if (!project) return;
+  const on = subtitlesOn();
+  const current = effectiveTheme();
+
+  el("subs-state").textContent = on ? `Subtitles on — ${current}` : "No subtitles";
+
+  // How many scenes actually have words. A subtitle setting that silently does
+  // nothing for half the film is worth saying out loud before the render.
+  const withWords = project.scenes.filter((scene) => scene.caption).length;
+  const total = project.scenes.length;
+  el("subs-coverage").textContent = !on
+    ? "Nothing is burned into the picture."
+    : withWords === total
+      ? `All ${total} scenes have words to show.`
+      : `${withWords} of ${total} scenes have words — the rest render without a caption.`;
+
+  // D-091: say which state this is, rather than leaving a highlight to imply it.
+  const mine = chosenSubtitles !== null || chosenTheme !== null;
+  el("subs-tag").textContent = mine ? "Your choice, this run" : "From project.yaml";
+
+  el("theme-rows").innerHTML = "";
+
+  // "No subtitles" is a row in the same list, not a switch beside it. Off is a
+  // real choice — and on this screen it is the *usual* one, since D-106 makes
+  // subtitles opt-in — so it belongs among the things you can pick rather than
+  // as a second control that disagrees with the list underneath it.
+  const none = document.createElement("li");
+  none.className = on ? "" : "on";
+  none.innerHTML = `<div class="t-name"></div><div class="t-desc"></div><span class="t-mark"></span>`;
+  none.querySelector(".t-name").textContent = "No subtitles";
+  none.querySelector(".t-desc").textContent =
+    "Leave the picture alone. Nothing is burned in, and the film is the film you would get without this screen.";
+  none.querySelector(".t-mark").textContent = on ? "" : "\u2713 Selected";
+  none.addEventListener("click", () => chooseTheme(null));
+  el("theme-rows").append(none);
+
+  for (const theme of themes) {
+    const row = document.createElement("li");
+    row.className = on && theme.id === current ? "on" : "";
+    row.innerHTML = `<div class="t-name"></div><div class="t-desc"></div><span class="t-mark"></span>`;
+    row.querySelector(".t-name").textContent = theme.id;
+    row.querySelector(".t-desc").textContent = theme.description;
+    // D-091 again: the row says which state it is in, rather than leaving a
+    // highlight to imply it — including the state where a theme is chosen but
+    // subtitles are switched off, which a highlight alone cannot express.
+    row.querySelector(".t-mark").textContent =
+      on && theme.id === current ? "\u2713 Selected" : theme.default ? "Default" : "";
+    row.addEventListener("click", () => chooseTheme(theme.id));
+    el("theme-rows").append(row);
+  }
+  drawPreview();
+}
+
+// One handler for the whole list. `null` is the "No subtitles" row; anything
+// else is a look, and picking a look is itself the request to burn them —
+// choosing one and having nothing happen is the defect D-091 describes.
+function chooseTheme(id) {
+  if (id === null) {
+    chosenSubtitles = false;
+  } else {
+    chosenSubtitles = true;
+    chosenTheme = id;
+  }
+  drawThemes();
+  rememberChoices();
+  updateRender();
+}
+
+function resetSubtitles() {
+  chosenSubtitles = null;
+  chosenTheme = null;
+  drawThemes();
+  rememberChoices();
+  updateRender();
+}
+
+// The renderer's own preview, painted straight into a canvas. The response is
+// eight bytes of little-endian width and height, then straight RGBA — see
+// `subtitle_preview` in main.rs for why it is raw rather than an image file.
+async function drawPreview() {
+  const canvas = el("theme-canvas");
+  const token = ++previewToken;
+  let body;
+  try {
+    body = await invoke("subtitle_preview", {
+      text: el("subs-text").value,
+      // Empty means "no subtitles" — the bare frame, which is what that row
+      // actually produces. A preview showing a caption under a header reading
+      // "Nothing is burned into the picture" contradicts itself.
+      theme: subtitlesOn() ? effectiveTheme() : "",
+      position: el("subs-position").value,
+      shortEdge: 360,
+    });
+  } catch (error) {
+    el("subs-note").textContent = String(error);
+    return;
+  }
+  // A slower earlier request must not paint over a faster later one.
+  if (token !== previewToken) return;
+
+  const bytes = new Uint8Array(body);
+  const head = new DataView(bytes.buffer, bytes.byteOffset, 8);
+  const width = head.getUint32(0, true);
+  const height = head.getUint32(4, true);
+  canvas.width = width;
+  canvas.height = height;
+
+  const pixels = new Uint8ClampedArray(bytes.buffer, bytes.byteOffset + 8, width * height * 4);
+  canvas.getContext("2d").putImageData(new ImageData(pixels, width, height), 0, 0);
+  el("subs-note").textContent = subtitlesOn()
+    ? "Drawn by the renderer, at " + width + "\u00d7" + height +
+      " \u2014 the film gets the same design at its own size."
+    : "No subtitles: this is the frame, untouched. Click any look to see it.";
 }
 
 // Two theme switches, one setting: the one in the title bar is always to hand,

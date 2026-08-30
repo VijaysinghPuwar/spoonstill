@@ -1157,3 +1157,96 @@ button.small { padding: 3px 9px; font-size: 11px; }
 
 /* A voice picker wide enough to read a language name in. */
 .wide-select { flex: 1 1 220px; min-width: 0; max-width: none; }
+
+/* ----------------------------------------------------------- subtitles
+
+   D-106. The theme list beside a live preview. Two panes that each own their
+   own scrolling, because D-101's rule holds here too: every column has to be
+   on screen at every size, and the thing that gives way is content, never a
+   control. The preview is the content — below 1040px it goes under the list
+   rather than squeezing it. */
+
+.subs-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--preview-w);
+  gap: 0;
+}
+
+:root { --preview-w: 460px; }
+
+.subs-body > .voices { overflow-y: auto; background: var(--grid); border-right: 1px solid var(--line); }
+
+/* Three columns: the name, what it is for, and which state this row is in.
+   The description takes the slack; the state column is fixed so that picking a
+   row does not move every other row sideways. */
+.themes li {
+  grid-template-columns: minmax(80px, 116px) minmax(0, 1fr) 116px;
+  align-items: start;
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+.themes .t-name { font-weight: 600; letter-spacing: -0.005em; }
+
+/* The description is the whole content of the row — what this theme is *for*
+   is the question the screen exists to answer. D-101 allows a cell to ellipsize
+   or to wrap; here it must wrap, because a theme described as
+   "White with a black edge and a soft shadow. No box — ..." has had its point
+   cut off. Wrapping costs a variable row height across six rows and nothing
+   else. */
+.themes .t-desc,
+.themes .t-mark {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+.themes .t-desc { color: var(--ink-2); font-size: 12px; line-height: 1.35; }
+.themes .t-mark {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-3);
+  text-align: right;
+  line-height: 1.35;
+}
+.themes li.on .t-mark { color: var(--accent); }
+
+.preview-side {
+  min-width: 0;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+}
+
+/* The frame is 16:9 and must never overflow its column — it is a picture, and
+   a picture that pushes the window wider is the D-101 defect in another form. */
+#theme-canvas {
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--grid);
+  display: block;
+}
+
+.preview-tools { display: flex; flex-wrap: wrap; gap: 8px; }
+.preview-tools .select { flex: 0 1 190px; max-width: none; }
+.preview-tools .search { flex: 1 1 180px; width: auto; }
+
+@media (max-width: 1240px) { :root { --preview-w: 380px; } }
+@media (max-width: 1080px) { :root { --preview-w: 320px; } }
+
+/* Under this the two columns stop being two columns. The list keeps its full
+   width and the preview goes beneath it — nothing is lost, and neither is
+   squeezed to the point of being unreadable. */
+@media (max-width: 980px) {
+  .subs-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; overflow-y: auto; }
+  .subs-body > .voices { border-right: 0; border-bottom: 1px solid var(--line); }
+  .preview-side { flex-direction: row; flex-wrap: wrap; align-items: flex-start; }
+  #theme-canvas { flex: 1 1 300px; width: auto; max-width: 420px; }
+  .preview-tools { flex: 1 1 240px; }
+}

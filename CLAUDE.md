@@ -70,8 +70,10 @@ Cite the D-number and move on. If you have new evidence, change `decisions.md`
 in the same commit as the code.
 
 **3. Do not guess an Open decision.**
-Only **D-072** (captions) is still Open, and it records a default to use if you
-must proceed — say explicitly that you used it. D-070 and D-071 were Open and
+Only **D-072** (captions) is still Open, and **its recorded default is now
+superseded by D-106**: captions are burned into the picture, not a sidecar
+`.srt`. What is still open there is word-level karaoke, which needs provider
+word boundaries. D-070 and D-071 were Open and
 are now Accepted; they live under "Resolved from the Open list" so the answer is
 as easy to find as the question was. D-054 through D-057 and D-075 through
 D-078 were added during M2: read **D-056** before touching the import path,
@@ -158,6 +160,12 @@ cargo build --release -p spoonstill-cli
 ./target/release/still voices en-US            # needs `edge-tts` on PATH
 ./target/release/still render fixtures/projects/mixed/ --out /tmp/mixed.mp4 \
   --voice en-GB-RyanNeural
+
+# Subtitles, burned into the picture (D-106). Six looks; `still subtitles`
+# says what each is for. A scene is captioned when it has words — the script it
+# speaks, or a .txt beside its recording.
+./target/release/still subtitles
+./target/release/still render /tmp/demo --out /tmp/demo-subs.mp4 --subtitles boxed
 
 # Every external program this needs, and the offer to install what is missing.
 # The first thing to run against a report that says the app "won't open".
@@ -279,13 +287,16 @@ What exists now, by crate:
 - `spoonstill-core` — `motion::build_filter` (pure), `geometry`, `timing`,
   `hash` (one-shot and streaming FNV-1a), `diagnostics`, `path_safety`
   (containment behind a `RealPath` trait), `project` (the scene model and every
-  pure validation rule), `remedy` (a missing tool, as three fields — D-105).
+  pure validation rule), `remedy` (a missing tool, as three fields — D-105),
+  `captions` (six themes as fractions, and cue splitting — D-106).
   Still zero dependencies.
 - `spoonstill-media` — `command` (the only place a process is spawned),
   `probe` (timed, typed), `profile` (`SegmentProfile` + `assert_matches_profile`),
   `scene` (render → validate → atomic move), `audio` (normalize, generate
   silence, measure), `concat` (the join and the film's own assertion),
-  `atomic` (write-beside-then-rename, shared by all of them).
+  `caption` (the subtitle rasterizer — D-106; the one place `fontdue` and the
+  bundled Inter weights are used), `atomic` (write-beside-then-rename, shared
+  by all of them).
 - `spoonstill-state` — `logs`: the JSON Lines sink and the bundle export.
   **Still no SQLite** — that is M3.
 - `spoonstill-tts` — the `Provider` trait, `Request`/`Voice`/`TtsError`, and
@@ -296,16 +307,18 @@ What exists now, by crate:
   `AudioSource` resolution, speech included), `pool` (the bounded worker pool),
   `film` (`still render`: two pools, the lock, the join), `render` (one scene),
   `diagnostics`, `tooling` (every external program: checked, and installed —
-  D-105), `tts` (the re-export the control surfaces use), and `surface`.
+  D-105), `tts` (the re-export the control surfaces use), `subtitles` (the
+  theme list and the renderer's own preview — D-106), and `surface`.
   Owns `serde_yaml_ng` and `csv`; the domain model does not know what a file
   format is.
 - `spoonstill-cli` — `still new`, `still add`, `still validate`, `still render`,
-  `still render-scene`, `still voices`, `still doctor`,
+  `still render-scene`, `still voices`, `still subtitles`, `still doctor`,
   `still diagnostics export|where`.
 - `apps/desktop` — the Tauri 2 window (D-051's review grid, D-083's shape,
   D-085 and D-086's navigation). **Two levels: home is the operator's projects
   plus app-level Settings; a project is a left rail over one dense grid —
-  Scenes, Voice, Output, Render** (D-092 removed Runs). All translation. The
+  Scenes, Voice, Subtitles, Output, Render** (D-092 removed Runs). All
+  translation. The
   design brief and canvas it was built against are in
   `~/Downloads/Desktop application redesign` — read D-083 for what was followed
   and the one thing that was not, then D-085 and D-086 for what the author's own
@@ -421,6 +434,34 @@ FFmpeg to Homebrew or winget rather than shipping it. Nothing here is M5:
 these builds are unsigned, un-notarized, have no updater and bundle no FFmpeg,
 and the README says so in as many words. Do not delete an M5 deliverable
 because a release exists.
+
+**Subtitles are burned in, drawn by us, and one of the six is "none"**
+(D-106). `subtitles: {enabled, theme, position}` in `project.yaml`,
+`--subtitles THEME` / `--no-subtitles` on the command line, `still subtitles`
+to list them, and a **Subtitles** screen in the window whose preview is drawn
+by the renderer rather than imitated in CSS. Six themes — `classic`, `boxed`,
+`band`, `card`, `punch`, `minimal` — every length a fraction of the frame, so
+one theme is one design at 720p and at 4K. **Off by default**, because burning
+text into pixels is irreversible and the reverse mistake costs one flag.
+
+The load-bearing fact: **`brew install ffmpeg` no longer has `libass` or
+`libfreetype`**, so neither the `subtitles` nor the `drawtext` filter exists on
+the FFmpeg our own README tells operators to install (measured 2026-08-29:
+`No such filter: 'drawtext'`). So `spoonstill_media::caption` rasterizes the
+text — `fontdue` plus three bundled Inter weights — and FFmpeg composites it
+with `overlay`, which every build has. One `rawvideo` input and one `overlay`
+per cue, appended **after** the motion chain's tail so D-033 and D-037 are
+untouched, and the existing D-041 profile assertion is what proves they stayed
+untouched. **No path ever enters the filter graph** — that is the single reason
+this is the same design on Windows and macOS, and there is a test named after
+it. Windows are `gte(t,S)*lt(t,E)`, half-open, because `between()` draws two
+cues on the frame they share.
+
+A scene is captioned when it has words: an explicit `caption` column, else the
+script it speaks. **A `.txt` beside a recording is now the caption, not a
+D-020 conflict** — that turns an error into a working scene, and without it an
+operator who records their own voiceover could never have subtitles. Cost
+measured at 1080p: **about 5%**, no extra memory.
 
 **A missing tool is something to press, not a sentence to read** (D-105). The
 Voice screen reported `` `edge-tts` is not on this machine. Install it with
@@ -574,8 +615,9 @@ WKWebView ignores it without a word, which is how the bar shipped looking
 draggable and not being. Anything in the window a test cannot assert has to be
 clicked before it is called done.
 
-**Open decisions:** only D-072 (captions) remains, and it does not block
-anything. D-087 was added after M2: read it before touching a workflow, an
+**Open decisions:** only D-072 (captions) remains, it does not block anything,
+and D-106 has already superseded its default. Read **D-106 before touching
+`captions`, `caption`, a theme, the subtitle path, or `move_into_place`.** D-087 was added after M2: read it before touching a workflow, an
 installer or `README.md`, and D-089 before touching a path or a disabled
 control, D-090 before touching a hostile-name fixture, and D-091 before
 touching the live panel or the voice list, D-092 before touching Settings or a

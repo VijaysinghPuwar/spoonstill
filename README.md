@@ -143,6 +143,38 @@ Spoken lines and your own recordings are levelled to the same loudness, so a
 phone recording and a synthetic voice sit together in one film without you
 riding a fader.
 
+### Subtitles
+
+Off unless you ask — text burned into the picture cannot be taken out again
+without re-rendering.
+
+```bash
+still subtitles                                     # six looks, and what each is for
+still render ~/holiday --out ~/holiday.mp4 --subtitles boxed
+still render ~/holiday --out ~/holiday.mp4 --no-subtitles
+```
+
+A scene gets a caption when it has words. That is the `.txt` it speaks — or,
+**if the scene has a recording, a `.txt` next to it is the caption for that
+recording**, so your own voiceover can be subtitled without typing anything
+twice.
+
+To make it the project's own setting, in `project.yaml`:
+
+```yaml
+subtitles:
+  enabled: true
+  theme: boxed      # classic · boxed · band · card · punch · minimal
+  position: bottom  # or top
+```
+
+In the window there is a **Subtitles** screen: pick a look and see it drawn on
+a real frame before you commit a whole film to it, or pick *No subtitles*.
+
+The text is drawn by spoonstill itself, not by FFmpeg — so this works on the
+plain `ffmpeg` you already installed, with no extra libraries and nothing else
+to download.
+
 ### When it goes wrong
 
 ```bash
@@ -245,10 +277,14 @@ short_edge: 1080
 fps: 30
 defaults:
   duration: 4.0     # how long an unpaired still holds
+subtitles:
+  enabled: false    # burned into the picture when true
+  theme: classic
 ```
 
 Full rules: [D-056](decisions.md) for what a project folder is and which file
-wins, [D-080](decisions.md) for how media gets in.
+wins, [D-080](decisions.md) for how media gets in, [D-106](decisions.md) for
+subtitles.
 
 ---
 

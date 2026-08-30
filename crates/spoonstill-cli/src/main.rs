@@ -14,6 +14,7 @@ use spoonstill_app::diagnostics;
 use spoonstill_app::film::{FilmEvent, SerialEvents};
 use spoonstill_app::render::RenderSceneOptions;
 use spoonstill_app::surface::{Cancel, EncodeSettings};
+use spoonstill_core::captions::SubtitleTheme;
 use spoonstill_core::{Anchor, Aspect, MotionKind, MotionSpec};
 
 #[derive(Debug, Parser)]
@@ -49,6 +50,8 @@ enum Command {
     RenderScene(RenderSceneArgs),
     /// List the voices a text-to-speech provider offers.
     Voices(VoicesArgs),
+    /// List the subtitle themes, and what each one is for (D-106).
+    Subtitles,
     /// Check every program spoonstill needs, and offer to install what is
     /// missing (D-105).
     Doctor(DoctorArgs),
@@ -170,6 +173,19 @@ struct RenderArgs {
     /// Use this TTS provider for this run only.
     #[arg(long, value_name = "NAME")]
     provider: Option<String>,
+
+    /// Burn subtitles into the picture for this run (D-106).
+    ///
+    /// Optionally naming the look: `--subtitles` uses the project's theme,
+    /// `--subtitles boxed` overrides it. `still subtitles` lists them all.
+    /// An override, not an edit — nothing here writes to `project.yaml`
+    /// (D-013).
+    #[arg(long, value_name = "THEME", num_args = 0..=1, default_missing_value = "")]
+    subtitles: Option<String>,
+
+    /// Render without subtitles, whatever `project.yaml` says.
+    #[arg(long, conflicts_with = "subtitles")]
+    no_subtitles: bool,
 }
 
 #[derive(Debug, Args)]
@@ -314,6 +330,7 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Move(args) => move_scene(&args.project, &args.scene, args.to),
         Command::Validate(args) => validate(args),
         Command::Voices(args) => list_voices(&args),
+        Command::Subtitles => list_subtitle_themes(),
         Command::Doctor(args) => doctor(&args),
         Command::Render(args) => render_project(args),
         Command::RenderScene(args) => render_scene(args),
@@ -680,7 +697,59 @@ fn short(path: &std::path::Path, root: &std::path::Path) -> String {
 /// through one mutex and every line is written whole, tagged with the scene it
 /// belongs to and a completed-so-far counter rather than a percentage that
 /// jumps around.
+/// `still subtitles` — the themes, and what each is for.
+///
+/// The CLI half of the window's theme chooser (D-010): if the window can show
+/// it, the command line can print it. The window adds a rendered preview,
+/// which a terminal cannot; the words are the same words.
+fn list_subtitle_themes() -> Result<(), String> {
+    let default = spoonstill_app::import::settings::DEFAULT_THEME;
+    println!("Subtitle themes (D-106). Burned into the picture, not a sidecar file.\n");
+
+    let width = SubtitleTheme::ALL
+        .iter()
+        .map(|t| t.as_str().len())
+        .max()
+        .unwrap_or(8);
+
+    for theme in SubtitleTheme::ALL {
+        let mark = if theme == default { " (default)" } else { "" };
+        println!(
+            "  {name:<width$}  {description}{mark}",
+            name = theme.as_str(),
+            description = theme.description(),
+        );
+    }
+
+    println!(
+        "\nTurn them on for one run:   still render DIR --subtitles boxed\n\
+         Or for the project, in project.yaml:\n\
+         \n  subtitles:\n    enabled: true\n    theme: boxed\n    position: bottom\n\
+         \nA scene is captioned when it has words: the script it speaks, or a\n\
+         `caption` column, or a .txt beside a recording."
+    );
+    Ok(())
+}
+
 fn render_project(args: RenderArgs) -> Result<(), String> {
+    // `--subtitles` with no value means "on, with the project's own theme";
+    // with a value it also picks the theme. `--no-subtitles` is the other
+    // direction, and clap already refuses both at once.
+    let (subtitles, subtitle_theme) = match (&args.subtitles, args.no_subtitles) {
+        (_, true) => (Some(false), None),
+        (Some(theme), _) if theme.is_empty() => (Some(true), None),
+        (Some(theme), _) => {
+            let parsed = SubtitleTheme::parse(theme).ok_or_else(|| {
+                format!(
+                    "{theme:?} is not a subtitle theme. It is one of {} —                      run `still subtitles` to see what each one looks like.",
+                    SubtitleTheme::names()
+                )
+            })?;
+            (Some(true), Some(parsed))
+        }
+        (None, false) => (None, None),
+    };
+
     let defaults = spoonstill_app::RenderProjectOptions::for_project(&args.project);
     let options = spoonstill_app::RenderProjectOptions {
         out: args.out,
@@ -689,6 +758,8 @@ fn render_project(args: RenderArgs) -> Result<(), String> {
         force: args.force,
         voice: args.voice.clone(),
         provider: args.provider.clone(),
+        subtitles,
+        subtitle_theme,
         ..defaults
     };
 

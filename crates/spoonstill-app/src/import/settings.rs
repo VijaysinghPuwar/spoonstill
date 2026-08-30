@@ -28,6 +28,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use spoonstill_core::captions::{Placement, SubtitleTheme};
 use spoonstill_core::motion::{DEFAULT_AMOUNT, MAX_AMOUNT, MIN_AMOUNT};
 use spoonstill_core::project::{MAX_SCENE_SECONDS, Problem, ProblemKind, ProviderId, VoiceId};
 use spoonstill_core::{Aspect, MANIFEST_FILE, OutputSpec};
@@ -59,6 +60,18 @@ const MAX_TRIM_SECONDS: f64 = 10.0;
 
 /// Default name of the rendered film, inside the project folder.
 pub const DEFAULT_OUTPUT: &str = "out.mp4";
+
+/// Subtitles are **off** unless the project asks for them (D-106).
+///
+/// Off because burning text into the picture is irreversible: it is in the
+/// pixels, and an operator who did not want it re-renders the whole film. The
+/// reverse mistake costs one flag. D-072 filed captions as V1.1 on the
+/// assumption they would be a sidecar `.srt`; burned-in is what was asked for,
+/// and burned-in is the one that has to be asked for.
+pub const DEFAULT_SUBTITLES: bool = false;
+
+/// The look a project gets when it turns subtitles on without naming one.
+pub const DEFAULT_THEME: SubtitleTheme = SubtitleTheme::Classic;
 
 /// How long an image with no narration holds, in seconds (D-050, D-056).
 ///
@@ -100,6 +113,12 @@ pub struct Settings {
     pub silent_seconds: f64,
     /// Default zoom span, as a fraction (D-035's amount).
     pub amount: f64,
+    /// Whether to burn subtitles into the picture (D-106).
+    pub subtitles: bool,
+    /// Which look, when they are on.
+    pub subtitle_theme: SubtitleTheme,
+    /// Which edge they sit against.
+    pub subtitle_placement: Placement,
 }
 
 impl Default for Settings {
@@ -119,6 +138,9 @@ impl Default for Settings {
             crf: 18,
             silent_seconds: DEFAULT_SILENT_SECONDS,
             amount: DEFAULT_AMOUNT,
+            subtitles: DEFAULT_SUBTITLES,
+            subtitle_theme: DEFAULT_THEME,
+            subtitle_placement: Placement::Bottom,
         }
     }
 }
@@ -138,6 +160,15 @@ struct RawSettings {
     tts: Option<RawTts>,
     encode: Option<RawEncode>,
     defaults: Option<RawDefaults>,
+    subtitles: Option<RawSubtitles>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSubtitles {
+    enabled: Option<bool>,
+    theme: Option<String>,
+    position: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -366,6 +397,36 @@ fn resolve(raw: RawSettings) -> (Settings, Vec<Problem>) {
                     value: amount.to_string(),
                     expected: leak(format!("between {MIN_AMOUNT} and {MAX_AMOUNT}")),
                 }));
+            }
+        }
+    }
+
+    if let Some(subtitles) = raw.subtitles {
+        // Naming a theme is not the same as asking for subtitles, and neither
+        // implies the other: `enabled: false` with a theme set is how an
+        // operator keeps their choice while turning the feature off for one
+        // render.
+        if let Some(enabled) = subtitles.enabled {
+            settings.subtitles = enabled;
+        }
+        if let Some(theme) = non_empty(subtitles.theme) {
+            match SubtitleTheme::parse(&theme) {
+                Some(parsed) => settings.subtitle_theme = parsed,
+                None => problems.push(Problem::in_project(ProblemKind::UnusableSetting {
+                    field: "subtitles.theme",
+                    value: theme,
+                    expected: leak(format!("one of {}", SubtitleTheme::names())),
+                })),
+            }
+        }
+        if let Some(position) = non_empty(subtitles.position) {
+            match Placement::parse(&position) {
+                Some(parsed) => settings.subtitle_placement = parsed,
+                None => problems.push(Problem::in_project(ProblemKind::UnusableSetting {
+                    field: "subtitles.position",
+                    value: position,
+                    expected: "bottom or top",
+                })),
             }
         }
     }

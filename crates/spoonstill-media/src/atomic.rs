@@ -77,11 +77,27 @@ pub fn ensure_parent(path: &Path) -> Result<(), MediaError> {
 /// [`MediaError::Io`] naming the destination.
 pub fn move_into_place(from: &Path, to: &Path) -> Result<(), MediaError> {
     if to.exists() {
-        std::fs::remove_file(to).map_err(|source| MediaError::Io {
-            doing: "replacing the existing file at",
-            path: to.to_path_buf(),
-            source,
-        })?;
+        // `NotFound` is success, not failure: what this call wants is for the
+        // destination to be gone, and another worker having removed it first
+        // achieves that.
+        //
+        // Two workers reach this line for the same path whenever two scenes
+        // resolve to one cache entry — five hundred scenes narrated from one
+        // long recording is the ordinary case, not a contrived one — and both
+        // see `exists()` before either removes. The loser used to fail the
+        // whole render with "No such file or directory" about a file it had
+        // just been told was there. Found by rendering a hundred scenes that
+        // shared one recording; the window between the two calls is small
+        // enough that it never appeared at the size the other tests run at.
+        if let Err(source) = std::fs::remove_file(to)
+            && source.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(MediaError::Io {
+                doing: "replacing the existing file at",
+                path: to.to_path_buf(),
+                source,
+            });
+        }
     }
     std::fs::rename(from, to).map_err(|source| MediaError::Io {
         doing: "moving the finished file to",
@@ -92,6 +108,37 @@ pub fn move_into_place(from: &Path, to: &Path) -> Result<(), MediaError> {
 
 #[cfg(test)]
 mod tests {
+    /// Two workers finishing the same cache entry at the same moment must both
+    /// succeed. Simulated rather than raced, because a real race reproduces
+    /// only sometimes and a test that fails one run in twenty is a test people
+    /// learn to re-run.
+    #[test]
+    fn a_destination_removed_by_another_worker_is_not_a_failure() {
+        let dir = std::env::temp_dir().join(format!("spoonstill-move-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        let destination = dir.join("shared.wav");
+        let first = dir.join("first.partial");
+        let second = dir.join("second.partial");
+
+        std::fs::write(&destination, b"an earlier copy").expect("seed the destination");
+        std::fs::write(&first, b"one").expect("write");
+        std::fs::write(&second, b"two").expect("write");
+
+        // The loser of the race: the destination existed when it looked, and
+        // was gone by the time it removed. Reproduced exactly by removing it
+        // here, between the two.
+        assert!(destination.exists());
+        std::fs::remove_file(&destination).expect("the other worker got there first");
+        move_into_place(&first, &destination).expect("a lost race is still a success");
+        assert_eq!(std::fs::read(&destination).expect("read"), b"one");
+
+        // And the ordinary case still replaces.
+        move_into_place(&second, &destination).expect("replacing works");
+        assert_eq!(std::fs::read(&destination).expect("read"), b"two");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]

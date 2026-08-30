@@ -18,6 +18,7 @@ pub mod import;
 pub mod ingest;
 pub mod pool;
 pub mod render;
+pub mod subtitles;
 pub mod tooling;
 
 pub use audio::{AudioCache, AudioError, ResolvedAudio};
@@ -28,6 +29,7 @@ pub use render::{RenderError, RenderSceneOptions, render_scene};
 /// Where this machine's activity CSV lives (D-093). Re-exported because the
 /// control surfaces reach this crate and stop (D-010).
 pub use spoonstill_state::runs::index_path as runs_index_path;
+pub use subtitles::{Preview, ThemeChoice};
 
 /// The types the control surface needs, re-exported through the layer it is
 /// allowed to depend on.
