@@ -2068,6 +2068,36 @@ error into a working scene, so no project that renders today can break.
 `caption` is deliberately **outside** D-020's exactly-one rule, because it is
 not a source of audio; it is what the viewer reads while the audio plays.
 
+#### Two rules that came from rendering a real project
+
+Both found on 2026-08-29 against the author's own ten-scene film, which is
+narrated art with **words already drawn into the pictures**.
+
+**A cue never ends on a dangling function word.** The character budget put a
+break here: *"Those born with poor aptitude could pour twenty-four hours a day
+into training and"* / *"still fall short…"* — leaving the viewer holding an
+unfinished phrase across a cut. `carry_weak_endings` moves a trailing
+conjunction, preposition or article onto the next cue. One word, never the only
+word in a cue, and never a word carrying punctuation, because a word with a
+comma after it is ending something rather than dangling. `WEAK_ENDINGS` is a
+short closed list of function words on purpose: anything longer starts making
+judgements about content, and anything cleverer needs a parser.
+
+**Placement is an override, on both surfaces.** Whether a caption lands on
+lettering that is already in the photograph is a fact about *those* pictures,
+and the answer changes between batches — so it cannot only live in
+`project.yaml`. Two things were wrong when a real project was pointed at this:
+the window's position box drove **only the preview**, so an operator could move
+the caption off their artwork, render, and get it back exactly where it was
+(the D-091 defect, one screen along); and the command line had no override at
+all, which breaks *if the CLI cannot do it, it does not exist*. Now
+`--subtitle-position top` exists and the window sends what its box says.
+
+On that film the difference is decisive: `boxed` at the top clears the
+artwork's own lettering completely, while `classic` at the bottom is the worst
+of the six, because with no plate the drawn-in text reads *through* the gaps
+between the caption's lines.
+
 #### The six themes, and "no subtitles" as one of the choices
 
 `classic` (white, black edge, soft shadow, no box), `boxed` (rounded
@@ -2101,9 +2131,10 @@ subtitles:
 ```
 
 ```
-still subtitles                          # the themes, and what each is for
-still render DIR --subtitles boxed       # on, this run, with this look
-still render DIR --no-subtitles          # off, this run
+still subtitles                              # the themes, and what each is for
+still render DIR --subtitles boxed           # on, this run, with this look
+still render DIR --subtitle-position top     # off the artwork's own lettering
+still render DIR --no-subtitles              # off, this run
 ```
 
 The window's chooser previews a theme by calling the **renderer**

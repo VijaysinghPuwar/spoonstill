@@ -946,6 +946,8 @@ struct RenderRequest {
     subtitles: Option<bool>,
     /// Which look, for this run.
     subtitle_theme: Option<String>,
+    /// Which edge they sit against, for this run.
+    subtitle_position: Option<String>,
 }
 
 /// The subtitle themes, for the window's chooser (D-106).
@@ -1017,11 +1019,19 @@ async fn render_project(
         out_name,
         subtitles,
         subtitle_theme,
+        subtitle_position,
     } = request;
 
     // Refused here rather than deep in the render, for the same reason the
     // output path is: a name the window should never have sent is a bug worth
     // seeing, not a silent fallback to the default look (D-055).
+    let subtitle_placement = match subtitle_position.filter(|p| !p.is_empty()) {
+        None => None,
+        Some(edge) => Some(
+            spoonstill_core::captions::Placement::parse(&edge)
+                .ok_or_else(|| format!("{edge:?} is not bottom or top"))?,
+        ),
+    };
     let subtitle_theme = match subtitle_theme.filter(|t| !t.is_empty()) {
         None => None,
         Some(name) => Some(
@@ -1067,6 +1077,7 @@ async fn render_project(
                 out,
                 subtitles,
                 subtitle_theme,
+                subtitle_placement,
                 ..defaults
             };
 

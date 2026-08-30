@@ -151,8 +151,14 @@ without re-rendering.
 ```bash
 still subtitles                                     # six looks, and what each is for
 still render ~/holiday --out ~/holiday.mp4 --subtitles boxed
+still render ~/holiday --out ~/holiday.mp4 --subtitle-position top
 still render ~/holiday --out ~/holiday.mp4 --no-subtitles
 ```
+
+If your pictures already have words drawn into them — captions in the artwork,
+a logo along the bottom — put the subtitles at the **top**. A theme with a
+plate behind it (`boxed`, `band`, `card`) also covers that lettering, where
+`classic` and `minimal` let it show through between the lines.
 
 A scene gets a caption when it has words. That is the `.txt` it speaks — or,
 **if the scene has a recording, a `.txt` next to it is the caption for that

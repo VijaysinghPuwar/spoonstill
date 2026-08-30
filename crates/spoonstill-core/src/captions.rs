@@ -617,7 +617,59 @@ fn split(words: &str, budget: usize) -> Vec<String> {
     if pieces.is_empty() {
         pieces.push(String::new());
     }
+    carry_weak_endings(&mut pieces);
     pieces
+}
+
+/// Words that must not be the last thing on screen before a cut.
+///
+/// The subtitler's rule: a cue ending on a conjunction, preposition or article
+/// leaves the viewer holding an unfinished phrase across a cut. Seen on real
+/// narration — *"Those born with poor aptitude could pour twenty-four hours a
+/// day into training and"* / *"still fall short…"* — where the break lands
+/// wherever the character budget ran out rather than where the sentence
+/// breathes.
+///
+/// Deliberately short and closed-class. It is a list of function words, not a
+/// grammar: anything longer starts making judgements about content, and
+/// anything cleverer needs a parser we are not going to carry.
+const WEAK_ENDINGS: [&str; 34] = [
+    "a", "an", "the", "and", "or", "but", "nor", "so", "yet", "of", "to", "in", "on", "at", "for",
+    "with", "from", "by", "as", "into", "onto", "over", "under", "than", "that", "which", "who",
+    "if", "when", "while", "because", "though", "although", "before",
+];
+
+/// Move a trailing function word onto the next piece.
+///
+/// Only ever moves **one** word, and never the only word in a piece: a cue must
+/// not be emptied to spare the one before it, and moving a run of them just
+/// relocates the same problem.
+fn carry_weak_endings(pieces: &mut [String]) {
+    for index in 0..pieces.len().saturating_sub(1) {
+        let last = match pieces[index].rsplit(' ').next() {
+            Some(word) => word.to_owned(),
+            None => continue,
+        };
+        // A piece of one word has nothing to give away.
+        if !pieces[index].contains(' ') {
+            continue;
+        }
+        let bare = last.trim_matches(|c: char| !c.is_alphanumeric());
+        if !WEAK_ENDINGS.contains(&bare.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        // A word carrying punctuation is ending something, not dangling.
+        if last.ends_with([',', ';', ':', '.', '!', '?']) {
+            continue;
+        }
+        pieces[index].truncate(pieces[index].len() - last.len() - 1);
+        let next = std::mem::take(&mut pieces[index + 1]);
+        pieces[index + 1] = if next.is_empty() {
+            last
+        } else {
+            format!("{last} {next}")
+        };
+    }
 }
 
 /// Whether a word ends a sentence — allowing for the closing quote or bracket
@@ -861,6 +913,47 @@ mod tests {
         );
         assert!(c.len() >= 2, "{c:?}");
         assert_eq!(c[0].text, "The boat came in.");
+    }
+
+    /// A cue that ends on "and" hands the viewer half a phrase across a cut.
+    /// Taken from real narration in the author's own project.
+    #[test]
+    fn a_cue_never_ends_on_a_dangling_function_word() {
+        let text = "Those born with poor aptitude could pour twenty-four hours a day \
+                    into training and still fall short of what someone else achieved \
+                    in a single hour.";
+        let c = cues(text, 9.0, 84);
+        assert!(c.len() > 1, "this should split: {c:?}");
+        for cue in &c[..c.len() - 1] {
+            let last = cue.text.rsplit(' ').next().expect("a word");
+            let bare = last
+                .trim_matches(|ch: char| !ch.is_alphanumeric())
+                .to_ascii_lowercase();
+            assert!(
+                !WEAK_ENDINGS.contains(&bare.as_str()) || last.ends_with(','),
+                "cue ends on {last:?}: {cue:?}"
+            );
+        }
+    }
+
+    /// The carry must never empty a cue or lose a word — checked across every
+    /// budget, because the piece that gives a word away can be short already.
+    #[test]
+    fn carrying_a_weak_word_never_empties_a_cue() {
+        let text = "It was a long day and a longer night, and the of the to the \
+                    in the on the at the for the with the from the by the as the";
+        for budget in [12, 16, 24, 40, 80] {
+            let c = cues(text, 60.0, budget);
+            for cue in &c {
+                assert!(!cue.text.trim().is_empty(), "empty cue at budget {budget}");
+            }
+            let joined = c
+                .iter()
+                .map(|x| x.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(joined, normalize(text), "words lost at budget {budget}");
+        }
     }
 
     /// One word longer than the whole budget has nowhere to break, and must

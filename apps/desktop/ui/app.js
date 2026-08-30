@@ -1225,7 +1225,10 @@ function rememberChoices() {
   try {
     localStorage.setItem(
       "choices:" + project.root,
-      JSON.stringify({ chosenVoice, outDir, outName, chosenSubtitles, chosenTheme }),
+      JSON.stringify({
+        chosenVoice, outDir, outName, chosenSubtitles, chosenTheme,
+        subtitlePosition: el("subs-position").value,
+      }),
     );
   } catch { /* storage unavailable */ }
 }
@@ -1241,6 +1244,9 @@ function restoreChoices() {
     if (typeof saved.chosenVoice === "string") chosenVoice = saved.chosenVoice;
     if (typeof saved.chosenSubtitles === "boolean") chosenSubtitles = saved.chosenSubtitles;
     if (typeof saved.chosenTheme === "string") chosenTheme = saved.chosenTheme;
+    if (saved.subtitlePosition === "top" || saved.subtitlePosition === "bottom") {
+      el("subs-position").value = saved.subtitlePosition;
+    }
     if (typeof saved.outDir === "string" && saved.outDir) dir = saved.outDir;
     if (typeof saved.outName === "string" && saved.outName) name = saved.outName;
   } catch { /* nothing remembered, or storage is unavailable */ }
@@ -1325,6 +1331,11 @@ async function render() {
         // "whatever project.yaml says", and nothing here writes to that file.
         subtitles: chosenSubtitles,
         subtitleTheme: chosenTheme,
+        // The position box drove only the preview until a real project showed
+        // why that is the same defect as a highlight that means nothing
+        // (D-091): the operator moves the caption off their artwork's own
+        // lettering, renders, and it comes back exactly where it was.
+        subtitlePosition: el("subs-position").value,
       },
       onProgress: progress,
     });
@@ -1481,7 +1492,7 @@ el("preview").addEventListener("click", () => preview(null));
 el("voice-default").addEventListener("click", () => chooseVoice(null));
 el("voice-search").addEventListener("input", drawVoices);
 el("subs-default").addEventListener("click", resetSubtitles);
-el("subs-position").addEventListener("change", drawPreview);
+el("subs-position").addEventListener("change", () => { drawPreview(); rememberChoices(); });
 el("subs-text").addEventListener("input", drawPreview);
 el("locale").addEventListener("change", drawVoices);
 el("gender").addEventListener("change", drawVoices);

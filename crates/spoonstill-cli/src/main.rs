@@ -14,7 +14,7 @@ use spoonstill_app::diagnostics;
 use spoonstill_app::film::{FilmEvent, SerialEvents};
 use spoonstill_app::render::RenderSceneOptions;
 use spoonstill_app::surface::{Cancel, EncodeSettings};
-use spoonstill_core::captions::SubtitleTheme;
+use spoonstill_core::captions::{Placement, SubtitleTheme};
 use spoonstill_core::{Anchor, Aspect, MotionKind, MotionSpec};
 
 #[derive(Debug, Parser)]
@@ -186,6 +186,13 @@ struct RenderArgs {
     /// Render without subtitles, whatever `project.yaml` says.
     #[arg(long, conflicts_with = "subtitles")]
     no_subtitles: bool,
+
+    /// Which edge the subtitles sit against: `bottom` or `top`.
+    ///
+    /// Worth reaching for when the photographs already carry words along the
+    /// bottom, which a burned-in caption would otherwise land on.
+    #[arg(long, value_name = "EDGE", conflicts_with = "no_subtitles")]
+    subtitle_position: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -750,6 +757,14 @@ fn render_project(args: RenderArgs) -> Result<(), String> {
         (None, false) => (None, None),
     };
 
+    let subtitle_placement =
+        match &args.subtitle_position {
+            None => None,
+            Some(edge) => Some(Placement::parse(edge).ok_or_else(|| {
+                format!("{edge:?} is not a subtitle position. It is bottom or top.")
+            })?),
+        };
+
     let defaults = spoonstill_app::RenderProjectOptions::for_project(&args.project);
     let options = spoonstill_app::RenderProjectOptions {
         out: args.out,
@@ -760,6 +775,7 @@ fn render_project(args: RenderArgs) -> Result<(), String> {
         provider: args.provider.clone(),
         subtitles,
         subtitle_theme,
+        subtitle_placement,
         ..defaults
     };
 

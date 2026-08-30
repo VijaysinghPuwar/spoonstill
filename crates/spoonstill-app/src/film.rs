@@ -39,7 +39,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use spoonstill_core::captions::{self, SubtitleSpec, SubtitleTheme};
+use spoonstill_core::captions::{self, Placement, SubtitleSpec, SubtitleTheme};
 use spoonstill_core::diagnostics::{Diagnostics, Event};
 use spoonstill_core::project::MotionRequest;
 use spoonstill_core::{MotionSpec, OutputSpec, STATE_DIR, hash, timing};
@@ -88,6 +88,12 @@ pub struct RenderProjectOptions {
     pub subtitles: Option<bool>,
     /// The same, for which look.
     pub subtitle_theme: Option<SubtitleTheme>,
+    /// The same, for which edge they sit against.
+    ///
+    /// Worth overriding per run more than the others: whether a caption
+    /// collides with words already in the artwork is a fact about *these*
+    /// photographs, and the answer can change between one batch and the next.
+    pub subtitle_placement: Option<Placement>,
 }
 
 impl RenderProjectOptions {
@@ -109,6 +115,7 @@ impl RenderProjectOptions {
             provider: None,
             subtitles: None,
             subtitle_theme: None,
+            subtitle_placement: None,
         }
     }
 }
@@ -908,7 +915,9 @@ fn subtitles_for(
     }
     Some(SubtitleSpec {
         theme,
-        placement: project.settings.subtitle_placement,
+        placement: options
+            .subtitle_placement
+            .unwrap_or(project.settings.subtitle_placement),
         cues,
     })
 }

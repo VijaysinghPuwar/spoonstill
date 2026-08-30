@@ -457,6 +457,12 @@ this is the same design on Windows and macOS, and there is a test named after
 it. Windows are `gte(t,S)*lt(t,E)`, half-open, because `between()` draws two
 cues on the frame they share.
 
+Two rules came from rendering the author's own film, which is narrated art with
+words already drawn into the pictures: **a cue never ends on a dangling
+conjunction** (`carry_weak_endings`), and **placement is an override on both
+surfaces** — `--subtitle-position top`, and the window now *sends* what its
+position box says instead of only previewing it.
+
 A scene is captioned when it has words: an explicit `caption` column, else the
 script it speaks. **A `.txt` beside a recording is now the caption, not a
 D-020 conflict** — that turns an error into a working scene, and without it an
