@@ -105,6 +105,18 @@ else
   TAG="$VERSION"
 fi
 
+# A download is retried, but only for the failures that are actually
+# transient — a 5xx, a 408, a 429, a refused connection. curl's plain `--retry`
+# covers exactly those.
+#
+# **A 404 is deliberately not retried**, and that is the lesson rather than an
+# omission. A missing SHA256SUMS.txt was first read here as a flaky CDN and
+# nearly papered over with `--retry-all-errors`; it was in fact the installer
+# resolving the *wrong release* (D-138). Retrying it would have turned four
+# clean 404s into four slow ones and hidden the defect underneath. A 404 means
+# the file is not there, which is information.
+RETRY="--retry 3 --retry-delay 2 --retry-connrefused"
+
 case "$TARGET" in
   aarch64-apple-darwin) ASSET="still-macOS-AppleSilicon.tar.gz" ;;
   *)                    ASSET="still-macOS-Intel.tar.gz" ;;
@@ -115,7 +127,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 step "Downloading $ASSET"
-curl -fSL --progress-bar -o "$tmp/$ASSET" "$BASE/$ASSET" \
+curl -fSL $RETRY --progress-bar -o "$tmp/$ASSET" "$BASE/$ASSET" \
   || die "Could not download $BASE/$ASSET"
 
 # One list for the whole release rather than a `.sha256` beside every asset
@@ -123,7 +135,7 @@ curl -fSL --progress-bar -o "$tmp/$ASSET" "$BASE/$ASSET" \
 # out this file's line; a name that is not in the list is a failure and not a
 # skip, which is the whole point of checking.
 SUMS="SHA256SUMS.txt"
-curl -fsSL -o "$tmp/$SUMS" "$BASE/$SUMS" \
+curl -fsSL $RETRY -o "$tmp/$SUMS" "$BASE/$SUMS" \
   || die "Could not download $SUMS. Refusing to install unverified."
 
 verify() {
@@ -162,7 +174,7 @@ if [ -n "$SKIP_APP" ]; then
 else
   APP="spoonstill-macOS.dmg"
   step "Downloading $APP"
-  if curl -fSL --progress-bar -o "$tmp/$APP" "$BASE/$APP"; then
+  if curl -fSL $RETRY --progress-bar -o "$tmp/$APP" "$BASE/$APP"; then
 
     verify "$APP"
 

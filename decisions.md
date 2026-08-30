@@ -4796,6 +4796,87 @@ a defect. It has not happened here. If it happens there, the fix is a longer
 narration fixture, which the gate's own message already says; it is not to
 relax the assertion.
 
+### D-138 — A re-run of an old tag must not become the latest release · Accepted
+
+Decided 2026-08-30. Found because D-136 put the installers in CI, which is the
+only reason anyone was watching when this broke.
+
+**The symptom.** Both installer jobs failed within three seconds of each other,
+on two different runners with two different HTTP clients, each having
+downloaded its own asset successfully and then failing on the same file:
+
+```
+==> Downloading still-macOS-AppleSilicon.tar.gz   (100%)
+curl: (56) The requested URL returned error: 404
+!   Could not download SHA256SUMS.txt. Refusing to install unverified.
+```
+
+**The wrong diagnosis, and why it is worth recording.** Two platforms, one file,
+the same second, and `SHA256SUMS.txt` returning 200 from this machine a minute
+later — that reads exactly like a flaky CDN. The fix drafted for it was
+`--retry-all-errors`, which makes curl retry a 404.
+
+Running the installer locally is what killed that theory. The 404 reproduced
+**four times out of four**, and the reason was not the file:
+
+```
+$ curl -fsSL .../releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p'
+v0.1.2
+```
+
+**The GitHub API's "latest release" was v0.1.2.** Both installers resolve
+`/releases/latest`, and v0.1.2 predates D-133 — it has the tarball under the
+D-098 names, and it has **no `SHA256SUMS.txt`**, because that file did not exist
+until v0.1.5. So the asset downloaded, the checksum list 404'd, and both
+installers refused to install unverified. **They were right.** The one-line
+install advertised in `README.md` was broken on every platform, and the
+installers' own refusal is what made it visible instead of silently installing
+a two-versions-old binary.
+
+**The cause.** `release.yml` ended with:
+
+```sh
+gh release edit "$TAG" --draft=false --latest
+```
+
+unconditional. This workflow runs for whatever tag was pushed, and an **old tag
+can be pushed again** — at 17:10:57Z on 2026-08-30 one was, and run
+`33324527059` for `v0.1.2` completed successfully and marked *itself* latest.
+Every install on every platform broke within the minute. (Not from this
+session's pushes: `push.followTags` is unset and `remote.origin` carries no push
+refspec, both checked.)
+
+**The fix** makes `--latest` conditional on the tag actually being the greatest
+published version, decided by `sort -V` over the published, non-draft,
+non-prerelease releases with the tag itself included — so a genuinely new
+release still wins. Run against six cases before shipping: the re-run of
+v0.1.2 (leaves latest at v0.1.5), a new v0.1.6, a re-run of the current newest,
+`v0.1.10` against `v0.1.9`, the first release with nothing published, and a
+minor bump.
+
+**The test harness was wrong first, which is its own lesson.** Those six cases
+initially reported that re-running v0.1.2 *would* mark it latest — the answer
+that would have sent me to rewrite a correct fix. The harness was running under
+**zsh**, which does not word-split an unquoted variable; the workflow runs under
+bash, which does. The logic was right and the test was lying. Re-run under
+`bash`, all six are correct.
+
+**`--retry-all-errors` was therefore not taken, and a 404 is deliberately not
+retried.** Both installers retry only genuinely transient classes — 5xx, 408,
+429, a refused connection. Retrying the 404 would have turned four fast clean
+failures into four slow ones and buried the actual defect underneath a plausible
+story about CDNs. **A 404 means the file is not there, which is information.**
+
+**Remediation, done and verified.** `gh release edit v0.1.5 --latest` restores
+the pointer; `/releases/latest` returns `v0.1.5` again both authenticated and
+anonymous; and `install.sh` was run end to end against the real release,
+downloading, verifying the checksum and installing `still 0.1.5`.
+
+**What this does not fix.** The next person to push an old tag re-publishes that
+release's assets — the guard stops it stealing *latest*, not from running. And
+`README.md` still pipes a script from a mutable `master` URL, which is a
+separate open question.
+
 ### D-074 — The `kenburns-batch` master brief does not exist on this machine · Accepted
 
 Searched 2026-08-26: no file matching `*kenburns*` anywhere under `~/Desktop`,

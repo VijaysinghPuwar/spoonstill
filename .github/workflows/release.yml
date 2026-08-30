@@ -494,4 +494,29 @@ jobs:
           done
 
           echo "5 assets and one SHA256SUMS.txt, every checksum verified"
-          gh release edit "$TAG" --draft=false --latest
+
+          # `--latest` is conditional, because this workflow runs for whatever
+          # tag was pushed and an old tag can be pushed again. It was: a
+          # re-run of v0.1.2 marked *itself* latest, and since both installers
+          # resolve `/releases/latest`, every one-line install on every platform
+          # broke within the minute — v0.1.2 predates D-133, so it has the
+          # tarball but no SHA256SUMS.txt, and the installers correctly refused
+          # to install unverified (D-138).
+          #
+          # So the tag only becomes latest when it is the greatest version
+          # published. `sort -V` decides that, and the comparison includes this
+          # tag itself, which is why a genuinely new release still wins.
+          newest=$(
+            {
+              gh release list --limit 100 --json tagName,isDraft,isPrerelease                 --jq '.[] | select(.isDraft==false and .isPrerelease==false) | .tagName'
+              echo "$TAG"
+            } | sort -V | tail -1
+          )
+
+          if [ "$newest" = "$TAG" ]; then
+            gh release edit "$TAG" --draft=false --latest
+            echo "$TAG is the newest published release, and is now marked latest"
+          else
+            gh release edit "$TAG" --draft=false --latest=false
+            echo "published $TAG, but $newest is newer — latest is left where it is"
+          fi

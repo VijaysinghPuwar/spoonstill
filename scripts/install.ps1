@@ -24,6 +24,27 @@ function Ok($m)   { Write-Host "OK   " -ForegroundColor Green -NoNewline; Write-
 function Warn($m) { Write-Host "!    $m" -ForegroundColor Yellow }
 function Die($m)  { Write-Host "!    $m" -ForegroundColor Red; exit 1 }
 
+# A download is retried, but only for the failures that are actually
+# transient. **A 404 is deliberately not retried**: a missing SHA256SUMS.txt
+# was first read as a flaky CDN and nearly papered over, when it was in fact
+# the installer resolving the *wrong release* (D-138). Retrying it would have
+# hidden the defect. A 404 means the file is not there, which is information.
+function Get-FileWithRetry($Uri, $OutFile, $Attempts = 3) {
+  for ($i = 1; $i -le $Attempts; $i++) {
+    try {
+      Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing
+      return
+    } catch {
+      $code = $null
+      if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+      # Not there is not a hiccup. Fail immediately and let the caller say so.
+      if ($code -eq 404) { throw }
+      if ($i -eq $Attempts) { throw }
+      Start-Sleep -Seconds (2 * $i)
+    }
+  }
+}
+
 if ([System.Environment]::Is64BitOperatingSystem -ne $true) {
   Die "spoonstill needs 64-bit Windows."
 }
@@ -56,14 +77,14 @@ New-Item -ItemType Directory -Path $Tmp -Force | Out-Null
 try {
   Step "Downloading $Asset"
   $zip = Join-Path $Tmp $Asset
-  Invoke-WebRequest -Uri "$Base/$Asset" -OutFile $zip -UseBasicParsing
+  Get-FileWithRetry "$Base/$Asset" $zip
 
   # One list for the whole release rather than a `.sha256` beside every asset
   # (D-133). The line for this file is found by name; a name that is not in the
   # list is a failure and not a skip, or the check would pass by finding
   # nothing to do.
   $sumFile = Join-Path $Tmp 'SHA256SUMS.txt'
-  Invoke-WebRequest -Uri "$Base/SHA256SUMS.txt" -OutFile $sumFile -UseBasicParsing
+  Get-FileWithRetry "$Base/SHA256SUMS.txt" $sumFile
 
   Step "Verifying checksum"
   $expected = $null
