@@ -1,0 +1,77 @@
+# What `cargo audit` is allowed to pass over, and why (D-129).
+#
+# Read this before adding a line to it. An ignore list is a promise that
+# somebody looked, not a way to make a warning go away — every entry below says
+# which *shipped* target it reaches, because that is the question that decides
+# whether it matters here.
+#
+# Reviewed 2026-08-30 against 516 crates: **0 vulnerabilities**, 18 warnings.
+# Review again by 2026-11-30, or whenever `cargo update` moves any of these.
+#
+# The two targets this project ships are macOS and Windows (D-071, and the five
+# `target:` entries in .github/workflows/release.yml). There is no Linux build.
+# That is not a reason to ignore a Linux-only advisory forever — it is the
+# reason these particular ones do not reach an operator today, and the day a
+# Linux target is added this file is wrong until it is re-read.
+
+[advisories]
+ignore = [
+    # --- The GTK3 stack, and glib's unsoundness with it -----------------------
+    #
+    # Linux only, through Tauri's webview. Verified per target with
+    # `cargo tree --target <triple> -e normal -i <crate>`: absent on both
+    # aarch64-apple-darwin and x86_64-pc-windows-msvc, present only on
+    # x86_64-unknown-linux-gnu. Nothing spoonstill publishes contains them.
+    #
+    # They are gtk-rs's own announcement that the GTK3 bindings are done, not a
+    # defect report. The fix is upstream Tauri moving to GTK4, and there is
+    # nothing to do here in the meantime except not pretend otherwise.
+    "RUSTSEC-2024-0411", # gdkwayland-sys  unmaintained
+    "RUSTSEC-2024-0412", # gdk             unmaintained
+    "RUSTSEC-2024-0413", # atk             unmaintained
+    "RUSTSEC-2024-0414", # gdkx11-sys      unmaintained
+    "RUSTSEC-2024-0415", # gtk             unmaintained
+    "RUSTSEC-2024-0416", # atk-sys         unmaintained
+    "RUSTSEC-2024-0417", # gdkx11          unmaintained
+    "RUSTSEC-2024-0418", # gdk-sys         unmaintained
+    "RUSTSEC-2024-0419", # gtk3-macros     unmaintained
+    "RUSTSEC-2024-0420", # gtk-sys         unmaintained
+    # The one *unsound* advisory in the whole report, and it is in this group:
+    # `glib::VariantStrIter`'s `Iterator` impl. Same reasoning — absent from
+    # every target we publish. If a Linux build is ever added, this is the entry
+    # to deal with first, because unsound is a different word from unmaintained.
+    "RUSTSEC-2024-0429", # glib            unsound
+
+    # --- Build-time only ------------------------------------------------------
+    #
+    # A proc macro. It runs on the machine doing the compiling and is not linked
+    # into anything shipped; `-e normal` finds it on no target at all.
+    "RUSTSEC-2024-0370", # proc-macro-error unmaintained
+
+    # --- Actually shipped, and accepted with open eyes ------------------------
+    #
+    # `unic-*`, five crates, reached through urlpattern -> tauri-utils. In the
+    # **window** on every platform, not in the CLI. Unmaintained since
+    # 2025-10-18. Upstream's move is to `icu`; ours is to wait for Tauri.
+    "RUSTSEC-2025-0075", # unic-char-range    unmaintained
+    "RUSTSEC-2025-0080", # unic-common        unmaintained
+    "RUSTSEC-2025-0081", # unic-char-property unmaintained
+    "RUSTSEC-2025-0098", # unic-ucd-version   unmaintained
+    "RUSTSEC-2025-0100", # unic-ucd-ident     unmaintained
+
+    # `ttf-parser`, through `fontdue`, which draws every burned-in subtitle
+    # (D-106). This one is **in every binary on every platform** — the CLI and
+    # the window both — so it is the entry that actually describes a risk we
+    # carry rather than one we happen not to.
+    #
+    # There is nothing to upgrade to: crates.io's newest `ttf-parser` on
+    # 2026-08-30 is 0.25.1, which is exactly what `Cargo.lock` holds. The crate
+    # is unmaintained *at its latest release*, so the only real remediations are
+    # replacing `fontdue` or vendoring, and neither is worth doing for an
+    # unmaintained flag with no advisory behind it.
+    #
+    # What would change that: a vulnerability advisory against it, or `fontdue`
+    # itself going quiet. Both are things this file's review date exists to look
+    # for.
+    "RUSTSEC-2026-0192", # ttf-parser unmaintained
+]

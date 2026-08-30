@@ -38,6 +38,11 @@ echo
 cargo build --release -p spoonstill-cli >/dev/null 2>&1 || {
   echo "  ${RED}FAIL${OFF}  the CLI does not build"; exit 1; }
 STILL=./target/release/still
+# The fixture generator uses the same bare name; both are dev-only scripts in a
+# shell, not the app (D-103 is about a program launched from Finder).
+FFMPEG=ffmpeg
+FFPROBE=ffprobe
+STATE=.spoonstill
 
 RENDERABLE=fixtures/projects/renderable
 # Every gate starts from a cold project, so a cached artifact from a previous
@@ -122,22 +127,244 @@ gate_reuse() {
 }
 check "a second run reuses every narration and every segment" gate_reuse
 
-# --- gate 5: two renders of one project do not interleave -------------------
-gate_lock() {
-  # Hold the lock the way a crashed run would.
-  mkdir -p "$RENDERABLE/.spoonstill"
-  echo "pid 999999" > "$RENDERABLE/.spoonstill/render.lock"
+# --- gate 4b: a re-recorded line invalidates its segment (D-107) ------------
+# The other half of gate 4, and the one that was missing. A cache that never
+# misses is not a cache, it is a stale film: replacing a recording with a
+# different one of the *same duration* used to reuse the old segment, because
+# the segment key held the frame count and not the narration's content. The
+# operator got their previous voice-over in a film that reported success.
+gate_reuse_invalidates() {
+  local proj="$WORK/rerecord"
+  mkdir -p "$proj"
+  printf 'short_edge: 720\nfps: 30\n' > "$proj/project.yaml"
+  "$FFMPEG" -y -loglevel error -f lavfi -i "color=c=blue:s=1600x1000" \
+    -frames:v 1 "$proj/001.jpg" || return 1
+  # Two recordings of exactly the same length and entirely different content.
+  "$FFMPEG" -y -loglevel error -f lavfi -i "sine=frequency=440:duration=1" \
+    -ar 48000 -ac 1 "$WORK/a440.wav" || return 1
+  "$FFMPEG" -y -loglevel error -f lavfi -i "sine=frequency=880:duration=1" \
+    -ar 48000 -ac 1 "$WORK/a880.wav" || return 1
+
+  cp "$WORK/a440.wav" "$proj/001.wav"
+  "$STILL" render "$proj" --out "$WORK/take1.mp4" >/dev/null 2>&1 || return 1
 
   local out
-  out=$("$STILL" render "$RENDERABLE" --out "$WORK/locked.mp4" 2>&1)
-  local status=$?
-  rm -f "$RENDERABLE/.spoonstill/render.lock"
+  cp "$WORK/a880.wav" "$proj/001.wav"
+  out=$("$STILL" render "$proj" --out "$WORK/take2.mp4" 2>&1) || { echo "$out"; return 1; }
+  grep -q '0 segments reused' <<<"$out" || {
+    echo "a different narration reused the old segment:"; echo "$out"; return 1; }
 
-  [ "$status" -ne 0 ] || { echo "a locked project rendered anyway"; return 1; }
-  grep -q 'another render is working on this project' <<<"$out" || { echo "$out"; return 1; }
-  grep -q -- '--force' <<<"$out" || { echo "$out"; return 1; }
+  local a b
+  a=$(shasum -a 256 "$WORK/take1.mp4" | cut -d' ' -f1)
+  b=$(shasum -a 256 "$WORK/take2.mp4" | cut -d' ' -f1)
+  [ "$a" != "$b" ] || { echo "two narrations produced one film: $a"; return 1; }
+
+  # And the cache still works: the original recording back again must reuse.
+  cp "$WORK/a440.wav" "$proj/001.wav"
+  out=$("$STILL" render "$proj" --out "$WORK/take3.mp4" 2>&1) || { echo "$out"; return 1; }
+  grep -q '1 segment reused' <<<"$out" || {
+    echo "the original narration did not reuse its segment:"; echo "$out"; return 1; }
+  local c
+  c=$(shasum -a 256 "$WORK/take3.mp4" | cut -d' ' -f1)
+  [ "$a" = "$c" ] || { echo "the same narration gave two films: $a then $c"; return 1; }
 }
-check "a second render of one project is refused, and says how to override" gate_lock
+check "a narration replaced by a different one of the same length re-renders" \
+  gate_reuse_invalidates
+
+# --- gate 4c: identical narrations are made once, not once per worker -------
+# D-108. Many scenes resolving to one cache entry is the ordinary case at the
+# design point — one recording used throughout, one line repeated, a folder of
+# silent stills — and every worker used to check an empty cache and do the
+# whole job. Sixteen scenes sharing one narration at --audio-jobs 8 generated
+# it eight times. Against a metered provider that is eight times the bill.
+#
+# Silent scenes are used deliberately: stills with no script and no recording
+# all resolve to the same silence, so this provokes the collision with no
+# network and no voice service at all.
+gate_single_flight() {
+  local proj="$WORK/oneflight"
+  mkdir -p "$proj"
+  local i
+  for i in $(seq -w 1 16); do
+    cp fixtures/generated/land.jpg "$proj/0$i.jpg" || return 1
+  done
+
+  local out
+  out=$("$STILL" render "$proj" --out "$WORK/oneflight.mp4" --audio-jobs 8 2>&1) || {
+    echo "$out"; return 1; }
+
+  # Sixteen scenes, one unique narration: fifteen must report it as cached.
+  # Anything less is that many workers that did the work in parallel.
+  grep -q '15 narrations from cache' <<<"$out" || {
+    echo "one narration was generated more than once:"; echo "$out"; return 1; }
+
+  local n
+  n=$(ls "$proj/.spoonstill/cache/audio" | wc -l | tr -d ' ')
+  [ "$n" = "1" ] || { echo "expected 1 cache entry, found $n"; return 1; }
+}
+check "sixteen scenes sharing one narration generate it once" gate_single_flight
+
+# --- gate 4d: the segment cache is bounded, and flipping back is free -------
+# D-109. Nothing swept superseded segments, so a project accumulated one dead
+# generation per render forever: the author's own ten-scene folder held 52
+# segments, 134 MB, of which at most 10 could be live. At the design point that
+# is gigabytes of files nothing will ever read again.
+#
+# The two halves have to hold together. Bounded is easy on its own (keep only
+# what the film used); free-to-flip-back is easy on its own (keep everything).
+# Keeping the live set plus two spare generations is what gives both, so the
+# gate asserts both.
+#
+# The scenes are a still, a recording and a `.txt`: D-106 makes the text beside
+# a recording the caption, so the theme changes the picture and every segment
+# with it — and none of it needs a voice service.
+gate_bounded_cache() {
+  local proj="$WORK/bounded"
+  local seg="$proj/$STATE/segments"
+  mkdir -p "$proj"
+  local i
+  for i in 1 2 3 4; do
+    cp fixtures/generated/land.jpg "$proj/00$i.jpg" || return 1
+    "$FFMPEG" -y -loglevel error -f lavfi -i "sine=frequency=440:duration=4" \
+      -ar 48000 -ac 1 "$proj/00$i.wav" || return 1
+    echo "A caption for scene $i, long enough to wrap onto two lines." \
+      > "$proj/00$i.txt"
+  done
+
+  # Five different films from one project: each theme supersedes the last.
+  local t
+  for t in classic boxed band card punch; do
+    "$STILL" render "$proj" --out "$WORK/bounded.mp4" --subtitles "$t" \
+      >/dev/null 2>&1 || return 1
+  done
+
+  # Four scenes, so three generations is twelve files. Not five generations.
+  local n
+  n=$(ls "$seg" | wc -l | tr -d " ")
+  [ "$n" -le 12 ] || { echo "cache grew to $n files, bound is 12"; return 1; }
+
+  # And the point of keeping spares: the previous two themes still render for
+  # free. A sweep that kept only the live set would re-encode every scene.
+  local out
+  out=$("$STILL" render "$proj" --out "$WORK/bounded.mp4" --subtitles card 2>&1) || {
+    echo "$out"; return 1; }
+  grep -q "4 segments reused" <<<"$out" || {
+    echo "flipping back to a recent theme re-encoded:"; echo "$out"; return 1; }
+
+  # --keep-cache is the operator's override, and it must sweep nothing.
+  out=$("$STILL" render "$proj" --out "$WORK/bounded.mp4" --subtitles minimal \
+    --keep-cache 2>&1) || { echo "$out"; return 1; }
+  grep -q "swept" <<<"$out" && { echo "--keep-cache swept anyway"; return 1; }
+
+  # A file we did not write is not ours to delete.
+  echo "not ours" > "$seg/holiday.mp4"
+  "$STILL" render "$proj" --out "$WORK/bounded.mp4" --no-subtitles \
+    >/dev/null 2>&1 || return 1
+  [ -f "$seg/holiday.mp4" ] || { echo "the sweep deleted a stranger's file"; return 1; }
+}
+check "the segment cache is bounded, and the last two generations stay free" \
+  gate_bounded_cache
+
+# --- gate 4e: a cached segment of the wrong length is not reused ------------
+# D-110. The reuse check asserted the segment *profile*, which pins codec,
+# geometry and colour and says nothing about length — so a file with a
+# segment's name and a segment's shape was reused whatever its duration, and
+# the frame count printed for it was the planned one, which nothing had checked.
+#
+# The film's own assertion did catch the short film, so no wrong film ever
+# reached an operator. What it did instead was worse to live with: the bad
+# entry stayed in the cache, so **every subsequent render failed the same way**,
+# blaming a temporary file, naming no scene, and offering no way out but
+# deleting a hidden folder. This asserts the recovery, not just the refusal.
+gate_reuse_checks_length() {
+  local proj="$WORK/wronglen"
+  local seg="$proj/$STATE/segments"
+  mkdir -p "$proj"
+  cp fixtures/generated/land.jpg "$proj/001.jpg" || return 1
+  cp fixtures/generated/land.jpg "$proj/002.jpg" || return 1
+  "$FFMPEG" -y -loglevel error -f lavfi -i "sine=frequency=440:duration=2" \
+    -ar 48000 -ac 1 "$proj/001.wav" || return 1
+  "$FFMPEG" -y -loglevel error -f lavfi -i "sine=frequency=440:duration=8" \
+    -ar 48000 -ac 1 "$proj/002.wav" || return 1
+
+  "$STILL" render "$proj" --out "$WORK/wronglen.mp4" >/dev/null 2>&1 || return 1
+
+  # Put the short scene's segment under the long scene's cache name. Same
+  # profile in every field the assertion checks; four times the wrong length.
+  local short long
+  short=$(ls "$seg"/seg-0000-*.mp4 | head -1)
+  long=$(ls "$seg"/seg-0001-*.mp4 | head -1)
+  [ -n "$short" ] && [ -n "$long" ] || { echo "no segments to swap"; return 1; }
+  cp "$short" "$long" || return 1
+
+  # It must notice, re-render that scene, and produce the right film.
+  local out
+  out=$("$STILL" render "$proj" --out "$WORK/wronglen2.mp4" 2>&1) || {
+    echo "a wrong-length cache entry was not recovered from:"; echo "$out"; return 1; }
+  grep -q "1 segment reused" <<<"$out" || {
+    echo "expected exactly the good segment to be reused:"; echo "$out"; return 1; }
+
+  # 60 + 240 frames, actually decoded.
+  local n
+  n=$("$FFPROBE" -v error -select_streams v:0 -count_frames \
+    -show_entries stream=nb_read_frames -of csv=p=0 "$WORK/wronglen2.mp4")
+  [ "$n" = "300" ] || { echo "film has $n frames, expected 300"; return 1; }
+}
+check "a cached segment of the wrong length is re-rendered, not reused" \
+  gate_reuse_checks_length
+
+# --- gate 5: two renders of one project do not interleave -------------------
+# D-113. The lock is the operating system's, taken with `File::try_lock`, so
+# this gate holds a **real** one: a render running in the background. Writing
+# `pid 999999` into the file — what this gate used to do — no longer refuses
+# anything, and requiring it to was requiring the tool to stay stuck after a
+# run the machine lost.
+#
+# Two properties, and the second is the fix: a live lock refuses a second
+# render, and `--force` does not override it either.
+gate_lock() {
+  local proj="$WORK/locked"
+  mkdir -p "$proj"
+  local i
+  for i in $(seq -w 1 8); do
+    cp fixtures/generated/land.jpg "$proj/0$i.jpg" || return 1
+  done
+
+  # A real render, long enough to still be going when we ask.
+  "$STILL" render "$proj" --out "$WORK/held.mp4" --jobs 1 >"$WORK/held.log" 2>&1 &
+  local holder=$!
+
+  # Wait for it to actually hold the lock rather than sleeping and hoping.
+  local waited=0
+  while [ ! -s "$proj/$STATE/render.lock" ] && [ "$waited" -lt 100 ]; do
+    waited=$((waited + 1))
+    perl -e 'select(undef,undef,undef,0.1)'
+  done
+  kill -0 "$holder" 2>/dev/null || { echo "the holding render exited early"; return 1; }
+
+  local out status
+  out=$("$STILL" render "$proj" --out "$WORK/locked.mp4" 2>&1); status=$?
+  [ "$status" -ne 0 ] || { kill "$holder" 2>/dev/null; echo "a locked project rendered anyway"; return 1; }
+  grep -q 'another render is working on this project' <<<"$out" || {
+    kill "$holder" 2>/dev/null; echo "$out"; return 1; }
+
+  # The fix: --force must not take a lock a live render holds.
+  out=$("$STILL" render "$proj" --out "$WORK/forced.mp4" --force 2>&1); status=$?
+  kill -0 "$holder" 2>/dev/null || { echo "the holding render exited before --force was tried"; return 1; }
+  [ "$status" -ne 0 ] || {
+    kill "$holder" 2>/dev/null
+    echo "--force took a lock a running render was holding"; return 1; }
+  grep -q -- '--force cannot' <<<"$out" || { kill "$holder" 2>/dev/null; echo "$out"; return 1; }
+
+  wait "$holder" || { echo "the holding render failed"; return 1; }
+
+  # And once it is over, the next render is clean — with the file still there,
+  # because the file's existence was never the lock.
+  [ -f "$proj/$STATE/render.lock" ] || { echo "the marker file should remain"; return 1; }
+  "$STILL" render "$proj" --out "$WORK/after.mp4" >/dev/null 2>&1 || {
+    echo "a released lock still refused the next render"; return 1; }
+}
+check "a live render refuses a second, and --force does not override it" gate_lock
 
 # --- gate 6: hostile input survives the whole pipeline ----------------------
 # The renderable fixture deliberately contains `odd.jpg` (1999x1001, the D-033

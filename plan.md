@@ -298,7 +298,7 @@ own decisions. Where a slice is done, the exit gate it satisfies is named.
 |---|---|---|
 | **1. The pure domain** | `spoonstill_core::path_safety` + `spoonstill_core::project`: containment, the scene model, and every validation rule that needs no disk. D-054, D-055. | ✅ 2026-08-26 — satisfies `cargo test -p spoonstill-core path_safety` |
 | **2. Import and `still validate`** | `project.yaml` and the CSV manifest, convention-mode stem pairing, path resolution and media probing merged into one problem list, `still validate` printing it. D-056. | ✅ 2026-08-26 — satisfies `still validate fixtures/projects/mixed/` |
-| **3. The three audio sources, and `still render`** | `AudioSource::resolve()` → `(normalized_path, Duration)`: ingest normalization to 48 kHz stereo, `ffprobe` on the normalized artifact, generated silence. Then `still render DIR` over a whole project — **parallel**, with two bounded pools. D-075, D-076, D-077, D-078. | ✅ 2026-08-26 — `make gates-m2` is 9/9 |
+| **3. The three audio sources, and `still render`** | `AudioSource::resolve()` → `(normalized_path, Duration)`: ingest normalization to 48 kHz stereo, `ffprobe` on the normalized artifact, generated silence. Then `still render DIR` over a whole project — **parallel**, with two bounded pools. D-075, D-076, D-077, D-078. | ✅ 2026-08-26 — `make gates-m2` is 13/13 |
 | **4. Speech behind a trait** | `spoonstill-tts`: the `Provider` trait, typed settings and errors, and the `edge` implementation — `edge-tts` through the one process boundary, cached under `hash(text, provider, voice, settings, profile)`. `still voices`, `--voice`. D-081, D-082. ElevenLabs is deferred, not cancelled. | ✅ 2026-08-26 — gate 7 renders `mixed/` |
 | **+ Getting media in** | Not in the original four. `spoonstill_app::ingest`, `still new`, `still add`: the operator drops what they have and the program names and pairs it. D-080. | ✅ 2026-08-26 |
 
@@ -423,7 +423,7 @@ Slice 4 notes:
 
 ### Exit gates
 
-`make gates-m2` runs all of these. **9/9 pass as of 2026-08-26**, slice 4
+`make gates-m2` runs all of these. **13/13 pass as of 2026-08-29**, slice 4
 included.
 
 ```bash
@@ -744,7 +744,28 @@ Because these creep in as "small additions":
 
 ## Immediate next actions
 
-Updated 2026-08-26, after M0.
+Updated **2026-08-30**, after an external audit was worked through end to end.
+
+**The audit is closed.** Twenty-five decisions, D-107 through D-131 — the list
+is in `CLAUDE.md` under "State as of 2026-08-30", and each decision carries its
+own reproduction. `make gates` is 8/8, 8/8, 13/13; `cargo test --workspace` is
+461; `cargo audit --deny warnings` is new and green. Nothing it found changes
+M3's shape, and M3 has still not been started.
+
+Four of its findings did **not** survive being tested, and the decisions say so
+rather than quietly fixing something that was not broken: FFmpeg is not orphaned
+when the window dies (D-115), a wrong-length cached segment never produced a
+wrong film (D-110), the folder scan's winner was stable rather than random on
+APFS (D-111), and the two installer failures a test can actually reach were
+already handled correctly (D-123).
+
+Two cosmetics were noticed and left, both trivial and neither worth a decision:
+the `--subtitles` error message has a run of about twenty spaces in it, and the
+window does not show the swept-cache figure the CLI prints.
+
+---
+
+The list below is from 2026-08-26, after M0, and items 1–5 are historical.
 
 1. **Answer D-070 (9:16 + 1:1 in V1).** This is the only Open decision that
    shapes work already in flight: it sets the breadth of M1's `motion_matrix`,

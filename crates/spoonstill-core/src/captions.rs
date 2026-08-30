@@ -539,9 +539,47 @@ pub fn cues(text: &str, seconds: f64, budget: usize) -> Vec<Cue> {
     // A single word longer than any budget cannot be split further, so the
     // count can still exceed `allowed` in theory. Joining the tail is better
     // than dropping it.
+    //
+    // No `.max(1)` on the split point (D-116): with `allowed == 1` it left one
+    // piece *plus* the joined tail, so a 1.0s scene got two cues of 0.872s and
+    // 0.128s — the second on screen for four frames.
     if pieces.len() > allowed {
-        let tail = pieces.split_off(allowed.saturating_sub(1).max(1));
+        let tail = pieces.split_off(allowed.saturating_sub(1));
         pieces.push(tail.join(" "));
+    }
+
+    // Nothing on screen for less than [`MIN_CUE_SECONDS`] (D-116).
+    //
+    // Capping the *count* is not enough, and that is the part the original
+    // design missed: time is shared out below by character count, so a legal
+    // number of cues can still contain a sliver. Measured before this existed:
+    // three cues in a 3.0s scene — a legal count — ending in one of **0.042s**,
+    // a single frame at 30fps.
+    //
+    // Each pass merges the worst offender into the neighbour it reads with,
+    // which is the one that follows it except at the end. That strictly reduces
+    // the count, so this terminates.
+    while pieces.len() > 1 {
+        let lengths: Vec<usize> = pieces.iter().map(|p| p.chars().count().max(1)).collect();
+        let total: usize = lengths.iter().sum();
+        #[allow(clippy::cast_precision_loss)]
+        let share = |length: usize| seconds * (length as f64) / (total as f64);
+
+        let Some(worst) = (0..pieces.len())
+            .filter(|&i| share(lengths[i]) < MIN_CUE_SECONDS - 1e-9)
+            .min_by(|&a, &b| lengths[a].cmp(&lengths[b]))
+        else {
+            break;
+        };
+
+        // The last piece has no successor, so it joins what came before it.
+        let into = if worst + 1 < pieces.len() {
+            worst
+        } else {
+            worst - 1
+        };
+        let next = pieces.remove(into + 1);
+        pieces[into] = format!("{} {next}", pieces[into]);
     }
 
     // Time is shared out by character count, which is the best proxy for speech
@@ -886,6 +924,89 @@ mod tests {
                 cue.duration() >= MIN_CUE_SECONDS - 1e-9,
                 "{cue:?} is a flicker"
             );
+        }
+    }
+
+    /// D-116. The exact input the audit found, and the one it did not.
+    ///
+    /// `a_short_scene_never_produces_a_flicker` above asserts the right
+    /// property and could never have caught either of these: at 2.0s `allowed`
+    /// is 2, and its text splits into pieces of similar length, so neither the
+    /// off-by-one nor the missing floor can fire. **A test that checks the
+    /// right thing on an input that cannot exhibit the bug is not coverage.**
+    #[test]
+    fn a_cue_is_never_a_flicker_however_the_text_falls() {
+        // One second holds one cue. This produced 0.872s and 0.128s: the tail
+        // join kept a piece *and* appended the joined rest.
+        let c = cues("one two three four five six seven. eight", 1.0, 8);
+        assert_eq!(c.len(), 1, "one cue fits in 1.0s, not two: {c:?}");
+
+        // So does 1.5s — floor(1.5 / 0.9) is still 1. This produced a 0.192s
+        // second cue, six frames at 30fps.
+        let c = cues("one two three four five six seven. eight", 1.5, 8);
+        assert_eq!(c.len(), 1, "{c:?}");
+
+        // The one the audit missed, and the more general failure: a *legal*
+        // number of cues can still contain a sliver, because time is shared by
+        // character count. Three cues in 3.0s, the last of them 0.042s — one
+        // frame.
+        let lopsided = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb. c";
+        for seconds in [3.0, 5.0] {
+            for cue in cues(lopsided, seconds, 40) {
+                assert!(
+                    cue.duration() >= MIN_CUE_SECONDS - 1e-9,
+                    "{cue:?} is a flicker in a {seconds}s scene"
+                );
+            }
+        }
+    }
+
+    /// The property, swept rather than sampled: **no cue is ever shorter than
+    /// [`MIN_CUE_SECONDS`] unless the whole scene is** (D-116).
+    ///
+    /// Both defects were found by an auditor trying particular numbers. This
+    /// is the shape of test that finds the next one: every combination of a
+    /// duration that steps across the `floor(seconds / MIN)` boundaries and a
+    /// text that falls into very unequal pieces.
+    #[test]
+    fn no_cue_is_shorter_than_the_minimum_unless_the_scene_is() {
+        let texts = [
+            "one two three four five six seven. eight",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb. c",
+            "a. b. c. d. e. f. g. h.",
+            "Chu Kingdom. Haonan Province. The Floating Cloud Sect.",
+            "one",
+            "supercalifragilisticexpialidocious and then a few more words after it. x",
+        ];
+        for text in texts {
+            for step in 1..=120 {
+                let seconds = f64::from(step) * 0.25;
+                for budget in [8usize, 24, 42] {
+                    let c = cues(text, seconds, budget);
+                    if c.is_empty() {
+                        continue;
+                    }
+                    // A scene shorter than one readable cue gets one cue of
+                    // the whole scene. That is the floor, not a violation.
+                    if seconds < MIN_CUE_SECONDS {
+                        assert_eq!(c.len(), 1, "{seconds}s / {budget} / {text:?}: {c:?}");
+                        continue;
+                    }
+                    for cue in &c {
+                        assert!(
+                            cue.duration() >= MIN_CUE_SECONDS - 1e-9,
+                            "{:.3}s cue in a {seconds}s scene (budget {budget}): {cue:?}",
+                            cue.duration()
+                        );
+                    }
+                    // And the cues still cover the narration exactly.
+                    assert!(c[0].start.abs() < 1e-9, "{c:?}");
+                    assert!(
+                        (c.last().expect("one cue").end - seconds).abs() < 1e-9,
+                        "{c:?}"
+                    );
+                }
+            }
         }
     }
 

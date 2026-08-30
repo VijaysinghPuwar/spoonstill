@@ -65,40 +65,35 @@ pub fn ensure_parent(path: &Path) -> Result<(), MediaError> {
     })
 }
 
-/// Move a validated artifact to its real path.
+/// Move a validated artifact to its real path — in one step (D-119).
 ///
-/// `fs::rename` replaces the destination silently on Unix but fails on Windows
-/// when it already exists, so the destination is removed first. D-071 puts
-/// Windows in scope from M1, and this is the kind of difference that otherwise
-/// surfaces as "works on my machine" three milestones later.
+/// **One `rename`, and deliberately nothing before it.** This used to remove
+/// the destination first, on the belief that `fs::rename` "replaces silently on
+/// Unix but fails on Windows when it already exists". That is true of the raw
+/// `MoveFile` API and of several other languages; it is **not** true of Rust,
+/// whose `std::fs::rename` is documented as *"replacing the original file if
+/// `to` already exists"* and which calls
+/// `MoveFileExW(.., MOVEFILE_REPLACE_EXISTING)` on Windows. So the removal
+/// bought nothing on either platform and cost two things:
+///
+/// - **A window with no artifact in it.** Between the unlink and the rename the
+///   destination did not exist, so a crash there destroyed the previous good
+///   file — and this function moves the finished *film* as well as cache
+///   entries. Re-rendering over yesterday's film could lose yesterday's film.
+/// - **A race that had to be handled.** Two workers finish one cache entry
+///   whenever two scenes share a narration, which is the ordinary case at the
+///   design point. Both saw `exists()`, both removed, and the loser failed the
+///   render with "No such file or directory" about a file it had just been told
+///   was there. That was patched during D-106; now it cannot arise, because
+///   neither worker unlinks anything and `rename` is last-writer-wins.
+///
+/// The one behaviour to preserve deliberately: replacing is *atomic*, so a
+/// reader of `to` sees the old artifact or the new one and never nothing.
 ///
 /// # Errors
 ///
 /// [`MediaError::Io`] naming the destination.
 pub fn move_into_place(from: &Path, to: &Path) -> Result<(), MediaError> {
-    if to.exists() {
-        // `NotFound` is success, not failure: what this call wants is for the
-        // destination to be gone, and another worker having removed it first
-        // achieves that.
-        //
-        // Two workers reach this line for the same path whenever two scenes
-        // resolve to one cache entry — five hundred scenes narrated from one
-        // long recording is the ordinary case, not a contrived one — and both
-        // see `exists()` before either removes. The loser used to fail the
-        // whole render with "No such file or directory" about a file it had
-        // just been told was there. Found by rendering a hundred scenes that
-        // shared one recording; the window between the two calls is small
-        // enough that it never appeared at the size the other tests run at.
-        if let Err(source) = std::fs::remove_file(to)
-            && source.kind() != std::io::ErrorKind::NotFound
-        {
-            return Err(MediaError::Io {
-                doing: "replacing the existing file at",
-                path: to.to_path_buf(),
-                source,
-            });
-        }
-    }
     std::fs::rename(from, to).map_err(|source| MediaError::Io {
         doing: "moving the finished file to",
         path: to.to_path_buf(),
@@ -112,6 +107,13 @@ mod tests {
     /// succeed. Simulated rather than raced, because a real race reproduces
     /// only sometimes and a test that fails one run in twenty is a test people
     /// learn to re-run.
+    ///
+    /// **Kept, though the race it was written for can no longer happen**
+    /// (D-119). It was added during D-106 for a loser that saw `exists()` and
+    /// then lost the unlink; there is no unlink now, so both workers simply
+    /// rename and the last one wins. What it still proves is the pair of cases
+    /// that must both work either way — moving onto a path with nothing there,
+    /// and moving onto one that already holds a file.
     #[test]
     fn a_destination_removed_by_another_worker_is_not_a_failure() {
         let dir = std::env::temp_dir().join(format!("spoonstill-move-{}", std::process::id()));
@@ -124,9 +126,8 @@ mod tests {
         std::fs::write(&first, b"one").expect("write");
         std::fs::write(&second, b"two").expect("write");
 
-        // The loser of the race: the destination existed when it looked, and
-        // was gone by the time it removed. Reproduced exactly by removing it
-        // here, between the two.
+        // Nothing at the destination — which used to be how the loser of the
+        // race found it, and is now simply the first write of a cache entry.
         assert!(destination.exists());
         std::fs::remove_file(&destination).expect("the other worker got there first");
         move_into_place(&first, &destination).expect("a lost race is still a success");
@@ -186,5 +187,57 @@ mod tests {
     fn a_missing_extension_still_produces_a_usable_name() {
         let temp = partial_path(Path::new("/renders/list"));
         assert_eq!(temp.extension().unwrap(), "tmp");
+    }
+
+    /// D-119. The destination is **never** absent while it is being replaced.
+    ///
+    /// This is the property the word "atomic" in this module's name claims, and
+    /// it was not true: the old implementation unlinked `to` and then renamed
+    /// over it, so anything looking at that path in between saw nothing. A
+    /// crash there lost the previous artifact — and this function moves the
+    /// finished film, not only cache entries.
+    ///
+    /// Watched rather than reasoned about: one thread replaces the file three
+    /// hundred times while another does nothing but ask whether it is there.
+    /// Against the old implementation this catches the gap almost immediately.
+    #[test]
+    fn a_replacement_never_leaves_the_destination_missing() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = std::env::temp_dir().join(format!("spoonstill-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        let destination = dir.join("film.mp4");
+        std::fs::write(&destination, b"the previous good artifact").expect("seed");
+
+        let done = AtomicBool::new(false);
+        let vanished = AtomicBool::new(false);
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(Ordering::Relaxed) {
+                    if !destination.exists() {
+                        vanished.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            });
+
+            for i in 0..300 {
+                let temp = dir.join(format!("next-{i}.partial"));
+                std::fs::write(&temp, b"the replacement").expect("write");
+                move_into_place(&temp, &destination).expect("replace");
+            }
+            done.store(true, Ordering::Relaxed);
+        });
+
+        assert!(
+            !vanished.load(Ordering::Relaxed),
+            "the destination disappeared during a replacement — a crash in that \
+             window destroys the artifact that was already there"
+        );
+        assert!(destination.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

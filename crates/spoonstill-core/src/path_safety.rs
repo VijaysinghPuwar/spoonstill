@@ -126,6 +126,49 @@ pub fn resolve_within(
     requested: &Path,
     fs: &dyn RealPath,
 ) -> Result<PathBuf, PathError> {
+    match resolve_contained(root, requested, fs)? {
+        (path, true) => Ok(path),
+        (_, false) => Err(PathError::Missing),
+    }
+}
+
+/// Where a file this program is about to **write** would land, held to exactly
+/// the same containment rule (D-112).
+///
+/// [`resolve_within`] answers for an input, so it treats a path that does not
+/// exist as an error. A destination does not exist yet — that is the normal
+/// case — and the caller needs the resolved path in order to create it. The
+/// containment decision is identical and is made by the same code; only the
+/// verdict on absence differs.
+///
+/// The returned path is canonical as far as anything real exists, so a caller
+/// writes to the place containment was actually decided about rather than to
+/// the operator's spelling of it.
+///
+/// # Errors
+///
+/// [`PathError::Outside`] when the destination escapes the root — including
+/// through a symlink, which is the case a lexical check on `..` cannot see.
+/// Never [`PathError::Missing`]: absence is the expected state here.
+pub fn resolve_destination_within(
+    root: &Path,
+    requested: &Path,
+    fs: &dyn RealPath,
+) -> Result<PathBuf, PathError> {
+    resolve_contained(root, requested, fs).map(|(path, _)| path)
+}
+
+/// The containment decision both public functions rest on.
+///
+/// Returns the resolved path and whether it exists. Split out so that reading
+/// a file and writing one cannot drift into two different ideas of what
+/// "inside the project" means — the rule is one function, and the only thing
+/// the callers disagree about is whether absence is a failure.
+fn resolve_contained(
+    root: &Path,
+    requested: &Path,
+    fs: &dyn RealPath,
+) -> Result<(PathBuf, bool), PathError> {
     if requested.as_os_str().is_empty() {
         return Err(PathError::Empty);
     }
@@ -142,7 +185,7 @@ pub fn resolve_within(
     // symlink in it is followed, so this single check cannot be walked around.
     if let Some(real) = fs.real_path(&candidate) {
         return if real.starts_with(&base) {
-            Ok(real)
+            Ok((real, true))
         } else {
             Err(PathError::Outside)
         };
@@ -161,7 +204,7 @@ pub fn resolve_within(
         return Err(PathError::Outside);
     };
     if resolved.starts_with(&base) {
-        Err(PathError::Missing)
+        Ok((resolved, false))
     } else {
         Err(PathError::Outside)
     }

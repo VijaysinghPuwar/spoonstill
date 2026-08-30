@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use spoonstill_core::Remedy;
 
+use crate::MediaError;
 use crate::command::FfmpegCommand;
 
 /// Environment override for the FFmpeg binary. Development convenience.
@@ -212,6 +213,25 @@ const VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
 ///
 /// # Errors
 ///
+/// Why an installer did not run, in the operator's terms.
+///
+/// The four ways `spawn().and_then(wait_until)` can fail mean four different
+/// things, and only one of them is "install this first" (D-123). Collapsing
+/// them into that one is a wrong diagnosis, not a vague one.
+fn describe_failure(program: &str, error: &MediaError) -> String {
+    match error {
+        MediaError::BinaryMissing { .. } => format!("`{program}` is not on this machine"),
+        MediaError::Timeout { waited, .. } => format!(
+            "`{program}` was still running after {} minutes and was stopped — \
+             it is installed, and the install did not finish in time",
+            waited.as_secs() / 60
+        ),
+        MediaError::Cancelled { .. } => format!("`{program}` was cancelled"),
+        MediaError::Spawn { source, .. } => format!("`{program}` could not be started: {source}"),
+        other => format!("`{program}` failed: {other}"),
+    }
+}
+
 /// A [`Remedy`] naming every candidate that was tried and what each said. Not
 /// installable — pressing the button again would do the same thing, and the
 /// operator now needs the detail rather than another press.
@@ -250,9 +270,12 @@ pub fn install() -> Result<String, Remedy> {
                 finished.status.code().unwrap_or(-1),
                 last_line(&finished.stderr)
             )),
-            // Not on this machine — the next candidate is the point of having
-            // a list.
-            Err(_) => tried.push(format!("`{program}` is not on this machine")),
+            // Why it did not run, rather than one guess for every cause
+            // (D-123). `brew install ffmpeg` on a slow connection genuinely
+            // outlives the 15-minute ceiling, and telling that operator their
+            // package manager "is not on this machine" sends them to install
+            // the one they already have.
+            Err(error) => tried.push(describe_failure(program, &error)),
         }
     }
 
@@ -715,5 +738,54 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// D-123. Four ways an installer can fail to run, and only one of them
+    /// means "install this first".
+    ///
+    /// The realistic one is the timeout: `brew install ffmpeg` on a slow
+    /// connection genuinely outlives the 15-minute ceiling, and the operator
+    /// used to be told their package manager was not on the machine — sending
+    /// them to install the one they had just watched run for a quarter of an
+    /// hour.
+    #[test]
+    fn an_installer_that_fails_says_why_rather_than_guessing() {
+        let missing = MediaError::BinaryMissing {
+            tool: "brew",
+            tried: PathBuf::from("brew"),
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+        };
+        assert_eq!(
+            describe_failure("brew", &missing),
+            "`brew` is not on this machine"
+        );
+
+        let timed_out = MediaError::Timeout {
+            command: "brew install ffmpeg".to_owned(),
+            waited: Duration::from_secs(900),
+        };
+        let said = describe_failure("brew", &timed_out);
+        assert!(said.contains("15 minutes"), "{said}");
+        assert!(
+            said.contains("it is installed"),
+            "a timeout must not read as an absence: {said}"
+        );
+        assert!(
+            !said.contains("is not on this machine"),
+            "the wrong diagnosis survived: {said}"
+        );
+
+        let refused = MediaError::Spawn {
+            command: "brew install ffmpeg".to_owned(),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        };
+        let said = describe_failure("brew", &refused);
+        assert!(said.contains("could not be started"), "{said}");
+        assert!(!said.contains("is not on this machine"), "{said}");
+
+        let stopped = MediaError::Cancelled {
+            command: "brew install ffmpeg".to_owned(),
+        };
+        assert!(describe_failure("brew", &stopped).contains("cancelled"));
     }
 }

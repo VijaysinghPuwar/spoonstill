@@ -1071,6 +1071,12 @@ impl Provider for Edge {
         // The temporary lives beside the destination: a rename within one
         // filesystem is atomic, one across two is a copy (D-042).
         let audio = atomic::partial_path(destination);
+        // Every temporary this call makes, removed however it ends (D-123).
+        // The cleanup used to be a loop *after* `join_mp3(..)?`, so a failed
+        // join returned past it and left the parts in the audio cache — which
+        // nothing sweeps, unlike the segment directory (D-115).
+        let mut scratch = Scratch::default();
+        scratch.0.push(audio.clone());
         let mut parts: Vec<PathBuf> = Vec::new();
         let mut spoken = Spoken {
             bytes: 0,
@@ -1092,13 +1098,13 @@ impl Provider for Edge {
                     if spoken.how.is_empty() {
                         spoken.how = said.how;
                     }
+                    scratch.0.push(part.clone());
                     parts.push(part);
                 }
                 Err(error) => {
-                    for part in &parts {
-                        let _ = std::fs::remove_file(part);
-                    }
-                    let _ = std::fs::remove_file(&part);
+                    // `scratch` removes every part, and this one, on the way
+                    // out — including the ones this arm used to miss.
+                    scratch.0.push(part);
                     return Err(match error {
                         // Name the piece, or an operator reading "no audio for
                         // 'The harbour…'" cannot tell which of eleven requests
@@ -1120,9 +1126,6 @@ impl Provider for Edge {
 
         if pieces.len() > 1 {
             join_mp3(&parts, &audio)?;
-            for part in &parts {
-                let _ = std::fs::remove_file(part);
-            }
             spoken.bytes = std::fs::metadata(&audio)
                 .map(|m| m.len())
                 .unwrap_or(spoken.bytes);
@@ -1131,6 +1134,27 @@ impl Provider for Edge {
 
         atomic::move_into_place(&audio, destination)?;
         Ok(spoken)
+    }
+}
+
+/// Temporary files that go away however the call that made them ends (D-123).
+///
+/// A `Drop` rather than a cleanup loop, because a cleanup loop is only reached
+/// on the paths somebody remembered. `join_mp3(..)?` was one nobody did, and
+/// the parts it left behind live in the audio cache, which — unlike the segment
+/// directory — has nothing that sweeps it.
+///
+/// The finished audio is registered too. On success it has already been renamed
+/// into place, so removing it is a no-op; on a failed rename it is exactly what
+/// wants removing.
+#[derive(Default)]
+struct Scratch(Vec<PathBuf>);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -2108,5 +2132,77 @@ aiohttp.client_exceptions.ClientProxyConnectionError: Cannot connect to host 127
         assert!(remedy.need.contains(PROGRAM), "{}", remedy.need);
         assert!(remedy.detail.contains(PROGRAM), "{}", remedy.detail);
         assert!(remedy.detail.contains(EDGE_TTS_ENV), "{}", remedy.detail);
+    }
+
+    /// D-123. Temporaries go away however the call ends.
+    ///
+    /// The cleanup used to be a loop placed *after* `join_mp3(..)?`, so a
+    /// failed join returned past it and left the parts behind — in the audio
+    /// cache, which nothing sweeps (D-115 only tidies the segment directory).
+    /// A `Drop` cannot be returned past.
+    #[test]
+    fn every_temporary_is_removed_however_the_call_ends() {
+        let dir = std::env::temp_dir().join(format!("spoonstill-scratch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+
+        let made: Vec<PathBuf> = (0..3).map(|n| dir.join(format!("part{n}.mp3"))).collect();
+        for path in &made {
+            std::fs::write(path, b"a piece of a line").expect("write");
+        }
+
+        // The shape of the failing path: a guard holding every temporary, and
+        // an early return out of the scope that owns it.
+        fn a_join_that_fails(temporaries: &[PathBuf]) -> Result<(), &'static str> {
+            let mut scratch = Scratch::default();
+            scratch.0.extend(temporaries.iter().cloned());
+            Err("the join failed")
+        }
+
+        assert!(a_join_that_fails(&made).is_err());
+        for path in &made {
+            assert!(!path.exists(), "{} survived a failed join", path.display());
+        }
+
+        // A file that was renamed away before the guard ran is simply not
+        // there, which must not be an error — that is the success path.
+        let gone = dir.join("already-moved.mp3");
+        drop({
+            let mut scratch = Scratch::default();
+            scratch.0.push(gone.clone());
+            scratch
+        });
+        assert!(!gone.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D-126. `MAX_SCRIPT_BYTES` is derived from the limit below, and the two
+    /// live in crates that cannot see each other — core depends on nothing, so
+    /// it cannot import this measurement. Only a test can stop them drifting.
+    ///
+    /// If they do drift the failure is quiet in the worse direction: a cap
+    /// *below* the speakable limit would refuse a script the provider would
+    /// happily have spoken.
+    #[test]
+    fn the_script_size_cap_is_above_every_line_that_could_be_spoken() {
+        let speakable = max_line_chars();
+        let cap = spoonstill_core::project::MAX_SCRIPT_BYTES;
+
+        // Four bytes is the most UTF-8 spends on one character, so this is the
+        // largest a speakable line can be on disk.
+        let widest = speakable as u64 * 4;
+        assert!(
+            cap >= widest,
+            "the script cap is {cap} bytes but a speakable line can be {widest} — \
+             a valid narration would be refused before anyone tried to speak it"
+        );
+
+        // And not absurdly above it, or the cap stops being a bound at all.
+        assert!(
+            cap <= widest * 2,
+            "the script cap is {cap} bytes against a {widest}-byte line: that is \
+             not a bound, it is a number"
+        );
     }
 }

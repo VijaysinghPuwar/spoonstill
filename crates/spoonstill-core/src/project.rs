@@ -44,6 +44,25 @@ use crate::remedy::Remedy;
 /// often than it is an hour-long title card.
 pub const MAX_SCENE_SECONDS: f64 = 3_600.0;
 
+/// The largest a script file can be and still be one scene's narration
+/// (D-126).
+///
+/// **Derived, not chosen.** A scene holds at most [`MAX_SCENE_SECONDS`], the
+/// fastest speech `spoonstill-tts` has measured is 17.3 characters a second
+/// (`edge::SPEECH_CHARS_PER_SECOND`, which already refuses a line longer than
+/// the product), and UTF-8 spends at most four bytes on a character:
+///
+/// ```text
+/// 3600 s x 17.3 chars/s x 4 bytes/char = 249 120 bytes
+/// ```
+///
+/// Rounded up to 256 KiB. A `.txt` bigger than this is not a narration that was
+/// merely too long — it is a file that landed in the folder by mistake, and
+/// reading it whole to find that out is the thing this exists to avoid. A test
+/// in `spoonstill-tts` keeps the two numbers in step, because they live in
+/// crates that cannot see each other.
+pub const MAX_SCRIPT_BYTES: u64 = 256 * 1024;
+
 /// Stable, operator-visible name for one scene.
 ///
 /// It is the join key in convention mode (D-050), the label in every
@@ -371,9 +390,36 @@ impl fmt::Display for Problem {
 pub enum ProblemKind {
     /// The scene ID itself is unusable.
     UnusableId(SceneIdError),
-    /// Two scenes claim the same ID. In convention mode this is `001.png` and
-    /// `001.jpg`; in manifest mode it is a copy-pasted row.
+    /// Two scenes claim the same ID — a copy-pasted manifest row.
+    ///
+    /// Convention mode reports [`ProblemKind::AmbiguousScene`] instead, which
+    /// can name the files and say which slot they are competing for.
     DuplicateId,
+    /// Files left part-way through a rename that was interrupted (D-121).
+    ///
+    /// `arrange` moves a scene's files to `.arranging-…` names and back, and a
+    /// run that dies in between leaves them there — invisible to the folder
+    /// scan, which ignores dotfiles, so the scenes simply vanish. Reported
+    /// rather than passed over in silence: "1566 scenes, no problems" over a
+    /// project that had 2000 is the most misleading thing this program can say.
+    InterruptedRename {
+        /// How many files are waiting to be put back.
+        files: usize,
+    },
+    /// One scene, two files claiming the same job (D-111).
+    ///
+    /// `001.jpg` beside `001.png`, or `001.wav` beside `001.mp3`. The folder
+    /// scan groups by stem, so both are candidates for one scene and there is
+    /// nothing in the folder that says which the operator meant. Guessing is
+    /// how a project renders 500 scenes of the wrong thing — the same reason
+    /// [`ProblemKind::ConflictingAudioSources`] exists — so this is reported
+    /// with the candidates named, and the operator removes or renames one.
+    AmbiguousScene {
+        /// Which job they compete for: `"image"`, `"narration"` or `"text"`.
+        slot: &'static str,
+        /// Every candidate, in sorted order so the message is stable.
+        candidates: Vec<String>,
+    },
     /// No `image` cell.
     MissingImage,
     /// None of `text`, `audio_file`, `duration` (D-020).
@@ -496,6 +542,20 @@ impl fmt::Display for ProblemKind {
         match self {
             ProblemKind::UnusableId(e) => write!(f, "{e}"),
             ProblemKind::DuplicateId => f.write_str("duplicate scene id"),
+            ProblemKind::InterruptedRename { files } => write!(
+                f,
+                "{files} file{} are part-way through a rename that did not finish, \
+                 so the scenes they belong to are missing — `still remove` or \
+                 `still move` on this project puts them back",
+                if *files == 1 { " is" } else { "s" }
+            ),
+            ProblemKind::AmbiguousScene { slot, candidates } => write!(
+                f,
+                "{} files claim to be this scene's {slot} ({}) — remove or \
+                 rename all but one",
+                candidates.len(),
+                candidates.join(", ")
+            ),
             ProblemKind::MissingImage => f.write_str("no image"),
             ProblemKind::NoAudioSource => f.write_str(
                 "no audio source — give exactly one of `text`, `audio_file` or `duration`",

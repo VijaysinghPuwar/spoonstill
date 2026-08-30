@@ -186,3 +186,36 @@ fn every_screen_that_reports_a_missing_tool_can_also_fix_it() {
         "nothing installs anything any more"
     );
 }
+
+/// D-127. Every command that writes into the operator's folder still tells
+/// Rust which project it means.
+///
+/// Those commands are bound to the project the window has open, and the value
+/// the page sends is *compared* against it rather than ignored — so a page that
+/// stopped sending `root` would have every edit refused. In a webview that
+/// failure is silent, which is the whole reason `ui_contract.rs` exists.
+#[test]
+fn every_command_that_writes_names_the_project_it_means() {
+    let js = code_only(&read("app.js"));
+
+    for command in [
+        "set_narration",
+        "add_media",
+        "remove_scene",
+        "move_scene",
+        "preview_voice",
+    ] {
+        let at = js
+            .find(&format!("\"{command}\""))
+            .unwrap_or_else(|| panic!("{command} is not invoked from the page at all"));
+
+        // The arguments follow the name closely — they are one object literal,
+        // written inline or handed to the `arrange` helper.
+        let window = &js[at..js.len().min(at + 200)];
+        assert!(
+            window.contains("root:"),
+            "{command} is called without a root, so Rust cannot tell which \
+             project it means and will refuse it: {window}"
+        );
+    }
+}

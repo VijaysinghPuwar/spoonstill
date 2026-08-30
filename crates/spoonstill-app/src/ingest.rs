@@ -442,40 +442,55 @@ fn copy_in(root: &Path, source: &Path, stem: &str) -> Result<Copied, IngestError
     let name = format!("{stem}.{extension}");
     let destination = root.join(&name);
 
-    // Rule 2 of the module note. `create_new` is the check and the open in one
-    // syscall, so there is no window between asking and writing.
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&destination)
-    {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(IngestError::Copy {
-                from: source.to_path_buf(),
-                to: destination,
-                detail: "a file of that name is already in the project".to_owned(),
-            });
-        }
-        Err(e) => {
-            return Err(IngestError::Copy {
-                from: source.to_path_buf(),
-                to: destination,
-                detail: e.to_string(),
-            });
-        }
-    }
-
-    fs::copy(source, &destination).map_err(|e| {
-        // The placeholder is ours and it is empty; leaving it behind would
-        // leave a zero-byte scene in the folder.
-        let _ = fs::remove_file(&destination);
+    // Copied beside the destination first, never into it (D-120). This used to
+    // `create_new` the real name and then fill it, so the operator's own scene
+    // file held incomplete media for the whole of the copy. Measured on a
+    // FAT32 volume — an external drive, which is where video media lives — an
+    // interrupted `still add` of a 400 MB photo left **232 MB at `001.jpg`**:
+    // a broken scene, a consumed scene number, and something to delete by hand.
+    // The copy is O(1) on APFS, so this is invisible on the developer's own
+    // disk and seconds long on the operator's.
+    let temporary = spoonstill_media::atomic::partial_path(&destination);
+    fs::copy(source, &temporary).map_err(|e| {
+        let _ = fs::remove_file(&temporary);
         IngestError::Copy {
             from: source.to_path_buf(),
             to: destination.clone(),
             detail: e.to_string(),
         }
     })?;
+
+    // Rule 2 of the module note: never overwrite. `create_new` is the check and
+    // the claim in one syscall, so two adds cannot both take the name — and it
+    // is done *after* the copy, so the name is claimed for as long as it takes
+    // to rename rather than for as long as it takes to copy.
+    let claim = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&destination);
+    if let Err(e) = claim {
+        let _ = fs::remove_file(&temporary);
+        return Err(IngestError::Copy {
+            from: source.to_path_buf(),
+            to: destination,
+            detail: if e.kind() == std::io::ErrorKind::AlreadyExists {
+                "a file of that name is already in the project".to_owned()
+            } else {
+                e.to_string()
+            },
+        });
+    }
+
+    // Over our own empty claim, which `rename` replaces atomically (D-119).
+    if let Err(e) = fs::rename(&temporary, &destination) {
+        let _ = fs::remove_file(&temporary);
+        let _ = fs::remove_file(&destination);
+        return Err(IngestError::Copy {
+            from: source.to_path_buf(),
+            to: destination.clone(),
+            detail: e.to_string(),
+        });
+    }
 
     Ok(Copied {
         source: source.to_path_buf(),
@@ -851,5 +866,146 @@ mod tests {
         // 10, 2, 9 — and the case of `img_2.JPG` changes nothing.
         let order: Vec<&str> = names.iter().filter_map(|p| p.to_str()).collect();
         assert_eq!(order, ["b.jpg", "img_2.JPG", "IMG_9.jpg", "IMG_10.jpg"]);
+    }
+
+    /// D-120. A scene file appears complete or not at all.
+    ///
+    /// `copy_in` used to `create_new` the **real** name and then fill it, so
+    /// the operator's own `001.jpg` held incomplete media for the whole of the
+    /// copy. That is invisible on APFS, where `fs::copy` is a copy-on-write
+    /// clone and finishes in microseconds, and seconds long on the filesystems
+    /// video actually lives on. Measured on a FAT32 volume: an interrupted
+    /// `still add` of a 400 MB photo left **232 MB at `001.jpg`** — a broken
+    /// scene, a consumed scene number, and something to delete by hand. After
+    /// this, the same kill leaves only a hidden `.partial` and the retry takes
+    /// `001` as if nothing had happened.
+    #[test]
+    fn a_scene_file_is_never_seen_half_copied() {
+        let temp = Temp::new("halfcopy");
+        let source = temp.file("src/photo.jpg", b"the whole picture");
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).expect("project");
+
+        let copied = copy_in(&project, &source, "001").expect("copies");
+        assert_eq!(copied.name, "001.jpg");
+        assert_eq!(
+            fs::read(project.join("001.jpg")).expect("read"),
+            b"the whole picture",
+            "the destination must hold every byte"
+        );
+        assert!(
+            leftovers(&project).is_empty(),
+            "a temporary was left behind: {:?}",
+            leftovers(&project)
+        );
+    }
+
+    /// A copy that fails leaves the folder exactly as it found it — no scene
+    /// file at the real name for `validate` to report, and no temporary either.
+    #[test]
+    fn a_failed_copy_leaves_nothing_behind() {
+        let temp = Temp::new("failedcopy");
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).expect("project");
+        let missing = temp.0.join("src/not-here.jpg");
+
+        copy_in(&project, &missing, "001").expect_err("a missing source cannot be copied");
+
+        assert!(
+            !project.join("001.jpg").exists(),
+            "the real name was created for a copy that never happened"
+        );
+        assert!(leftovers(&project).is_empty(), "{:?}", leftovers(&project));
+    }
+
+    /// Rule 2 of the module note still holds, and now the claim is made *after*
+    /// the copy — so a refused name must not leave the copy's temporary behind.
+    #[test]
+    fn an_existing_name_is_refused_and_leaves_no_temporary() {
+        let temp = Temp::new("existing");
+        let source = temp.file("src/photo.jpg", b"new");
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).expect("project");
+        fs::write(project.join("001.jpg"), b"the operator's own").expect("seed");
+
+        let error = copy_in(&project, &source, "001").expect_err("must not overwrite");
+        assert!(
+            error.to_string().contains("already in the project"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(project.join("001.jpg")).expect("read"),
+            b"the operator's own",
+            "an existing file was overwritten"
+        );
+        assert!(leftovers(&project).is_empty(), "{:?}", leftovers(&project));
+    }
+
+    /// Every hidden temporary in a folder, which should be none once a call
+    /// has returned either way.
+    fn leftovers(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .expect("the folder")
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+            .filter(|n| n.contains(".partial-"))
+            .collect()
+    }
+
+    /// The test that actually distinguishes the two implementations (D-120).
+    ///
+    /// The three above assert good invariants — complete content, no litter,
+    /// no clobber — and **all three pass against the broken code**, because
+    /// they inspect the end state and the defect is a *window*. Recorded
+    /// because it is the trap D-116 named: a test that checks the right thing
+    /// where the bug cannot show is not coverage.
+    ///
+    /// What is asserted here is the property the fix actually buys, stated
+    /// exactly: **the scene file is never seen holding part of a photograph.**
+    /// Not "never seen at all" — claiming the name still creates an empty file
+    /// for the two syscalls between the claim and the rename, and on a
+    /// filesystem without hard links (FAT32 answers `Operation not supported`,
+    /// and that is the external drive this matters on) there is no way to both
+    /// refuse to overwrite and appear atomically. An empty file for two
+    /// syscalls is a different thing from 232 MB of a 400 MB photo for the
+    /// length of a copy.
+    #[test]
+    fn the_destination_is_never_seen_holding_part_of_a_photograph() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+        const SIZE: u64 = 64 * 1024 * 1024;
+
+        let temp = Temp::new("window");
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).expect("project");
+        let source = temp.file("src/big.jpg", &vec![7u8; SIZE as usize]);
+
+        let destination = project.join("001.jpg");
+        let done = AtomicBool::new(false);
+        let partial = AtomicU64::new(0);
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(Ordering::Relaxed) {
+                    if let Ok(meta) = fs::metadata(&destination) {
+                        let len = meta.len();
+                        if len > 0 && len < SIZE {
+                            partial.store(len, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                }
+            });
+            copy_in(&project, &source, "001").expect("copies");
+            done.store(true, Ordering::Relaxed);
+        });
+
+        let seen = partial.load(Ordering::Relaxed);
+        assert_eq!(
+            seen, 0,
+            "the scene file held {seen} of {SIZE} bytes while the copy ran — an \
+             interrupted `still add` leaves exactly that behind, at the real name"
+        );
+        assert_eq!(fs::metadata(&destination).expect("stat").len(), SIZE);
     }
 }

@@ -136,6 +136,11 @@ pub struct Removed {
 /// [`ArrangeError::Io`] if the folder cannot be read, or
 /// [`ArrangeError::NotNumbered`] if a still does not follow the convention.
 pub fn scenes(root: &Path) -> Result<Vec<Scene>, ArrangeError> {
+    // Before anything is read, not only before anything is written (D-121).
+    // Every arrange operation starts here, so a folder left half-renamed by an
+    // interrupted run is put right the next time anyone so much as looks at it.
+    recover(root)?;
+
     let mut everything: Vec<PathBuf> = fs::read_dir(root)
         .map_err(|source| ArrangeError::Io {
             doing: "reading the project folder",
@@ -287,6 +292,13 @@ fn renumber(root: &Path, order: &[Scene]) -> Result<(), ArrangeError> {
 
     // Pass one: out of the way. The prefix is one no scene can have, because a
     // scene's stem must parse as a number.
+    //
+    // The parked name carries **where the file came from and where it is
+    // going** (D-121). That is the whole journal: an interrupted renumber used
+    // to leave files under names the folder scan ignores, so the scenes simply
+    // disappeared and nothing could work out where they belonged. Measured on a
+    // 2000-scene project, killed 120 ms in: 433 files parked, 434 scenes gone,
+    // and `still validate` reporting "1566 scenes — no problems".
     let mut staged: Vec<(PathBuf, String, String)> = Vec::new();
     for (index, scene) in order.iter().enumerate() {
         let wanted = format!("{:0width$}", index + 1, width = width);
@@ -296,8 +308,7 @@ fn renumber(root: &Path, order: &[Scene]) -> Result<(), ArrangeError> {
                 .and_then(OsStr::to_str)
                 .unwrap_or_default()
                 .to_owned();
-            let parked = root.join(format!(".arranging-{}-{}.{extension}", scene.id, extension));
-            let parked = unique(parked);
+            let parked = unique(root.join(parked_name(&scene.id, &wanted, &extension)));
             rename(file, &parked)?;
             staged.push((parked, wanted.clone(), extension));
         }
@@ -309,6 +320,99 @@ fn renumber(root: &Path, order: &[Scene]) -> Result<(), ArrangeError> {
         rename(&parked, &destination)?;
     }
     Ok(())
+}
+
+/// The name a file wears while it is between two numbers.
+///
+/// `.arranging-<from>-to-<wanted>.<ext>` — a dot so the folder scan ignores it
+/// (D-050), and both ids so an interrupted run can be finished or undone
+/// without guessing (D-121).
+fn parked_name(from: &str, wanted: &str, extension: &str) -> String {
+    format!(".arranging-{from}-to-{wanted}.{extension}")
+}
+
+/// What a parked file says about itself: where it came from, where it was
+/// going, and its extension.
+fn parked_parts(name: &str) -> Option<(String, String, String)> {
+    let rest = name.strip_prefix(".arranging-")?;
+    let (stems, extension) = rest.rsplit_once('.')?;
+
+    // `unique` may have appended `-2`, `-3`… to avoid a collision; the marker
+    // is still the first `-to-`.
+    if let Some((from, wanted)) = stems.split_once("-to-") {
+        let wanted = wanted.split('-').next().unwrap_or(wanted);
+        return Some((from.to_owned(), wanted.to_owned(), extension.to_owned()));
+    }
+
+    // The shape a build before D-121 wrote: `.arranging-<from>-<ext>.<ext>`,
+    // which records where the file came from and not where it was going. There
+    // are real projects carrying these — a folder damaged by the shipped
+    // version has to be repairable by the version that fixes it — and the only
+    // safe reading is "put it back", which is what `wanted == from` asks for.
+    let from = stems.strip_suffix(&format!("-{extension}"))?;
+    Some((from.to_owned(), from.to_owned(), extension.to_owned()))
+}
+
+/// Finish or undo a renumber that was interrupted (D-121).
+///
+/// Run before every operation, and before the project is read, so a folder is
+/// never *shown* to anybody in the half-renamed state. The rule is one line and
+/// it is decidable from the disk alone:
+///
+/// - **If the file's destination is free, put it there.** That is pass two
+///   resuming. After pass one every numbered name has been vacated, so this is
+///   always the branch taken when the interruption happened during pass two.
+/// - **Otherwise put it back where it came from.** Its old name must be free,
+///   because pass one moved it away and pass two had not yet begun to fill
+///   anything in. That is the branch for an interruption during pass one, and
+///   it is a rollback.
+///
+/// Either way the file ends up under a name the operator can see, which is the
+/// property that actually matters: a photograph must never be invisible.
+///
+/// Returns how many files it put back.
+///
+/// # Errors
+///
+/// [`ArrangeError::Io`] if the filesystem refuses a rename.
+pub fn recover(root: &Path) -> Result<usize, ArrangeError> {
+    let Ok(entries) = fs::read_dir(root) else {
+        return Ok(0);
+    };
+
+    let mut parked: Vec<(PathBuf, String, String, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        if let Some((from, wanted, extension)) = parked_parts(&name) {
+            parked.push((entry.path(), from, wanted, extension));
+        }
+    }
+    // Deterministic, so two runs of a recovery resolve the same way.
+    parked.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut restored = 0;
+    for (path, from, wanted, extension) in parked {
+        let destination = root.join(format!("{wanted}.{extension}"));
+        let target = if destination.exists() {
+            // Occupied: pass one had not finished, so this is a rollback.
+            root.join(format!("{from}.{extension}"))
+        } else {
+            destination
+        };
+        // If even that is taken there is nothing safe to do; leaving the file
+        // parked is better than overwriting one of the operator's photographs.
+        if target.exists() {
+            continue;
+        }
+        rename(&path, &target)?;
+        restored += 1;
+    }
+    Ok(restored)
 }
 
 /// A path nothing is using yet.
@@ -662,5 +766,131 @@ mod tests {
         assert!(listing.contains(&"001.jpeg".to_owned()));
         assert!(listing.contains(&"011.jpeg".to_owned()));
         assert_eq!(project.contents()[0], "011.jpeg");
+    }
+
+    /// D-121. An interrupted renumber is finished or undone, never left.
+    ///
+    /// Reproduced end to end before this existed: a 2000-scene project, `still
+    /// remove` killed 120 ms in, left **433 files parked and 434 scenes gone**,
+    /// with `still validate` reporting "1566 scenes — no problems". The files
+    /// were never deleted — D-100 held — but they were invisible, and no
+    /// command could put them back.
+    ///
+    /// The states are built by hand rather than by racing a kill, because a
+    /// test that reproduces one run in eight is a test people learn to re-run.
+    #[test]
+    fn an_interrupted_renumber_is_finished_when_its_destination_is_free() {
+        // Pass two was under way: everything has been parked, so every
+        // numbered name is vacant and the parked file can simply be placed.
+        let project = Project::new("resume", &[]);
+        fs::write(
+            project.0.join(parked_name("003", "002", "jpg")),
+            "the third photograph",
+        )
+        .expect("park");
+
+        let restored = recover(&project.0).expect("recovers");
+
+        assert_eq!(restored, 1);
+        assert_eq!(
+            fs::read_to_string(project.0.join("002.jpg")).expect("read"),
+            "the third photograph",
+            "the file should have gone on to where it was headed"
+        );
+        assert!(parked(&project.0).is_empty());
+    }
+
+    #[test]
+    fn an_interrupted_renumber_is_undone_when_its_destination_is_taken() {
+        // Pass one was under way: this file was parked, but the scene that
+        // holds its destination has not been moved out of the way yet. Placing
+        // it would overwrite a photograph, so it goes back where it came from.
+        let project = Project::new("rollback", &[("002", &["jpg"])]);
+        fs::write(
+            project.0.join(parked_name("003", "002", "jpg")),
+            "the third photograph",
+        )
+        .expect("park");
+
+        let restored = recover(&project.0).expect("recovers");
+
+        assert_eq!(restored, 1);
+        assert_eq!(
+            fs::read_to_string(project.0.join("002.jpg")).expect("read"),
+            "002.jpg",
+            "the photograph that was already there must be untouched"
+        );
+        assert_eq!(
+            fs::read_to_string(project.0.join("003.jpg")).expect("read"),
+            "the third photograph",
+            "the parked file must go back to its own name"
+        );
+        assert!(parked(&project.0).is_empty());
+    }
+
+    /// A folder damaged by the build that shipped this bug has to be repairable
+    /// by the build that fixes it. Those names carry only where the file came
+    /// from, so the only safe reading is "put it back".
+    #[test]
+    fn leftovers_from_the_older_name_format_are_still_recovered() {
+        let project = Project::new("legacy", &[]);
+        fs::write(
+            project.0.join(".arranging-0007-jpg.jpg"),
+            "the seventh photograph",
+        )
+        .expect("park");
+
+        assert_eq!(recover(&project.0).expect("recovers"), 1);
+        assert_eq!(
+            fs::read_to_string(project.0.join("0007.jpg")).expect("read"),
+            "the seventh photograph"
+        );
+    }
+
+    /// When neither name is free there is nothing safe to do, and leaving the
+    /// file parked beats overwriting one of the operator's photographs. It is
+    /// still reported, by `validate`, as an unfinished rename.
+    #[test]
+    fn a_file_with_nowhere_safe_to_go_is_left_alone_rather_than_overwriting() {
+        let project = Project::new("stuck", &[("002", &["jpg"]), ("003", &["jpg"])]);
+        fs::write(
+            project.0.join(parked_name("003", "002", "jpg")),
+            "a third copy",
+        )
+        .expect("park");
+
+        assert_eq!(recover(&project.0).expect("recovers"), 0);
+        assert_eq!(
+            fs::read_to_string(project.0.join("002.jpg")).expect("read"),
+            "002.jpg"
+        );
+        assert_eq!(
+            fs::read_to_string(project.0.join("003.jpg")).expect("read"),
+            "003.jpg"
+        );
+        assert_eq!(
+            parked(&project.0).len(),
+            1,
+            "and it is still there to report"
+        );
+    }
+
+    /// Nothing parked, nothing done — recovery runs before every operation, so
+    /// it must be free and must not disturb a healthy folder.
+    #[test]
+    fn recovery_does_nothing_to_a_folder_that_is_not_mid_rename() {
+        let project = Project::new("healthy", &[("001", &["jpg", "txt"]), ("002", &["jpg"])]);
+        assert_eq!(recover(&project.0).expect("recovers"), 0);
+        assert_eq!(scenes(&project.0).expect("scenes").len(), 2);
+    }
+
+    /// Every parked file in a folder.
+    fn parked(root: &Path) -> Vec<String> {
+        fs::read_dir(root)
+            .expect("the folder")
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+            .filter(|n| n.starts_with(".arranging-"))
+            .collect()
     }
 }

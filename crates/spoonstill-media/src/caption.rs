@@ -177,6 +177,14 @@ struct Mask {
     a: Vec<u8>,
 }
 
+/// Box blur passes in a drop shadow, and therefore the shadow's reach.
+///
+/// Three passes of radius `r` spread `3r`, so this is both how the shadow is
+/// built and how much room the canvas has to reserve for it. One constant
+/// rather than a `3` in the blur and a `2` in the margin, because that
+/// disagreement is exactly what D-117 was.
+const SHADOW_BLUR_PASSES: usize = 3;
+
 impl Mask {
     fn new(width: usize, height: usize) -> Self {
         Mask {
@@ -215,36 +223,90 @@ impl Mask {
         if radius == 0 {
             return self.clone();
         }
-        // The disc, once, as offsets — so the inner loop is a lookup rather
-        // than a distance test per pixel per offset.
+
+        // Decomposed into the disc's horizontal chords (D-130).
+        //
+        // The disc used to be a list of ~pi*r^2 offsets walked for every pixel,
+        // which is `O(area * r^2)` — and `r` grows with the frame, so the cost
+        // grows with the *fourth* power of the resolution. Measured: `punch` at
+        // 4K took **604 ms for one cue**, against 41 ms at 1080p, a 14.6x step
+        // for a 4x area. At 500 scenes that is ten minutes of drawing text.
+        //
+        // A disc is the union of its rows, and each row is an interval. So
+        // dilating by the disc is the maximum, over each row offset `dy`, of a
+        // *one-dimensional* dilation by that row's half-width — and a 1-D
+        // dilation is `O(1)` per pixel with a sliding-window maximum. That
+        // makes the whole thing `O(area * r)`, and it is the **same kernel**:
+        // the half-widths are the same integers the offset list was built from,
+        // so the output is identical, which is asserted rather than assumed.
         let r = radius as isize;
-        let mut disc = Vec::new();
+        let mut out = Mask::new(self.width, self.height);
+
+        // Rows sharing a half-width share their work: `dy` and `-dy` always do,
+        // and near the equator several do.
+        let mut cache: std::collections::HashMap<usize, Vec<u8>> = std::collections::HashMap::new();
+
         for dy in -r..=r {
-            for dx in -r..=r {
-                if dx * dx + dy * dy <= r * r {
-                    disc.push((dx, dy));
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let half = ((r * r - dy * dy) as f64).sqrt().floor() as usize;
+            let widened = cache
+                .entry(half)
+                .or_insert_with(|| self.widen_rows(half))
+                .clone();
+
+            for y in 0..self.height {
+                let source = y as isize + dy;
+                if source < 0 || source >= self.height as isize {
+                    continue;
+                }
+                let row = source as usize * self.width;
+                let target = y * self.width;
+                for x in 0..self.width {
+                    let value = widened[row + x];
+                    if value > out.a[target + x] {
+                        out.a[target + x] = value;
+                    }
                 }
             }
         }
+        out
+    }
 
-        let mut out = Mask::new(self.width, self.height);
+    /// Every row dilated horizontally by `half`, with a sliding-window maximum.
+    ///
+    /// The inner half of [`Mask::dilate`] (D-130). A monotonic deque holds the
+    /// indices whose values could still be the maximum of the window, so each
+    /// pixel is pushed and popped at most once and the pass is `O(width)` per
+    /// row however wide the window is.
+    fn widen_rows(&self, half: usize) -> Vec<u8> {
+        let mut out = vec![0u8; self.width * self.height];
+        if self.width == 0 {
+            return out;
+        }
+        let half = half as isize;
+        let mut window: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+
         for y in 0..self.height {
+            let row = y * self.width;
+            window.clear();
+            // Prime the window with everything the first pixel can see.
+            let mut next = 0isize;
             for x in 0..self.width {
-                // Nothing within the disc can reach a pixel whose whole
-                // neighbourhood is empty, and most of the band is empty.
-                let mut best = 0u8;
-                for &(dx, dy) in &disc {
-                    let sx = x as isize + dx;
-                    let sy = y as isize + dy;
-                    if sx < 0 || sy < 0 {
-                        continue;
+                let last = (x as isize + half).min(self.width as isize - 1);
+                while next <= last {
+                    let value = self.a[row + next as usize];
+                    while window.back().is_some_and(|&i| self.a[row + i] <= value) {
+                        window.pop_back();
                     }
-                    best = best.max(self.get(sx as usize, sy as usize));
-                    if best == 255 {
-                        break;
-                    }
+                    window.push_back(next as usize);
+                    next += 1;
                 }
-                out.a[y * self.width + x] = best;
+                // Drop what has fallen off the left edge of the window.
+                let first = x as isize - half;
+                while window.front().is_some_and(|&i| (i as isize) < first) {
+                    window.pop_front();
+                }
+                out[row + x] = window.front().map_or(0, |&i| self.a[row + i]);
             }
         }
         out
@@ -252,9 +314,9 @@ impl Mask {
 
     /// Offset the shape down and to the right, then soften it.
     ///
-    /// Three box blurs, which is the standard cheap approximation of a
-    /// Gaussian and is indistinguishable from one at the radii a drop shadow
-    /// uses.
+    /// [`SHADOW_BLUR_PASSES`] box blurs, which is the standard cheap
+    /// approximation of a Gaussian and is indistinguishable from one at the
+    /// radii a drop shadow uses.
     fn shadow(&self, offset: usize, blur: usize) -> Mask {
         let mut out = Mask::new(self.width, self.height);
         for y in 0..self.height {
@@ -264,7 +326,7 @@ impl Mask {
                 }
             }
         }
-        for _ in 0..3 {
+        for _ in 0..SHADOW_BLUR_PASSES {
             if blur > 0 {
                 out = out.box_blur(blur);
             }
@@ -272,33 +334,64 @@ impl Mask {
         out
     }
 
-    /// One separable box blur of the given radius.
+    /// One separable box blur of the given radius, on a running sum (D-130).
+    ///
+    /// Separable already — a horizontal pass then a vertical one — but each
+    /// pass re-added all `2r+1` samples for every pixel, so a pass was
+    /// `O(area * r)` and the three of a shadow were `O(area * r)` again. A box
+    /// blur does not need that: consecutive windows differ by one sample at
+    /// each end, so the sum carries across and a pass becomes `O(area)`.
+    ///
+    /// Measured on the theme it matters most to, `card` at 4K, whose shadow
+    /// radius is the largest any theme asks for: 245 ms a cue before, and the
+    /// dilation fix alone did nothing for it because the blur was the cost.
+    ///
+    /// **The edges keep their old behaviour deliberately.** Samples off the
+    /// end count as zero and the divisor stays `2r+1`, so a shadow fades into
+    /// the border exactly as it did. That is not obviously the *best* rule, but
+    /// changing it would change every rendered frame, and this is a
+    /// performance decision — a test asserts the output is byte-identical.
     fn box_blur(&self, radius: usize) -> Mask {
-        let mut mid = Mask::new(self.width, self.height);
         let span = (radius * 2 + 1) as u32;
+
+        let mut mid = Mask::new(self.width, self.height);
         for y in 0..self.height {
+            let row = y * self.width;
+            // The window for x = 0 reaches from -r to +r; everything left of
+            // the mask is zero, so it starts as the first r+1 samples.
+            let mut sum: u32 = (0..=radius.min(self.width.saturating_sub(1)))
+                .map(|x| u32::from(self.a[row + x]))
+                .sum();
             for x in 0..self.width {
-                let mut sum = 0u32;
-                for k in 0..=radius * 2 {
-                    let sx = x as isize + k as isize - radius as isize;
-                    if sx >= 0 {
-                        sum += u32::from(self.get(sx as usize, y));
-                    }
+                mid.a[row + x] = u8::try_from(sum / span).unwrap_or(255);
+                // Slide: the sample entering on the right, the one leaving on
+                // the left. Both are zero when they fall outside.
+                let entering = x + radius + 1;
+                if entering < self.width {
+                    sum += u32::from(self.a[row + entering]);
                 }
-                mid.a[y * self.width + x] = u8::try_from(sum / span).unwrap_or(255);
+                if x + 1 >= radius + 1 {
+                    let leaving = x + 1 - (radius + 1);
+                    sum -= u32::from(self.a[row + leaving]);
+                }
             }
         }
+
         let mut out = Mask::new(self.width, self.height);
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let mut sum = 0u32;
-                for k in 0..=radius * 2 {
-                    let sy = y as isize + k as isize - radius as isize;
-                    if sy >= 0 {
-                        sum += u32::from(mid.get(x, sy as usize));
-                    }
-                }
+        for x in 0..self.width {
+            let mut sum: u32 = (0..=radius.min(self.height.saturating_sub(1)))
+                .map(|y| u32::from(mid.a[y * self.width + x]))
+                .sum();
+            for y in 0..self.height {
                 out.a[y * self.width + x] = u8::try_from(sum / span).unwrap_or(255);
+                let entering = y + radius + 1;
+                if entering < self.height {
+                    sum += u32::from(mid.a[entering * self.width + x]);
+                }
+                if y + 1 >= radius + 1 {
+                    let leaving = y + 1 - (radius + 1);
+                    sum -= u32::from(mid.a[leaving * self.width + x]);
+                }
             }
         }
         out
@@ -541,8 +634,13 @@ fn draw(
     // asymmetric on purpose — a theme whose band is flush to the frame edge
     // (Backdrop::Band, margin 0) must have nothing at all below it, or a strip
     // of photograph shows under the band and reads as a rendering fault.
-    let bleed_up = outline_r + shadow_blur * 2;
-    let bleed_down = outline_r + shadow_off + shadow_blur * 2;
+    //
+    // `* SHADOW_BLUR_PASSES`, not `* 2` (D-117): `Mask::shadow` runs **three**
+    // box blurs, and three passes of radius r spread 3r, so reserving 2r cut
+    // the outermost ring off against the canvas edge. Downward is the binding
+    // direction, because the offset moves the shadow that way.
+    let bleed_up = outline_r + shadow_blur * SHADOW_BLUR_PASSES;
+    let bleed_down = outline_r + shadow_off + shadow_blur * SHADOW_BLUR_PASSES;
 
     let box_h = (text_h + pad_y * 2.0).ceil() as usize;
     let box_w = match style.backdrop {
@@ -1078,5 +1176,224 @@ mod tests {
         let grown = mask.dilate(6);
         assert_eq!(grown.get(10, 4), 255, "straight up, within the radius");
         assert_eq!(grown.get(4, 4), 0, "the diagonal corner is outside a disc");
+    }
+
+    /// D-130. The fast dilation is the **same** dilation.
+    ///
+    /// `dilate` used to walk a list of every offset inside the disc, for every
+    /// pixel. It now walks the disc's horizontal chords, which is the same set
+    /// of pixels reached a different way — so this asserts the two agree
+    /// exactly, on shapes chosen to catch the ways a decomposition goes wrong:
+    /// the edges, a single dot, a diagonal, and radii either side of a whole
+    /// number of pixels.
+    #[test]
+    fn the_decomposed_dilation_matches_the_disc_it_replaced() {
+        /// The original implementation, kept here as the definition of right.
+        fn by_offsets(mask: &Mask, radius: usize) -> Mask {
+            if radius == 0 {
+                return mask.clone();
+            }
+            let r = radius as isize;
+            let mut disc = Vec::new();
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if dx * dx + dy * dy <= r * r {
+                        disc.push((dx, dy));
+                    }
+                }
+            }
+            let mut out = Mask::new(mask.width, mask.height);
+            for y in 0..mask.height {
+                for x in 0..mask.width {
+                    let mut best = 0u8;
+                    for &(dx, dy) in &disc {
+                        let sx = x as isize + dx;
+                        let sy = y as isize + dy;
+                        if sx < 0 || sy < 0 {
+                            continue;
+                        }
+                        best = best.max(mask.get(sx as usize, sy as usize));
+                    }
+                    out.a[y * mask.width + x] = best;
+                }
+            }
+            out
+        }
+
+        let mut shapes = Vec::new();
+
+        // A single dot in the middle: the disc's own shape, drawn.
+        let mut dot = Mask::new(31, 31);
+        dot.a[15 * 31 + 15] = 255;
+        shapes.push(("a dot", dot));
+
+        // Ink in every corner and along both edges, where an offset can fall
+        // outside the mask and a chord can be clipped wrongly.
+        let mut edges = Mask::new(24, 18);
+        for x in 0..24 {
+            edges.a[x] = 200;
+            edges.a[17 * 24 + x] = 90;
+        }
+        for y in 0..18 {
+            edges.a[y * 24] = 255;
+            edges.a[y * 24 + 23] = 40;
+        }
+        shapes.push(("the edges", edges));
+
+        // A diagonal, and a range of greys — dilation is a maximum, not a
+        // presence test, so the values have to travel too.
+        let mut diagonal = Mask::new(29, 29);
+        for i in 0..29 {
+            diagonal.a[i * 29 + i] = (i * 8) as u8;
+        }
+        shapes.push(("a diagonal", diagonal));
+
+        // Nothing at all, which must stay nothing.
+        shapes.push(("an empty band", Mask::new(20, 12)));
+
+        for (name, shape) in &shapes {
+            for radius in [0usize, 1, 2, 3, 5, 8, 13] {
+                let fast = shape.dilate(radius);
+                let slow = by_offsets(shape, radius);
+                assert_eq!(
+                    fast.a, slow.a,
+                    "{name} at radius {radius}: the decomposition is not the \
+                     same kernel"
+                );
+            }
+        }
+    }
+
+    /// D-130. The running-sum blur is the **same** blur, edges included.
+    ///
+    /// A box blur on a running sum is only equal to the naive one if the
+    /// window is treated identically at the borders — where samples fall off
+    /// the end, and where the divisor stays `2r+1` rather than shrinking. Those
+    /// are exactly the places an off-by-one hides, and getting one wrong would
+    /// change every shadow in every rendered frame by a shade nobody would
+    /// notice until they compared two builds.
+    #[test]
+    fn the_running_sum_blur_matches_the_one_it_replaced() {
+        /// The original implementation, kept as the definition of right.
+        fn by_resumming(mask: &Mask, radius: usize) -> Mask {
+            let mut mid = Mask::new(mask.width, mask.height);
+            let span = (radius * 2 + 1) as u32;
+            for y in 0..mask.height {
+                for x in 0..mask.width {
+                    let mut sum = 0u32;
+                    for k in 0..=radius * 2 {
+                        let sx = x as isize + k as isize - radius as isize;
+                        if sx >= 0 {
+                            sum += u32::from(mask.get(sx as usize, y));
+                        }
+                    }
+                    mid.a[y * mask.width + x] = u8::try_from(sum / span).unwrap_or(255);
+                }
+            }
+            let mut out = Mask::new(mask.width, mask.height);
+            for y in 0..mask.height {
+                for x in 0..mask.width {
+                    let mut sum = 0u32;
+                    for k in 0..=radius * 2 {
+                        let sy = y as isize + k as isize - radius as isize;
+                        if sy >= 0 {
+                            sum += u32::from(mid.get(x, sy as usize));
+                        }
+                    }
+                    out.a[y * mask.width + x] = u8::try_from(sum / span).unwrap_or(255);
+                }
+            }
+            out
+        }
+
+        let mut shapes = Vec::new();
+
+        let mut block = Mask::new(23, 19);
+        for y in 5..14 {
+            for x in 6..17 {
+                block.a[y * 23 + x] = 255;
+            }
+        }
+        shapes.push(("a block", block));
+
+        // Ink hard against all four edges, which is where the window runs off.
+        let mut edges = Mask::new(17, 13);
+        for x in 0..17 {
+            edges.a[x] = 255;
+            edges.a[12 * 17 + x] = 128;
+        }
+        for y in 0..13 {
+            edges.a[y * 17] = 200;
+            edges.a[y * 17 + 16] = 64;
+        }
+        shapes.push(("the edges", edges));
+
+        let mut dot = Mask::new(15, 15);
+        dot.a[7 * 15 + 7] = 255;
+        shapes.push(("a dot", dot));
+
+        shapes.push(("nothing", Mask::new(11, 9)));
+
+        for (name, shape) in &shapes {
+            // Radii past the mask's own size too: the window is then wider than
+            // the data, which is the case most likely to be wrong.
+            for radius in [0usize, 1, 2, 3, 6, 10, 20] {
+                assert_eq!(
+                    shape.box_blur(radius).a,
+                    by_resumming(shape, radius).a,
+                    "{name} at radius {radius}: the running sum is not the same blur"
+                );
+            }
+        }
+    }
+
+    /// D-124. The font is compiled into the binary, so the licence has to be
+    /// distributed with the binary — the OFL's condition 2 asks that *"each
+    /// copy contains the above copyright notice and this license"*.
+    ///
+    /// Asserted against the licence file the fonts came with, not against a
+    /// copy of the words, so the notice cannot drift away from what is actually
+    /// embedded. Replace the fonts and this fails until the notice is updated,
+    /// which is the point: `include_bytes!` makes the obligation invisible at
+    /// the call site, and nothing else in the build would notice.
+    #[test]
+    fn the_notices_file_carries_the_licence_of_the_font_that_is_embedded() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("the workspace root");
+
+        let licence = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/LICENSE-Inter.txt"),
+        )
+        .expect("the fonts ship with their licence");
+
+        let notices = std::fs::read_to_string(root.join("THIRD-PARTY-NOTICES.md"))
+            .expect("THIRD-PARTY-NOTICES.md is at the workspace root");
+
+        assert!(
+            notices.contains(licence.trim()),
+            "the notices file no longer contains the licence the embedded fonts \
+             are under — update THIRD-PARTY-NOTICES.md from \
+             crates/spoonstill-media/assets/fonts/LICENSE-Inter.txt"
+        );
+
+        // The copyright line specifically, because the OFL names it separately
+        // from the licence body.
+        assert!(
+            notices.contains("Copyright 2020 The Inter Project Authors"),
+            "the copyright notice is missing"
+        );
+
+        // And every weight that is actually embedded is one the notice covers.
+        for weight in ["Inter-Regular.ttf", "Inter-SemiBold.ttf", "Inter-Bold.ttf"] {
+            assert!(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("assets/fonts")
+                    .join(weight)
+                    .exists(),
+                "{weight} is embedded by name in this file"
+            );
+        }
     }
 }

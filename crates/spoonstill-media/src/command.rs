@@ -501,19 +501,63 @@ fn tool_name(program: &Path) -> &'static str {
     }
 }
 
-/// Quote one argument for display. Never used to build a real invocation.
-fn shell_quote(arg: &str) -> String {
-    let safe = !arg.is_empty()
+/// Whether an argument can be shown with no quoting at all.
+///
+/// Deliberately narrow, and the same on both platforms: a `\` puts a Windows
+/// path on the quoted side, which is where it belongs.
+fn needs_no_quoting(arg: &str) -> bool {
+    !arg.is_empty()
         && arg
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "._-/:=+,@".contains(c));
-    if safe {
-        arg.to_string()
+            .all(|c| c.is_ascii_alphanumeric() || "._-/:=+,@".contains(c))
+}
+
+/// Quote one argument for a POSIX shell. Display only.
+fn posix_quote(arg: &str) -> String {
+    if needs_no_quoting(arg) {
+        arg.to_owned()
     } else {
-        // Single quotes, with the standard escape for an embedded one. This is
-        // display only, so it needs to be correct for a human's shell, not for
-        // ours — nothing here is ever parsed back.
+        // Single quotes, with the standard escape for an embedded one: close
+        // the quote, emit an escaped quote, reopen.
         format!("'{}'", arg.replace('\'', r"'\''"))
+    }
+}
+
+/// Quote one argument the way a Windows terminal reads it. Display only.
+///
+/// **Not the same rule** (D-128). PowerShell's single quotes are literal, which
+/// is right for a Windows path full of backslashes, but an embedded quote is
+/// escaped by **doubling** it, not with POSIX's `'\''`. Emitting the POSIX
+/// form gave a Windows operator a line that would not paste — and a filename
+/// with an apostrophe in it is `Dad's photos`, not an exotic case.
+///
+/// PowerShell rather than `cmd.exe` because it is what the shipped installer is
+/// written in and what a modern Windows terminal opens; `cmd` has no single
+/// quoting at all, so no one form can serve both.
+///
+/// Compiled everywhere, not only on Windows, so that the tests below can run
+/// **both** dialects on whatever machine is to hand — D-071 puts Windows in
+/// scope and nothing has ever been run there, so a rule that only exists on a
+/// platform nobody tests is a rule nobody checks.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_quote(arg: &str) -> String {
+    if needs_no_quoting(arg) {
+        arg.to_owned()
+    } else {
+        format!("'{}'", arg.replace('\'', "''"))
+    }
+}
+
+/// Quote one argument for display, in the shell the operator is most likely to
+/// paste it into. Never used to build a real invocation.
+fn shell_quote(arg: &str) -> String {
+    #[cfg(windows)]
+    {
+        windows_quote(arg)
+    }
+    #[cfg(not(windows))]
+    {
+        posix_quote(arg)
     }
 }
 
@@ -638,5 +682,46 @@ mod tests {
         let last = rx.recv().unwrap();
         assert_eq!(last.frame, Some(112));
         assert!(last.done);
+    }
+
+    /// D-128. Two shells, two rules, and the display form has to be right for
+    /// the one the operator will paste into.
+    ///
+    /// Both are tested on every platform on purpose. D-071 puts Windows in
+    /// scope and nothing has ever been run there, so a rule that only compiles
+    /// on Windows is a rule nobody checks.
+    #[test]
+    fn an_argument_is_quoted_for_the_shell_it_will_be_pasted_into() {
+        // Nothing that needs quoting is left alone by either.
+        for plain in ["ffmpeg", "-i", "input.mp4", "scale=1920:1080", "a/b/c.jpg"] {
+            assert_eq!(posix_quote(plain), plain);
+            assert_eq!(windows_quote(plain), plain);
+        }
+
+        // A space is the ordinary case, and both quote it.
+        assert_eq!(posix_quote("RANDOM vidoe "), "'RANDOM vidoe '");
+        assert_eq!(windows_quote("RANDOM vidoe "), "'RANDOM vidoe '");
+
+        // A Windows path: backslashes are literal inside single quotes in both,
+        // which is exactly why single quotes are the right choice here.
+        let windows = r"C:\Users\vijay\Desktop\my film\001.jpg";
+        assert_eq!(windows_quote(windows), format!("'{windows}'"));
+
+        // The one that differs, and the reason this decision exists. POSIX
+        // closes the quote, escapes one, and reopens; PowerShell doubles it.
+        assert_eq!(posix_quote("Dad's photos"), r"'Dad'\''s photos'");
+        assert_eq!(windows_quote("Dad's photos"), "'Dad''s photos'");
+
+        // Emitting the POSIX form to PowerShell is what used to happen, and it
+        // is not merely ugly — it does not parse.
+        assert_ne!(
+            posix_quote("Dad's photos"),
+            windows_quote("Dad's photos"),
+            "if these ever agree, one of them is wrong"
+        );
+
+        // An empty argument is still an argument.
+        assert_eq!(posix_quote(""), "''");
+        assert_eq!(windows_quote(""), "''");
     }
 }

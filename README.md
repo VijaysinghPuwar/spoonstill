@@ -300,7 +300,7 @@ subtitles.
 |---|---|
 | **M0** scaffolding, architecture boundary | complete — 8/8 gates |
 | **M1** one scene, end to end | complete — 8/8 gates |
-| **M2** whole projects: import, validation, speech, parallel render | complete — 9/9 gates |
+| **M2** whole projects: import, validation, speech, parallel render | complete — 13/13 gates |
 | **M3** state database, resumable queue | next |
 | **M4** the Tauri window | shell exists, ahead of schedule |
 | **M5** signing, notarization, bundled FFmpeg, auto-update | not started |
@@ -328,6 +328,17 @@ already settled, and the reasoning is written down.
 
 ## Licence
 
-Not yet chosen — see [D-062](decisions.md) for the licence boundaries that
-already constrain it. Until then, all rights reserved by the author.
-The reference checkouts under `plan/` are **not** part of this repository.
+Not yet chosen **for spoonstill's own code** — see [D-062](decisions.md) for the
+licence boundaries that already constrain it. Until then, all rights reserved by
+the author. The reference checkouts under `plan/` are **not** part of this
+repository.
+
+**Third-party material is a separate question, and it is answered** (D-124).
+Three weights of Inter are compiled into the binary to draw subtitles, under the
+SIL Open Font License — which asks that each copy carry its notice. Every
+release archive contains `THIRD-PARTY-NOTICES.md`, the window bundles it, and
+every binary can print it:
+
+```bash
+still licences
+```

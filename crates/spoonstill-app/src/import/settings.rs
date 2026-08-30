@@ -238,6 +238,13 @@ impl std::error::Error for SettingsError {
     }
 }
 
+/// The largest `project.yaml` this will read (D-126).
+///
+/// Not derived from anything the way `MAX_SCRIPT_BYTES` is, because a
+/// settings file has no natural length — so it is a round number chosen to be
+/// far past any real one. The fixtures' are under 200 bytes.
+const MAX_SETTINGS_BYTES: u64 = 1024 * 1024;
+
 /// Read `project.yaml` from a project root, or return the defaults if there is
 /// none.
 ///
@@ -251,6 +258,24 @@ impl std::error::Error for SettingsError {
 /// every one of them at once.
 pub fn load(root: &Path) -> Result<(Settings, Vec<Problem>), SettingsError> {
     let path = root.join(MANIFEST_FILE);
+
+    // Size first (D-126). `project.yaml` holds a dozen keys; anything past a
+    // megabyte is a file that landed under that name, and reading it whole to
+    // discover that is the cost this avoids.
+    match std::fs::metadata(&path) {
+        Ok(meta) if meta.len() > MAX_SETTINGS_BYTES => {
+            return Err(SettingsError::Malformed {
+                path,
+                detail: format!(
+                    "is {} MB — a project's settings are a dozen lines, so this is \
+                     some other file under that name",
+                    meta.len() / (1024 * 1024)
+                ),
+            });
+        }
+        _ => {}
+    }
+
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -322,7 +347,7 @@ fn resolve(raw: RawSettings) -> (Settings, Vec<Problem>) {
                     "short_edge"
                 },
                 value: format!("{short_edge} at {aspect}, {fps} fps"),
-                expected: leak(error.to_string()),
+                expected: error.reason(),
             })),
         }
     }

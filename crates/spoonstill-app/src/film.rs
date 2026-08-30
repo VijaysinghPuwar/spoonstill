@@ -94,6 +94,13 @@ pub struct RenderProjectOptions {
     /// collides with words already in the artwork is a fact about *these*
     /// photographs, and the answer can change between one batch and the next.
     pub subtitle_placement: Option<Placement>,
+    /// Keep every segment this render did not use, instead of sweeping the
+    /// oldest generations (D-109).
+    ///
+    /// Off by default, because a project that is iterated on accumulates one
+    /// dead generation per render and nothing ever removed them. On for an
+    /// operator who would rather spend the disk than ever re-encode.
+    pub keep_cache: bool,
 }
 
 impl RenderProjectOptions {
@@ -116,6 +123,7 @@ impl RenderProjectOptions {
             subtitles: None,
             subtitle_theme: None,
             subtitle_placement: None,
+            keep_cache: false,
         }
     }
 }
@@ -210,6 +218,9 @@ pub struct RenderedFilm {
     pub reused_segments: usize,
     /// Where the segments are, for a re-run and for diagnostics.
     pub segments_dir: PathBuf,
+    /// Bytes of superseded segments swept after the join (D-109). Zero when
+    /// there was nothing to sweep, and when `keep_cache` asked us not to.
+    pub freed_bytes: u64,
 }
 
 /// Why a project did not render.
@@ -231,6 +242,9 @@ pub enum FilmError {
         path: PathBuf,
         /// What it says about its owner.
         held_by: String,
+        /// Whether the operator passed `--force`, so the message can say why
+        /// it did not help (D-113).
+        forced: bool,
     },
     /// The project's `output` setting points outside the project (D-054).
     OutputOutsideProject {
@@ -285,12 +299,30 @@ impl std::fmt::Display for FilmError {
                 if *errors == 1 { "s" } else { "" }
             ),
             FilmError::NoScenes => f.write_str("there are no scenes to render"),
-            FilmError::Locked { path, held_by } => write!(
-                f,
-                "another render is working on this project ({held_by})\n\
-                 If that is not true, delete {} or pass --force.",
-                path.display()
-            ),
+            FilmError::Locked {
+                path,
+                held_by,
+                forced,
+            } => {
+                write!(f, "another render is working on this project ({held_by})")?;
+                if *forced {
+                    // The lock is the operating system's now (D-113), so this
+                    // is not a leftover file: some process really is holding
+                    // it. Overriding that is what produced three concurrent
+                    // renders of one project.
+                    f.write_str(
+                        "\n--force cannot take a lock a running render holds. \
+                         Wait for it, or stop it.",
+                    )
+                } else {
+                    write!(
+                        f,
+                        "\nWait for it to finish. A run this machine lost releases \
+                         its lock by itself, so {} is never left holding one.",
+                        path.display()
+                    )
+                }
+            }
             FilmError::OutputOutsideProject { value } => write!(
                 f,
                 "the project's output setting {value:?} points outside the project folder \
@@ -487,6 +519,15 @@ pub fn render_project(
         sink,
     )?;
 
+    // The film is made and asserted. Only now is a superseded segment safe to
+    // sweep — a failed or cancelled render leaves the whole cache alone, so
+    // the next attempt is as fast as this one would have been (D-109).
+    let freed = if options.keep_cache {
+        0
+    } else {
+        prune_segments(&segments_dir, &paths, sink)
+    };
+
     sink.record(
         &Event::info("render", "film complete")
             .with("out", film.path.display().to_string())
@@ -504,7 +545,132 @@ pub fn render_project(
         reused_audio: audio.iter().filter(|a| a.reused).count(),
         reused_segments: rendered.iter().filter(|s| s.reused).count(),
         segments_dir,
+        freed_bytes: freed,
     })
+}
+
+/// How many superseded generations of segments to keep beside the live one.
+///
+/// Not zero, and the reason is the operator's actual working loop: choosing
+/// between subtitle themes, or between two voices, means rendering A, then B,
+/// then A again. Keeping only what the last film used would make every one of
+/// those flips a full re-encode — at 200 scenes, seven and a half minutes to
+/// see a theme you already rendered. Two spares makes flipping between three
+/// answers free and still bounds the directory at three times the film.
+const SPARE_GENERATIONS: usize = 2;
+
+/// A temporary abandoned by a render that did not finish (D-115).
+///
+/// `atomic::partial_path` writes `.<name>.partial-<pid>-<n>.<ext>` beside the
+/// artifact and renames it into place on success, so a run that is killed —
+/// the window closed mid-encode, a crash, a power cut — leaves these behind and
+/// **nothing ever removed them**. They are not segments, so D-109's sweep did
+/// not see them either: it matches only names that earned their place.
+///
+/// Safe to delete at the point the sweep runs because the render lock is held
+/// for the whole run and is exclusive per project (D-113): no other render of
+/// this project can exist, and this run's own temporaries have all been renamed
+/// away by the time the film is joined. So anything still called `.partial-` is
+/// litter from a run that is gone.
+fn is_abandoned_partial(name: &str) -> bool {
+    name.starts_with('.') && name.contains(".partial-")
+}
+
+/// Is this a file we made, and are therefore entitled to delete?
+///
+/// The pattern `render_segments` writes, and nothing else: `seg-`, four digits,
+/// `-`, sixteen hex, `.mp4`. A sweep that deleted by extension would eventually
+/// meet an operator who put something in this folder, and a cache is not a
+/// licence to delete a stranger's file.
+fn is_our_segment(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("seg-") else {
+        return false;
+    };
+    let Some(rest) = rest.strip_suffix(".mp4") else {
+        return false;
+    };
+    let Some((index, key)) = rest.split_once('-') else {
+        return false;
+    };
+    index.len() == 4
+        && index.bytes().all(|b| b.is_ascii_digit())
+        && key.len() == 16
+        && key.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Sweep superseded segments, keeping the live set and `SPARE_GENERATIONS`
+/// more of the rest, newest first (D-109).
+///
+/// Returns the bytes reclaimed. **Never fails a render**: a cache that cannot
+/// be tidied is not a reason to withhold a film that is already made and
+/// already asserted, so every error here is logged and stepped over.
+fn prune_segments(dir: &Path, live: &[PathBuf], log: &dyn Diagnostics) -> u64 {
+    let keep: std::collections::HashSet<&std::ffi::OsStr> =
+        live.iter().filter_map(|p| p.file_name()).collect();
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+
+    let mut freed = 0;
+    let mut swept = 0;
+
+    // (modified, size, path) for everything we made and did not just use.
+    let mut dead: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        if keep.contains(name.as_os_str()) {
+            continue;
+        }
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+
+        // Litter from a run that never finished. Removed outright rather than
+        // kept as a spare: a partial is not a segment and can never be reused.
+        if is_abandoned_partial(name) {
+            if std::fs::remove_file(&path).is_ok() {
+                freed += meta.len();
+                swept += 1;
+            }
+            continue;
+        }
+
+        if !is_our_segment(name) {
+            continue;
+        }
+        let when = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        dead.push((when, meta.len(), path));
+    }
+
+    // Newest first, so the spares kept are the generations most likely to be
+    // flipped back to.
+    dead.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+
+    let spare = live.len().saturating_mul(SPARE_GENERATIONS);
+    for (_, size, path) in dead.into_iter().skip(spare) {
+        if std::fs::remove_file(&path).is_ok() {
+            freed += size;
+            swept += 1;
+        }
+    }
+
+    if swept > 0 {
+        log.record(
+            &Event::info("render", "swept superseded segments")
+                .with("files", swept.to_string())
+                .with("bytes", freed.to_string())
+                .with("kept_spare", spare.to_string()),
+        );
+    }
+    freed
 }
 
 /// Where the film goes, and whether we are allowed to write it there.
@@ -557,16 +723,20 @@ pub fn destination(
     }
 
     let relative = &project.settings.output;
-    if relative.is_absolute()
-        || relative
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err(FilmError::OutputOutsideProject {
-            value: relative.display().to_string(),
-        });
-    }
-    Ok(project.root.join(relative))
+
+    // Held to D-054 like every other path in the file, and by the same
+    // function (D-112). The lexical test this used to be — reject an absolute
+    // path, reject `..` — cannot see a symlink, so a project carrying
+    // `escape -> /tmp` and `output: escape/film.mp4` wrote its film outside the
+    // folder and reported success.
+    spoonstill_core::path_safety::resolve_destination_within(
+        &project.root,
+        relative,
+        &crate::import::StdFs,
+    )
+    .map_err(|_| FilmError::OutputOutsideProject {
+        value: relative.display().to_string(),
+    })
 }
 
 /// Ask every voice service this run will actually call whether it works, once.
@@ -712,16 +882,24 @@ fn render_segments(
     for (index, scene) in project.scenes.iter().enumerate() {
         let narration = audio[index].duration;
         let frames = timing::frames_for_duration(narration, output.fps());
-        let content = hash_file(&scene.image).map_err(|source| FilmError::Io {
-            doing: "reading",
-            path: scene.image.clone(),
-            source,
-        })?;
+        // One implementation, in `spoonstill-media` (D-126). This used to be a
+        // second streaming loop here, and the pair had to agree on the cache
+        // key for `still render` and `still render-scene` to share a segment.
+        let content = spoonstill_media::scene::hash_file(&scene.image)
+            .map_err(|source| FilmError::Media(Box::new(source)))?;
 
         let index32 = u32::try_from(index).unwrap_or(u32::MAX);
         let motion = motion_for(&scene.spec.motion, &project_id, index32, &content, project);
         let subtitles = subtitles_for(project, options, scene, narration);
-        let key = segment_key(&content, frames, motion, output, encode, subtitles.as_ref());
+        let key = segment_key(
+            &content,
+            audio[index].key,
+            frames,
+            motion,
+            output,
+            encode,
+            subtitles.as_ref(),
+        );
 
         plans.push(Plan {
             request: SceneRequest {
@@ -792,7 +970,12 @@ fn render_one(
         );
         if let Ok(probed) = probed {
             let duration = timing::duration_for_frames(plan.frames, plan.request.output.fps());
-            if profile::assert_matches_profile(&expected, &probed).is_ok() {
+            // Both, and the length one is not redundant: `SegmentProfile` pins
+            // codec, geometry and colour and says nothing about how long a
+            // segment is (D-110).
+            if profile::assert_matches_profile(&expected, &probed).is_ok()
+                && is_the_planned_length(&probed, plan)
+            {
                 return Ok(Segment {
                     path: plan.request.out.clone(),
                     frames: plan.frames,
@@ -812,6 +995,47 @@ fn render_one(
         duration: rendered.duration,
         reused: false,
     })
+}
+
+/// Is the segment already on disk as long as this plan needs it to be?
+///
+/// The reuse check probes the file and asserts its profile, and the profile
+/// pins codec, geometry and colour — **not length**. So a file with a segment's
+/// name and a segment's shape was reused whatever its duration, and the frame
+/// count reported for it was `plan.frames`: a number nothing had checked
+/// (D-110).
+///
+/// Read from the container header, never counted. Counting means decoding, and
+/// D-096 is explicit that the reuse check must stay as fast on six hours as on
+/// four seconds — at 200 scenes a decoding probe per scene would cost more than
+/// the re-encode it saves. The header is the right evidence here for the same
+/// reason the film's own assertion trusts it: this file was written by our
+/// muxer, and it only ever *got* this name by passing the counted assertion in
+/// `scene.rs` (D-042).
+fn is_the_planned_length(probed: &spoonstill_media::probe::ProbeResult, plan: &Plan) -> bool {
+    let Some(video) = probed
+        .streams
+        .iter()
+        .find(|s| s.kind == spoonstill_media::probe::StreamKind::Video)
+    else {
+        return false;
+    };
+
+    if let Some(frames) = video.nb_frames {
+        return frames == u64::from(plan.frames);
+    }
+
+    // No declared count. Our own MP4s always carry one, so this is a file we
+    // did not write; fall back to the duration, within a frame.
+    if let Some(seconds) = video.duration {
+        let fps = f64::from(plan.request.output.fps());
+        let expected = timing::duration_for_frames(plan.frames, plan.request.output.fps());
+        return (seconds - expected).abs() <= 1.0 / fps;
+    }
+
+    // Neither. Nothing here establishes the length, so it is not reusable —
+    // re-rendering costs one scene, and trusting it costs a wrong film.
+    false
 }
 
 /// Turn a pool's outcomes into either every value or every failure.
@@ -922,14 +1146,21 @@ fn subtitles_for(
     })
 }
 
-/// The segment cache key (D-043).
+/// The segment cache key (D-043, D-107).
 ///
-/// Everything that changes the bytes: the image content, the resolved length,
-/// the move, the output geometry, the encoder settings, and the subtitles
-/// burned into the picture. Nothing that does not — not the path, not the
-/// scene id, not the machine.
+/// Everything that changes the bytes: the image content, **the narration's own
+/// content key**, the resolved length, the move, the output geometry, the
+/// encoder settings, and the subtitles burned into the picture. Nothing that
+/// does not — not the path, not the scene id, not the machine.
+///
+/// `audio` is the key the audio cache stored the normalized artifact under, so
+/// it is the narration's content and normalization profile and nothing else.
+/// It is here because a segment *contains* the narration: without it, replacing
+/// a recording with a different one of the same length reused the old segment
+/// and the operator got a film of their previous voice-over (D-107).
 fn segment_key(
     content: &str,
+    audio: u64,
     frames: u32,
     motion: MotionSpec,
     output: OutputSpec,
@@ -940,24 +1171,40 @@ fn segment_key(
     let encoder = format!("{}:{}", encode.preset, encode.crf);
     let motion_text = format!("{}:{:016x}", motion.descriptor(), motion.seed);
 
-    // A scene with no subtitles contributes the empty string, so turning the
+    // Each subtitle field stays its own field (D-118). They used to be joined
+    // on `\u{1f}` and hashed as one, which is the byte `fnv1a_fields` uses as
+    // its own separator — so a cue whose text carried one was indistinguishable
+    // from a field boundary, and two genuinely different sets of cues keyed the
+    // same. `0x1f` is not whitespace, so it survives `normalize` out of an
+    // operator's `.txt` untouched.
+    //
+    // A scene with no subtitles contributes no fields at all, so turning the
     // feature on for a project whose scenes have no words is a cache hit —
     // which is the honest answer, because the bytes really are the same.
-    let subtitle_text = subtitles.map_or_else(String::new, |spec| spec.key_fields().join("\u{1f}"));
+    let subtitle_fields = subtitles.map(SubtitleSpec::key_fields).unwrap_or_default();
 
-    hash::fnv1a_fields(&[
+    let audio_bytes = audio.to_be_bytes();
+    let frame_bytes = frames.to_be_bytes();
+    let timescale_bytes = profile::VIDEO_TIMESCALE.to_be_bytes();
+
+    let mut fields: Vec<&[u8]> = vec![
         content.as_bytes(),
-        &frames.to_be_bytes(),
+        &audio_bytes,
+        &frame_bytes,
         motion_text.as_bytes(),
         geometry.as_bytes(),
         encoder.as_bytes(),
-        subtitle_text.as_bytes(),
         // The segment profile is part of what a segment *is* (D-040): a
         // change to the pinned colour or timescale must miss the cache.
         profile::PIX_FMT.as_bytes(),
         profile::COLOR_SPACE.as_bytes(),
-        &profile::VIDEO_TIMESCALE.to_be_bytes(),
-    ])
+        &timescale_bytes,
+    ];
+    fields.extend(subtitle_fields.iter().map(String::as_bytes));
+
+    // Length-prefixed, not separated: this list ends with an operator's own
+    // words, and a separator is only unambiguous while no field can contain it.
+    hash::fnv1a_prefixed(&fields)
 }
 
 /// Stable project identity for the motion seed (D-035).
@@ -973,23 +1220,6 @@ fn project_id(root: &Path) -> String {
     )
 }
 
-/// Stable content hash of a file, streamed (D-043).
-fn hash_file(path: &Path) -> Result<String, std::io::Error> {
-    use std::io::Read;
-
-    let mut file = std::fs::File::open(path)?;
-    let mut hash = hash::Fnv1a::new();
-    let mut buffer = vec![0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hash.write(&buffer[..read]);
-    }
-    Ok(format!("{:016x}", hash.finish()))
-}
-
 /// One render per project at a time.
 ///
 /// Two runs against one project would race on the same segment paths, the same
@@ -997,13 +1227,20 @@ fn hash_file(path: &Path) -> Result<String, std::io::Error> {
 /// — every write is a temporary plus a rename — but the *film* is not: two
 /// runs with different settings would interleave segments from both.
 ///
-/// The lock is advisory and self-describing: it holds the process id that took
-/// it, so the error can say who, and `--force` exists because a machine that
-/// lost power leaves a lock behind and an operator should not have to know
-/// where it lives.
+/// **The lock is the kernel's, not the file's** (D-113). `render.lock` is
+/// opened and locked with `std::fs::File::try_lock`; the file's *existence*
+/// carries no authority at all, and it is never deleted.
+///
+/// That one change answers both of the questions the previous design got
+/// wrong. A lock cannot go stale, because the operating system releases it
+/// when the holding process dies — crash, kill, or power loss — so the
+/// "a crashed run left a lock behind" case that `--force` existed for no longer
+/// happens. And releasing is closing a handle rather than unlinking a shared
+/// path, so one run can no longer unlock another.
 #[derive(Debug)]
 struct Lock {
-    path: PathBuf,
+    /// Holding this open **is** holding the lock. Dropping it releases.
+    file: std::fs::File,
 }
 
 impl Lock {
@@ -1016,43 +1253,53 @@ impl Lock {
         })?;
         let path = directory.join(LOCK_FILE);
 
-        let body = format!("pid {}\n", std::process::id());
-        match std::fs::OpenOptions::new()
+        // Not `create_new`: a file left by an older build, or by a run this
+        // machine lost, is an ordinary file to be locked rather than evidence
+        // of anything.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
             .write(true)
-            .create_new(true)
+            .create(true)
+            .truncate(false)
             .open(&path)
-        {
-            Ok(mut file) => {
-                use std::io::Write;
-                let _ = file.write_all(body.as_bytes());
-                Ok(Lock { path })
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if force {
-                    std::fs::write(&path, &body).map_err(|source| FilmError::Io {
-                        doing: "taking the render lock at",
-                        path: path.clone(),
-                        source,
-                    })?;
-                    return Ok(Lock { path });
-                }
-                let held_by = std::fs::read_to_string(&path)
-                    .map(|s| s.trim().to_owned())
-                    .unwrap_or_else(|_| "unknown".to_owned());
-                Err(FilmError::Locked { path, held_by })
-            }
-            Err(source) => Err(FilmError::Io {
+            .map_err(|source| FilmError::Io {
                 doing: "taking the render lock at",
-                path,
+                path: path.clone(),
                 source,
-            }),
+            })?;
+
+        if file.try_lock().is_err() {
+            // Held by a *live* process — that is what the kernel refusing
+            // means — so there is nothing here for `--force` to rescue, and
+            // overriding it is the corruption this lock exists to prevent.
+            let held_by = std::fs::read_to_string(&path)
+                .map(|s| s.trim().to_owned())
+                .unwrap_or_else(|_| "unknown".to_owned());
+            return Err(FilmError::Locked {
+                path,
+                held_by,
+                forced: force,
+            });
         }
+
+        // Who we are, for the other run's error message. Written under the
+        // lock and best-effort: failing to describe ourselves is not a reason
+        // to refuse a render we are entitled to.
+        use std::io::{Seek, Write};
+        let _ = file.set_len(0);
+        let _ = (&file).seek(std::io::SeekFrom::Start(0));
+        let _ = (&file).write_all(format!("pid {}\n", std::process::id()).as_bytes());
+
+        Ok(Lock { file })
     }
 }
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        // Closing the handle releases the kernel lock. The file stays: it is a
+        // marker, and deleting a path another run may already have opened is
+        // exactly the race this design removed.
+        let _ = self.file.unlock();
     }
 }
 
@@ -1081,6 +1328,10 @@ impl<F: FnMut(FilmEvent) + Send> SerialEvents<F> {
 mod tests {
     use super::*;
     use spoonstill_core::{Anchor, Aspect, MotionKind};
+
+    /// A stand-in for the narration's content key. Any value works; what the
+    /// tests care about is that changing it changes the segment key.
+    const AUDIO: u64 = 0x5150_5150_5150_5150;
 
     fn output() -> OutputSpec {
         OutputSpec::new(Aspect::Landscape16x9, 1080, 30).unwrap()
@@ -1244,28 +1495,76 @@ mod tests {
     fn the_segment_key_changes_with_everything_that_changes_the_segment() {
         let motion = MotionSpec::new(MotionKind::ZoomIn, 0.1, Anchor::Center);
         let encode = EncodeSettings::default();
-        let base = segment_key("aaaaaaaaaaaaaaaa", 112, motion, output(), &encode, None);
+        let base = segment_key(
+            "aaaaaaaaaaaaaaaa",
+            AUDIO,
+            112,
+            motion,
+            output(),
+            &encode,
+            None,
+        );
+
+        assert_ne!(
+            base,
+            segment_key(
+                "aaaaaaaaaaaaaaaa",
+                AUDIO + 1,
+                112,
+                motion,
+                output(),
+                &encode,
+                None
+            ),
+            "a different narration — the one input whose absence let a re-recorded \
+             line reuse the old segment (D-107)"
+        );
 
         assert_eq!(
             base,
-            segment_key("aaaaaaaaaaaaaaaa", 112, motion, output(), &encode, None),
+            segment_key(
+                "aaaaaaaaaaaaaaaa",
+                AUDIO,
+                112,
+                motion,
+                output(),
+                &encode,
+                None
+            ),
             "the same scene must key the same, or nothing is ever reused"
         );
 
         assert_ne!(
             base,
-            segment_key("bbbbbbbbbbbbbbbb", 112, motion, output(), &encode, None),
+            segment_key(
+                "bbbbbbbbbbbbbbbb",
+                AUDIO,
+                112,
+                motion,
+                output(),
+                &encode,
+                None
+            ),
             "different image"
         );
         assert_ne!(
             base,
-            segment_key("aaaaaaaaaaaaaaaa", 113, motion, output(), &encode, None),
+            segment_key(
+                "aaaaaaaaaaaaaaaa",
+                AUDIO,
+                113,
+                motion,
+                output(),
+                &encode,
+                None
+            ),
             "one more frame"
         );
         assert_ne!(
             base,
             segment_key(
                 "aaaaaaaaaaaaaaaa",
+                AUDIO,
                 112,
                 MotionSpec::new(MotionKind::ZoomOut, 0.1, Anchor::Center),
                 output(),
@@ -1278,6 +1577,7 @@ mod tests {
             base,
             segment_key(
                 "aaaaaaaaaaaaaaaa",
+                AUDIO,
                 112,
                 motion,
                 OutputSpec::new(Aspect::Portrait9x16, 1080, 30).unwrap(),
@@ -1290,6 +1590,7 @@ mod tests {
             base,
             segment_key(
                 "aaaaaaaaaaaaaaaa",
+                AUDIO,
                 112,
                 motion,
                 output(),
@@ -1303,12 +1604,70 @@ mod tests {
         );
     }
 
+    /// D-118. The segment key holds an operator's own words, so no field
+    /// content may be mistakable for a field boundary.
+    ///
+    /// `fnv1a_fields` separates with `0x1f` and says in its own documentation
+    /// that no field may contain that byte — true of every original caller
+    /// (paths, ids, hex digests) and quietly untrue once D-106 began feeding it
+    /// subtitle text. `0x1f` is **not whitespace**, so it survives `normalize`
+    /// out of a `.txt` intact.
+    #[test]
+    fn two_different_sets_of_cues_never_key_the_same() {
+        use spoonstill_core::captions::{Cue, Placement, SubtitleTheme};
+
+        let spec = |cues: Vec<Cue>| SubtitleSpec {
+            theme: SubtitleTheme::Classic,
+            placement: Placement::Bottom,
+            cues,
+        };
+        let cue = |text: &str| Cue {
+            text: text.to_owned(),
+            start: 0.0,
+            end: 2.0,
+        };
+
+        // Two cues, against one cue whose text carries the separator and then
+        // spells out the second cue's whole field. Joined on `0x1f` these are
+        // the *same string*, which is what made them the same key.
+        let two = spec(vec![cue("alpha beta"), cue("gamma")]);
+        let one = spec(vec![cue("alpha beta\u{1f}0.000>2.000:gamma")]);
+
+        assert_eq!(
+            two.key_fields().join("\u{1f}"),
+            one.key_fields().join("\u{1f}"),
+            "the collision this test exists for should still be constructible \
+             at the string level — only the key must no longer share it"
+        );
+
+        let motion = MotionSpec::new(MotionKind::ZoomIn, 0.1, Anchor::Center);
+        let encode = EncodeSettings::default();
+        let key_of = |spec: &SubtitleSpec| {
+            segment_key(
+                "aaaaaaaaaaaaaaaa",
+                AUDIO,
+                112,
+                motion,
+                output(),
+                &encode,
+                Some(spec),
+            )
+        };
+        assert_ne!(
+            key_of(&two),
+            key_of(&one),
+            "two different films share one segment, so one of them renders the \
+             other's subtitles"
+        );
+    }
+
     /// The name that reaches the concat list. D-052 says an operator's own
     /// spelling is hostile input; a content-addressed name never carries it.
     #[test]
     fn segment_names_are_safe_for_the_concat_list() {
         let key = segment_key(
             "aaaaaaaaaaaaaaaa",
+            AUDIO,
             112,
             MotionSpec::new(MotionKind::ZoomIn, 0.1, Anchor::Center),
             output(),
@@ -1365,41 +1724,173 @@ mod tests {
         );
     }
 
+    /// The `output:` setting is manifest data and is held to D-054 containment
+    /// by the same function every input path uses (D-112).
+    ///
+    /// A real folder, not an invented path: containment is decided on canonical
+    /// paths, and a root that does not exist cannot contain anything — which is
+    /// the honest answer, and what this test used to paper over.
     #[test]
     fn the_output_setting_resolves_inside_the_project() {
-        let project = Project {
-            root: PathBuf::from("/projects/demo"),
-            settings: crate::import::Settings::default(),
+        let root = std::env::temp_dir().join(format!("spoonstill-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let of = |output: &str| Project {
+            root: root.clone(),
+            settings: crate::import::Settings {
+                output: PathBuf::from(output),
+                ..crate::import::Settings::default()
+            },
             mode: crate::import::Mode::Convention,
             scenes: Vec::new(),
             problems: Vec::new(),
         };
-        let out = destination(
-            &project,
-            &RenderProjectOptions::for_project("/projects/demo"),
-        )
-        .unwrap();
-        assert_eq!(out, PathBuf::from("/projects/demo/out.mp4"));
+        let options = RenderProjectOptions::for_project(&root);
+        let real_root = std::fs::canonicalize(&root).unwrap();
+
+        // The ordinary case, and a nested one that does not exist yet: a
+        // destination is normally absent, which is exactly why it cannot use
+        // the input resolver.
+        assert_eq!(
+            destination(&of("out.mp4"), &options).unwrap(),
+            real_root.join("out.mp4")
+        );
+        assert_eq!(
+            destination(&of("renders/2026/out.mp4"), &options).unwrap(),
+            real_root.join("renders/2026/out.mp4")
+        );
+
+        // The lexical escapes, which the old check did catch.
+        for escape in ["../out.mp4", "/tmp/out.mp4"] {
+            assert!(
+                matches!(
+                    destination(&of(escape), &options),
+                    Err(FilmError::OutputOutsideProject { .. })
+                ),
+                "{escape} was allowed"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The escape a lexical check cannot see (D-112). `..` and an absolute
+    /// path were both refused; a symlink is neither, so a project carrying
+    /// `escape -> /tmp` and `output: escape/film.mp4` wrote its film outside
+    /// the folder and reported success.
+    #[cfg(unix)]
+    #[test]
+    fn an_output_that_leaves_through_a_symlink_is_refused() {
+        let base = std::env::temp_dir().join(format!("spoonstill-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("project");
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join("escape")).unwrap();
+        // And one that stays inside, which must keep working.
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("here")).unwrap();
+
+        let of = |output: &str| Project {
+            root: root.clone(),
+            settings: crate::import::Settings {
+                output: PathBuf::from(output),
+                ..crate::import::Settings::default()
+            },
+            mode: crate::import::Mode::Convention,
+            scenes: Vec::new(),
+            problems: Vec::new(),
+        };
+        let options = RenderProjectOptions::for_project(&root);
+
+        assert!(
+            matches!(
+                destination(&of("escape/film.mp4"), &options),
+                Err(FilmError::OutputOutsideProject { .. })
+            ),
+            "a symlinked output escaped the project"
+        );
+
+        // A link that stays inside resolves to where it really points — the
+        // operator's spelling is a request, not an address.
+        assert_eq!(
+            destination(&of("here/film.mp4"), &options).unwrap(),
+            std::fs::canonicalize(root.join("real"))
+                .unwrap()
+                .join("film.mp4"),
+        );
+
+        // An explicit --out is the operator's own instruction (D-054's note on
+        // deliberate destinations) and is honoured wherever it points.
+        let deliberate = RenderProjectOptions {
+            out: Some(elsewhere.join("deliberate.mp4")),
+            ..RenderProjectOptions::for_project(&root)
+        };
+        assert_eq!(
+            destination(&of("escape/film.mp4"), &deliberate).unwrap(),
+            elsewhere.join("deliberate.mp4")
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Two runs against one project would interleave segments into one film.
+    ///
+    /// D-113 changed what this test asserts, and the change is the fix: it
+    /// used to end `Lock::take(&root, true).expect("forced")` — **`--force`
+    /// taking a lock a live run was holding, asserted as correct.** Doing that
+    /// for real produced two concurrent renders, and then three, because the
+    /// second run's `Drop` deleted the shared file while the first still ran.
     #[test]
     fn a_second_render_of_one_project_is_refused_until_the_first_finishes() {
         let root = std::env::temp_dir().join(format!("spoonstill-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
 
         let first = Lock::take(&root, false).expect("the first run takes it");
+
         let error = Lock::take(&root, false).expect_err("the second is refused");
         assert!(matches!(error, FilmError::Locked { .. }), "{error}");
-        assert!(error.to_string().contains("--force"), "{error}");
 
-        // --force is the answer to a lock left behind by a crash.
-        let forced = Lock::take(&root, true).expect("forced");
-        drop(forced);
+        // The fix: --force does not override a lock a running render holds,
+        // and says so rather than appearing to do nothing.
+        let forced = Lock::take(&root, true).expect_err("--force is refused too");
+        assert!(
+            matches!(forced, FilmError::Locked { forced: true, .. }),
+            "{forced}"
+        );
+        assert!(forced.to_string().contains("--force cannot"), "{forced}");
+
         drop(first);
 
-        // And the lock is gone once the run ends, so the next one is clean.
-        assert!(Lock::take(&root, false).is_ok());
+        // Released, so the next run is clean — even though the file is still
+        // there. The file's existence was never the lock (D-113).
+        let path = root.join(STATE_DIR).join(LOCK_FILE);
+        assert!(path.exists(), "the marker file is deliberately not deleted");
+        let second = Lock::take(&root, false).expect("the next run takes it");
+        drop(second);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A lock file with nothing holding it is not a lock (D-113).
+    ///
+    /// This is the case `--force` existed for — a run the machine lost leaves
+    /// its file behind — and it now needs no flag, because the operating
+    /// system released the lock when that process died. Gate 5 used to write
+    /// `pid 999999` into the file and require a refusal; requiring that was
+    /// requiring the tool to be stuck.
+    #[test]
+    fn a_leftover_lock_file_does_not_stop_a_render() {
+        let root = std::env::temp_dir().join(format!("spoonstill-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+        std::fs::write(root.join(STATE_DIR).join(LOCK_FILE), "pid 999999\n").unwrap();
+
+        let taken = Lock::take(&root, false).expect("a file nobody holds is not a lock");
+        drop(taken);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1413,5 +1904,221 @@ mod tests {
             "ingest is I/O-bound and should not be capped by the encoder's pool"
         );
         assert!(options.out.is_none() && !options.force);
+    }
+
+    /// D-109. The sweep deletes files we made, by the name we gave them, and
+    /// nothing else. A cache is not a licence to delete a stranger's file.
+    #[test]
+    fn the_sweep_recognises_only_the_names_we_write() {
+        assert!(is_our_segment("seg-0000-0123456789abcdef.mp4"));
+        assert!(is_our_segment("seg-9999-ffffffffffffffff.mp4"));
+
+        for foreign in [
+            "holiday.mp4",                    // an operator's own file
+            "notes.txt",                      // not even a film
+            "seg-99-abc.mp4",                 // our prefix, not our shape
+            "seg-0000-0123456789abcdef.mov",  // right name, wrong extension
+            "seg-000a-0123456789abcdef.mp4",  // non-digit index
+            "seg-0000-0123456789abcdeg.mp4",  // 'g' is not hex
+            "seg-0000-0123456789abcde.mp4",   // fifteen hex digits
+            "seg-0000-0123456789abcdef0.mp4", // seventeen
+            "xseg-0000-0123456789abcdef.mp4", // prefixed
+        ] {
+            assert!(!is_our_segment(foreign), "would have deleted {foreign}");
+        }
+    }
+
+    /// The bound, and what is inside it. Live segments always survive; the
+    /// spares kept are the *newest* dead ones, because those are the
+    /// generation an operator flipping between two themes goes back to.
+    #[test]
+    fn the_sweep_keeps_the_live_set_and_the_newest_spares() {
+        let dir = std::env::temp_dir().join(format!("spoonstill-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Two live, and six dead written oldest to newest.
+        let name = |i: usize, k: usize| format!("seg-{i:04}-{k:016x}.mp4");
+        let mut live = Vec::new();
+        for i in 0..2 {
+            let path = dir.join(name(i, 0xffff));
+            std::fs::write(&path, b"live").unwrap();
+            live.push(path);
+        }
+        let mut dead = Vec::new();
+        for k in 0..6 {
+            let path = dir.join(name(0, k));
+            std::fs::write(&path, b"dead-and-eight-bytes").unwrap();
+            // mtime resolution is coarse enough that written-in-a-loop files
+            // can share a timestamp; stamp them explicitly so "newest" means
+            // something. Ordering is the whole behaviour under test.
+            let when = std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_700_000_000 + k as u64 * 60);
+            let _ = filetime_set(&path, when);
+            dead.push(path);
+        }
+
+        let freed = prune_segments(&dir, &live, &spoonstill_core::diagnostics::Noop);
+
+        for path in &live {
+            assert!(
+                path.exists(),
+                "a live segment was swept: {}",
+                path.display()
+            );
+        }
+        // 2 live * 2 spare generations = 4 kept, so the 2 oldest go.
+        assert!(!dead[0].exists(), "the oldest spare survived");
+        assert!(!dead[1].exists(), "the second oldest spare survived");
+        for path in &dead[2..] {
+            assert!(
+                path.exists(),
+                "a recent spare was swept: {}",
+                path.display()
+            );
+        }
+        assert_eq!(freed, 2 * 20, "freed bytes should be the two files removed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Set a file's modification time without pulling in a dependency for it.
+    fn filetime_set(path: &Path, when: std::time::SystemTime) -> std::io::Result<()> {
+        let file = std::fs::OpenOptions::new().write(true).open(path)?;
+        file.set_modified(when)
+    }
+
+    /// D-110. The reuse check's length gate, over the four shapes a probed
+    /// file can take. The profile assertion cannot do this job: it pins codec,
+    /// geometry and colour and knows nothing about how long a segment is.
+    #[test]
+    fn a_cached_segment_is_reused_only_at_the_planned_length() {
+        use spoonstill_media::probe::{ProbeResult, Stream, StreamKind};
+
+        fn plan_of(frames: u32) -> Plan {
+            Plan {
+                request: SceneRequest {
+                    image: PathBuf::from("001.jpg"),
+                    audio: PathBuf::from("001.wav"),
+                    out: PathBuf::from("seg.mp4"),
+                    output: output(),
+                    motion: None,
+                    project_id: "p".to_owned(),
+                    scene_index: 0,
+                    encode: EncodeSettings::default(),
+                    subtitles: None,
+                },
+                id: "001".to_owned(),
+                frames,
+            }
+        }
+
+        fn probed(nb_frames: Option<u64>, duration: Option<f64>) -> ProbeResult {
+            ProbeResult {
+                path: PathBuf::from("seg.mp4"),
+                format_name: "mov,mp4,m4a,3gp,3g2,mj2".to_owned(),
+                format_duration: duration,
+                streams: vec![Stream {
+                    index: 0,
+                    kind: StreamKind::Video,
+                    codec_name: "h264".to_owned(),
+                    profile: None,
+                    level: None,
+                    pix_fmt: None,
+                    color_range: None,
+                    color_space: None,
+                    color_primaries: None,
+                    color_transfer: None,
+                    width: None,
+                    height: None,
+                    sample_aspect_ratio: None,
+                    r_frame_rate: None,
+                    time_base: None,
+                    sample_rate: None,
+                    sample_fmt: None,
+                    channels: None,
+                    channel_layout: None,
+                    duration,
+                    nb_read_frames: None,
+                    nb_frames,
+                }],
+            }
+        }
+
+        let plan = plan_of(240);
+
+        assert!(
+            is_the_planned_length(&probed(Some(240), Some(8.0)), &plan),
+            "the segment this plan asked for must still be reused"
+        );
+        assert!(
+            !is_the_planned_length(&probed(Some(60), Some(2.0)), &plan),
+            "a segment of another scene's length was reused, which is the \
+             defect: the profile matches in every field it checks"
+        );
+        assert!(
+            !is_the_planned_length(&probed(Some(241), Some(8.0)), &plan),
+            "one frame out is still out — the join asserts an exact total"
+        );
+
+        // No declared count: fall back to the duration, within one frame.
+        assert!(is_the_planned_length(&probed(None, Some(8.0)), &plan));
+        assert!(is_the_planned_length(&probed(None, Some(8.02)), &plan));
+        assert!(!is_the_planned_length(&probed(None, Some(2.0)), &plan));
+
+        // Neither: nothing here establishes a length, so it is not reusable.
+        // Re-rendering costs one scene; trusting it costs a wrong film.
+        assert!(!is_the_planned_length(&probed(None, None), &plan));
+    }
+
+    /// D-115. A render that is killed leaves `.partial-<pid>-<n>.<ext>` files
+    /// beside the artifacts they were becoming, and nothing removed them — not
+    /// even D-109's sweep, which matches only names a segment earned.
+    ///
+    /// Measured: SIGKILL on a four-worker render left four of them, and they
+    /// survive every later render. Safe to remove at the sweep because the
+    /// render lock is exclusive per project (D-113), so nothing else can own a
+    /// temporary here and ours are renamed away by the time the film is joined.
+    #[test]
+    fn a_killed_render_leaves_temporaries_and_the_next_one_sweeps_them() {
+        assert!(is_abandoned_partial(
+            ".seg-0011-2575b4e3c0fe8fc8.mp4.partial-66085-12.mp4"
+        ));
+        assert!(is_abandoned_partial(".film.mp4.partial-1-0.mp4"));
+
+        for keeper in [
+            "seg-0000-0123456789abcdef.mp4", // a segment
+            ".hidden-notes.txt",             // an operator's own dotfile
+            ".DS_Store",
+            "partial-1-0.mp4", // no leading dot: not ours
+            "holiday.mp4",
+        ] {
+            assert!(!is_abandoned_partial(keeper), "would have deleted {keeper}");
+        }
+
+        // And through the sweep itself, beside a live segment and a stranger.
+        let dir = std::env::temp_dir().join(format!("spoonstill-partial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let live = dir.join("seg-0000-000000000000ffff.mp4");
+        std::fs::write(&live, b"live").unwrap();
+        let litter = dir.join(".seg-0001-000000000000aaaa.mp4.partial-999-3.mp4");
+        std::fs::write(&litter, b"abandoned").unwrap();
+        let stranger = dir.join(".notes.txt");
+        std::fs::write(&stranger, b"mine").unwrap();
+
+        let freed = prune_segments(
+            &dir,
+            std::slice::from_ref(&live),
+            &spoonstill_core::diagnostics::Noop,
+        );
+
+        assert!(!litter.exists(), "the abandoned temporary was left behind");
+        assert!(live.exists(), "the live segment was swept");
+        assert!(stranger.exists(), "a stranger's dotfile was swept");
+        assert_eq!(freed, 9, "freed bytes should be the abandoned temporary");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

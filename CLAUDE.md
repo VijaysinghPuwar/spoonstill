@@ -124,7 +124,7 @@ dependency, and the shipped FFmpeg binary needs its own LGPL build (D-062).
 what any document claims:
 
 ```bash
-make gates          # M0 8/8, M1 8/8, M2 9/9 = intact.
+make gates          # M0 8/8, M1 8/8, M2 13/13 = intact.
                     # Also: make gates-m1 | gates-m2 | test | lint | fixtures
                     #       | brand | tts-live | help
 git log --oneline   # planning corpus, then M0, then M1, then M2 slice by slice
@@ -178,10 +178,86 @@ cargo build --release -p spoonstill-cli
 cargo run --release -p spoonstill-desktop
 ```
 
+### State as of 2026-08-30 — an audit, worked through end to end
+
+**Twenty-five decisions landed in one session, D-107 through D-131.** They came
+from an external audit of the whole tree, and the working rule was: *reproduce
+it before believing it, fix it, prove the test fails without the fix.* Several
+findings did not survive contact — where the audit was wrong, the decision says
+so and says what is true instead.
+
+The whole set, in one line each, newest last:
+
+| | |
+|---|---|
+| D-107 | a segment's cache key holds the narration it contains |
+| D-108 | work for one cache key is done once, not once per worker |
+| D-109 | the segment cache keeps three generations, not all of them |
+| D-110 | a segment is reused only at the length the plan asked for |
+| D-111 | the folder scan sorts, folds case, and refuses to guess |
+| D-112 | the film's destination is contained by the same code as its inputs |
+| D-113 | the render lock is the operating system's, not the file's |
+| D-114 | output geometry has a ceiling, derived from the level table |
+| D-115 | the window supervises its own render, and a killed run leaves no litter |
+| D-116 | no cue is a flicker, and the count was never the guarantee |
+| D-117 | a shadow fits inside the canvas it is drawn on |
+| D-118 | a key that holds an operator's words is length-prefixed |
+| D-119 | `move_into_place` is one rename, because Rust's already replaces |
+| D-120 | a scene file is never seen holding part of a photograph |
+| D-121 | an interrupted renumber is finished or undone, never left |
+| D-122 | the activity log is locked, and nothing in it can be run |
+| D-123 | an installer says why it failed, and a temporary cleans itself up |
+| D-124 | what is embedded in the binary is named in the binary |
+| D-125 | a release is pinned, scoped, and checked by name |
+| D-126 | a file is measured before it is read |
+| D-127 | the window's authority is the project it has open |
+| D-128 | Windows is a different shell and a different PATH |
+| D-129 | eighteen warnings nobody read become one gate that fails |
+| D-130 | the caption rasterizer is measured, and then it is fast |
+| D-131 | coverage went where the defects were |
+
+**Everything is one commit.** The cache keys changed (D-107, D-118), so the
+first render of any existing project re-renders every segment once. That is
+correct and it is a one-time cost — about 7½ minutes for 200 scenes here.
+
+#### If you are checking this work
+
+Run `make gates` first: **M0 8/8, M1 8/8, M2 13/13**, plus `cargo fmt --check`,
+`cargo clippy --workspace --all-targets -- -D warnings` and `cargo test
+--workspace` (461 tests). Then `cargo audit --deny warnings` (D-129), which is
+new and is the one check that can fail without the code changing.
+
+Each decision names its own reproduction, and most can be re-run in a scratch
+folder in under a minute. The four worth re-doing by hand, because their
+evidence is the most surprising:
+
+- **D-107** — render a scene, swap the narration for a different one of the same
+  length, render again. It used to produce a byte-identical film.
+- **D-121** — a 2000-scene project, `still remove` killed 120 ms in. It used to
+  leave 433 files invisible and `still validate` saying "no problems".
+- **D-120** — needs a non-APFS volume: `hdiutil create -fs "MS-DOS FAT32"`. On
+  APFS `fs::copy` is a clone and the window is invisible.
+- **D-130** — `cargo test --release -p spoonstill-media --test caption_bench --
+  --ignored --nocapture` prints the table.
+
+**Three things are deliberately not covered**, each stated in its own decision:
+GUI automation (D-115's close handler and D-127's bound commands are tested at
+the seam, not clicked), PowerShell (D-128's `install.ps1` is reviewed, not run —
+there is no PowerShell on this machine), and a 900-second installer timeout
+(D-123's classification is unit-tested rather than waited for).
+
+**Not done, and not started:** M3. The audit found nothing that changes it.
+
 ### State as of 2026-08-26
 
-**M0, M1 and M2 are complete.** `make gates` is 8/8 for M0, 8/8 for M1 and 9/9
-for M2 — 25 gates, all green. M2's gate 7 now renders
+**M0, M1 and M2 are complete.** `make gates` is 8/8 for M0, 8/8 for M1 and
+13/13 for M2 — 29 gates, all green. The four newest all guard the cache:
+gate 4b, **a narration replaced by a different one of the same length must
+re-render** (D-107); gate 4c, **sixteen scenes sharing one narration generate
+it once** (D-108); gate 4d, **the cache is bounded and the last two generations
+stay free** (D-109); and gate 4e, **a cached segment of the wrong length is
+re-rendered, not reused** (D-110).
+M2's gate 7 renders
 `fixtures/projects/mixed/`: a photo with a script, a photo with a recording,
 and a photo with neither, joined into one film. On a machine with no `edge-tts`
 that gate checks the other half of D-020 instead — the render must fail and
@@ -466,8 +542,419 @@ position box says instead of only previewing it.
 A scene is captioned when it has words: an explicit `caption` column, else the
 script it speaks. **A `.txt` beside a recording is now the caption, not a
 D-020 conflict** — that turns an error into a working scene, and without it an
-operator who records their own voiceover could never have subtitles. Cost
-measured at 1080p: **about 5%**, no extra memory.
+operator who records their own voiceover could never have subtitles. Cost at
+1080p is now inside run-to-run noise (D-130 re-measured it), no extra memory.
+
+**Coverage went where the defects were** (D-131). Re-measured after all of the
+above: **75.09% -> 77.35%** lines overall, `film.rs` **42.9 -> 61.1**, the window
+**10.0 -> 18.1** — and `concat.rs` and `media/audio.rs` unchanged at 35.7 and
+51.0, because nothing here went near them. The CLI went *down*, 18.5 -> 17.5,
+since `still licences` and `--keep-cache` added surface nothing prints in a
+test; a number that only moves up is a number being managed. All nine CI tests
+the audit asked for now exist, each run against the unfixed code first.
+Deliberately open: **no coverage threshold** (a gate on a percentage pushes
+effort towards small pure-function tests, which is the opposite of the advice),
+the shell gates stay **macOS-only** (Windows CI runs `cargo test --workspace`,
+which does render real media through real FFmpeg), and there is **no GUI
+automation**, so D-115 and D-127 are tested at the seam and not clicked.
+
+**The caption rasterizer is measured, and then it is fast** (D-130). The audit
+asked for benchmarks; the benchmark found **604 ms for one `punch` cue at 4K**,
+against 41 ms at 1080p — 14.6x for a 4x area, because cost grew with the
+*fourth* power of the resolution. The two free themes, `boxed` and `band`, are
+the two with no outline and no shadow, which named the culprits. `dilate` walked
+~pi*r^2 disc offsets per pixel; a disc is the union of its rows, so it is now a
+sliding-window maximum per row — `O(area*r)`. `box_blur` re-added all `2r+1`
+samples per pixel; consecutive windows differ by one at each end, so it carries
+a running sum — `O(area)`. Result at 4K: punch 604→**62 ms**, card 238→**19**,
+minimal 107→**8**. At 500 scenes that is ten minutes of drawing text becoming
+one. **The output is byte-identical** — the originals are kept in the tests as
+the definition of right and asserted equal across edges, radii wider than the
+mask, and an empty band, and a real `punch` film hashes the same before and
+after. Also settled: the "about 5%" cost at 1080p is now **inside run-to-run
+noise** (card measured *faster* than no subtitles), so 4K is the only place the
+per-cue numbers matter. `caption_bench.rs` is `#[ignore]`d and prints a table —
+a timing assertion on a shared runner fails for reasons that are not defects.
+
+**Eighteen warnings nobody read become one gate that fails** (D-129). The
+audit's numbers reproduce exactly — 516 crates, **zero vulnerabilities**, 18
+warnings — and the finding was not that any is dangerous but that nothing
+recorded having looked, and nothing would notice a nineteenth. Triaged per
+target with `cargo tree --target <triple> -e normal -i`: the whole GTK3/glib
+group **including the only unsound advisory** is absent from macOS and Windows
+and present only on Linux, which this project does not ship — so **12 of 18 are
+in nothing an operator can download**. Six do ship: five `unic-*` in the window
+via `tauri-utils`, and **`ttf-parser` through `fontdue` in every binary on every
+platform**, which draws every subtitle. There is **nothing to upgrade to** —
+crates.io's newest is 0.25.1, exactly what `Cargo.lock` holds, so it is
+unmaintained *at its latest release*. `.cargo/audit.toml` records all eighteen
+with the target each reaches and a review date, and CI runs
+`cargo audit --deny warnings` as its own job — the one check that can fail
+without our code changing. Verified by removing an entry: exit 1, named.
+
+**Windows is a different shell and a different PATH** (D-128). Two places
+where code written on macOS is wrong on the platform D-071 says is in scope and
+nothing has run on. `shell_quote` emitted POSIX `'\''` for an embedded quote;
+PowerShell escapes one by **doubling** it, so `Dad's photos` came out as a line
+that will not parse — and that form exists precisely so an operator can paste a
+failed command into a terminal (D-016). `posix_quote` and `windows_quote` are
+separate now, **both compiled and tested on every platform**, because a rule
+that only compiles on Windows is a rule nobody here checks. `cmd.exe` is
+deliberately not served — it has no single quoting, so no one form fits both.
+The function is `windows_quote` and not `powershell_quote` because the latter
+tripped `no_shell_strings.rs`, whose bluntness is the point: **move, do not
+widen the guard**. And `install.ps1` tested PATH membership by *substring*, so
+a `…\spoonstill\bin-old` entry counted as `…\spoonstill\bin` and the real
+folder was never added — `still` not found after a successful install
+(reproduced as a shell stand-in). Both installers now stage beside and replace,
+like D-119/D-120. **No PowerShell on this machine**: the `.ps1` is reviewed, not
+run, and a test asserts the two wrong shapes have not come back.
+
+**The window's authority is the project it has open** (D-127). Not exploitable
+today — static CSP, local frontend, no remote content — and both halves are a
+rule this codebase already wrote being applied to some commands and not others.
+The scope grant's own comment said *"allowed to read them — and only them"* over
+an `allow_directory`, which is every recording, script, `removed/` and
+`.spoonstill/` besides; it is one `allow_file` per displayed still now. **The
+obvious fix is a trap**: Tauri's scope checks its *deny* list first and nothing
+removes from allow, so `forbid_directory` on a project navigated away from would
+block it for the session and reopening it would show broken thumbnails (checked
+in `tauri-2.11.5/src/scope/fs.rs`, not assumed). And `Session`'s note — *"the
+frontend must never hand a path to a command that opens something"* — covered
+the two commands that open a file while `set_narration`, `add_media`,
+`remove_scene`, `move_scene` and `preview_voice` took `root` straight from the
+webview. They go through `project_root` now, which **compares** the page's value
+rather than ignoring it. **Limit stated:** clicking Remove in the window is
+still not covered; what replaces it is a `ui_contract` test that every one of
+the five still sends `root`, since a page that stopped would have every edit
+refused silently.
+
+**A file is measured before it is read** (D-126). A 191 MB `001.txt` took
+`still validate` to **607 MB resident** — the bytes, the `String` and the
+trimmed copy — and was reported as a valid narrated scene with **"no problems"**,
+because D-095's length refusal lives in the provider and does not run until
+render. `MAX_SCRIPT_BYTES` is **derived**: `MAX_SCENE_SECONDS` x
+`SPEECH_CHARS_PER_SECOND` x 4 bytes/char = 249 120, rounded to 256 KiB, with a
+`spoonstill-tts` test keeping it above every speakable line because the two
+constants live in crates that cannot see each other (D-114's shape). The same
+folder now validates in **14 MB** and names the problem. `project.yaml` gained a
+1 MiB ceiling, labelled honestly as a round number rather than a derivation.
+**And `hash_file` existed twice** — `scene.rs` read a whole still into memory
+while `film.rs` streamed — two implementations that had to agree on a *cache
+key*, or `still render` and `still render-scene` would key the same scene
+differently. One now, in `spoonstill-media`, streaming. Not done, and recorded:
+the window's recent-projects JSON, which this program writes itself.
+
+**A release is pinned, scoped, and checked by name** (D-125). Every action was
+a moving tag — `@v4`, `@stable`, `@v2`, and `cargo-binstall@**main**`, which can
+change between two runs of the same workflow — and all four are full commit
+SHAs now, **resolved from GitHub rather than written from memory**. The Tauri
+CLI was `--version '^2'` (resolves at release time, so two tags could bundle
+different CLIs with nothing recording which); it is `=2.11.4`, matching the
+`tauri` 2.11.5 in `Cargo.lock`, and `cargo tauri build` gained `--locked`.
+`contents: write` was declared once at the top and applied to every step
+including the ones that only compile; it is `read` there now, with the four
+release jobs asking for `write` themselves. And the publish gate was
+`[ "$count" -ge 12 ]` — **twelve of the wrong files is still twelve**, which is
+exactly D-098's rename where the release looks complete and every installer
+404s. It asserts the **exact set** now and verifies every checksum before
+undrafting; the logic was run against four cases first, including twelve-with-
+one-renamed. The names live in three files nothing type-checked, so
+`release_assets.rs` asserts the workflow, the gate and both installers agree —
+in both directions, verified by renaming an asset in one place.
+
+**What is embedded in the binary is named in the binary** (D-124). Three
+weights of Inter are compiled in with `include_bytes!` (D-106), and their
+licence sat beside the `.ttf` files and went **nowhere else** — release archives
+were `tar -czf … still`, one file, and the Tauri bundle declared no resources.
+The OFL's condition 2 asks in as many words that *"each copy contains the above
+copyright notice and this license"*. Now `THIRD-PARTY-NOTICES.md` ships in both
+archives and the window's bundle, **`still licences`** prints it from
+`include_str!` so every copy carries it however it was obtained (the second form
+the OFL itself offers — which is why the installers were left alone), and a test
+asserts the notice contains the licence **read from the fonts' own file**, so
+replacing the fonts fails the build until the notice follows. Deliberately not
+claimed: the Rust dependency notices, which need generating from `Cargo.lock` at
+release time to avoid being wrong by the next `cargo update` — the gap is
+written into the notices file itself. `README.md` now separates spoonstill's own
+licence (still undecided, D-062) from the third-party material inside it.
+
+**An installer says why it failed, and a temporary cleans itself up**
+(D-123). `tools::install` matched every failure with
+`Err(_) => "not on this machine"`, but that expression fails four ways and only
+`BinaryMissing` means that. The realistic one is **`Timeout`**: the ceiling is
+900 s, `brew install ffmpeg` on a slow connection outlives it, and the operator
+who just watched Homebrew run for fifteen minutes was told it was not installed
+— a *wrong* diagnosis, not a vague one. Reproduction is honest here: the two
+failures a test can reach are already handled correctly (a non-executable
+candidate is skipped by `locate`; an unexecutable one returns `exited 126`), so
+the evidence is the code path plus a unit test over the four error values.
+Separately, `Edge::speak` removed its parts in a loop placed **after**
+`join_mp3(..)?`, so a failed join left them in the **audio cache — which nothing
+sweeps**, unlike the segment directory. Now a `Scratch` guard holds every
+temporary and `Drop` removes them; a cleanup loop is only reached on the paths
+somebody remembered.
+
+**The activity log is locked, and nothing in it can be run** (D-122). Two
+defects in the machine-wide `runs.csv`. It is written by **different processes**
+— the one case a per-project lock cannot cover — and had none: four concurrent
+renders into a fresh log produced **three header lines, two welded onto other
+rows**. Fixed by the file's own lock held across deciding *and* writing,
+"fresh" read from the locked file's **length** rather than `path.exists()`, and
+one `write_all` instead of three; eight rounds clean afterwards. Second: RFC
+4180 quoting is about *parsing*, and every spreadsheet strips the quotes and
+then reads a leading `=`, `+`, `-`, `@` or tab as a formula — reachable through
+the operator's folder name, which is the `project` column (verified with folders
+called `=1+1`, `@SUM(A1:A9)`, `-2+3`). A leading `'` defuses them; **numbers are
+left alone**, because a value that parses as `f64` cannot be a payload. The
+concurrency test fails against the original but does **not** isolate the lock —
+in one process the other two changes carry it — and says so in its own comment.
+
+**An interrupted renumber is finished or undone, never left** (D-121). Every
+step of `renumber` is `rename(..)?`, so an interruption leaves files parked
+under `.arranging-…` names — which the folder scan ignores as dotfiles.
+Reproduced: a 2000-scene project, `still remove` killed 120 ms in, left **433
+files parked and 434 scenes gone**, with `still validate` reporting **"1566
+scenes — no problems"**. Nothing was deleted (D-100 held) but the photographs
+were invisible, and every arrange command then *refused* the project — so the
+one surface that could repair it was the one that turned it away. **The journal
+is now the filename**: `.arranging-<from>-to-<wanted>.<ext>`, which makes
+recovery decidable from the disk — destination free means finish the job,
+destination taken means roll back, neither means leave it parked rather than
+overwrite a photograph. `recover` runs at the top of `scenes`, so it happens
+before the project is *read*. Old-format names are recovered too, because a
+folder damaged by the shipped build must be repairable by the build that fixes
+it — verified on the real damaged project: 1566 scenes back to 1999, all 2000
+photographs accounted for. And `validate` now reports `InterruptedRename`,
+counted **before** the dotfile skip that hid them.
+
+**A scene file is never seen holding part of a photograph** (D-120).
+`copy_in` opened the **real** destination with `create_new` and then filled it,
+so `001.jpg` held incomplete media for the whole copy. **Invisible on APFS**,
+where `fs::copy` is a copy-on-write clone — so it was reproduced on the
+filesystem the operator's media lives on: a FAT32 volume, where an interrupted
+`still add` of a 400 MB photo left **232 MB at `001.jpg`**, a broken scene and a
+consumed scene number. The copy now goes to `atomic::partial_path` beside the
+destination and the name is claimed *after* it. **What it does not achieve:**
+the destination still exists empty for the two syscalls between claim and
+rename — removing that needs `hard_link`, which **FAT32 answers `Operation not
+supported`** to, on the very volume this matters on. And three obvious tests
+here pass against the broken code, because they inspect the end state and the
+defect is a window — D-116's trap, walked into while fixing something else. The
+test that distinguishes watches the destination's *size* during a 64 MB copy and
+catches 1 MB of it.
+
+**`move_into_place` is one rename, because Rust's already replaces** (D-119).
+It unlinked the destination first, on a premise in its own doc comment —
+*"`fs::rename` … fails on Windows when it already exists"*. True of the raw
+`MoveFile` API and of several other languages; **not true of Rust**, whose
+`rename` is documented as *"replacing the original file if `to` already exists"*
+and which calls `MoveFileExW(.., MOVEFILE_REPLACE_EXISTING)` on Windows
+(checked in the pinned toolchain's own source, not from memory). The removal
+bought nothing and cost two things: a **window with no artifact in it** — this
+function moves the finished *film*, so re-rendering over yesterday's film could
+lose yesterday's film — and a **race it then had to handle**, where two workers
+sharing one cache entry both unlinked and the loser failed the render. Both
+vanish by deleting four lines; `rename` is last-writer-wins. The test is the
+property, not the implementation: one thread replaces a file 300 times while
+another asks only *is it there*, and it fails on the first replacement against
+the old code.
+
+**A key that holds an operator's words is length-prefixed** (D-118).
+`segment_key` joined the subtitle fields on `\u{1f}` and handed that to
+`fnv1a_fields`, whose own separator is `0x1f` — and whose doc comment states the
+precondition *"cannot occur in a path, a project id, or a hex digest"*. That was
+**true when written**; D-106 later began feeding it subtitle text, and nothing
+checks a precondition whose symptom is a silent cache hit. Constructed: two cues
+`["alpha beta", "gamma"]` and one cue `["alpha beta\u{1f}0.000>2.000:gamma"]`
+join to the *same string* — two different films, one segment, so one renders the
+other's subtitles. `0x1f` **is not whitespace** (measured), so it survives
+`normalize` out of a `.txt`. Fixed with `hash::fnv1a_prefixed`, where a boundary
+is *stated* as a length rather than *looked for* in the data. **`MotionSpec::seeded`
+was deliberately left alone**: its `project_id` is the folder name, so the
+precondition fails there too, but a collision needs the following field to line
+up and that field is a hex digest — not constructible — while changing the seed
+would change the Ken Burns move on every scene of every film already made.
+
+**A shadow fits inside the canvas it is drawn on** (D-117). `Mask::shadow`
+runs three box blurs — spread `3r` — and the band reserved `shadow_blur * 2`,
+so the outermost ring was cut off against the canvas edge. **Measured rather
+than assumed: it is real and it is tiny**, alpha 1-2 of 255 on one row for
+`card` and `minimal` (the nonzero edges on `band` and `boxed` are their plates,
+which have no blur at all). Fixed anyway because it is one constant, the comment
+already claimed to reserve the blur in every direction, and the error grows with
+`shadow_blur`. Two things explain the evidence: only the **bottom** clipped,
+because the offset moves the shadow down so that direction binds and is short by
+`r - outline` — which is why wide-outline themes showed nothing; and it clipped
+**identically at 720p, 1080p and 4K**, which is D-106's scale-invariance
+faithfully reproducing a bug. The count is now `SHADOW_BLUR_PASSES`, used by
+both the blur and the margin, because a `3` in one place and a `2` in the other
+*is* the defect. The test asserts a property of the **output** — a theme that
+casts a shadow leaves its canvas edge transparent — since a test that recomputed
+the margin would agree with whatever the code did.
+
+**No cue is a flicker, and the count was never the guarantee** (D-116). The
+audit found a tail join whose `.max(1)` produced two cues where one was allowed
+— 0.872s + 0.128s in a 1.0s scene, and a **0.192s** cue at 1.5s it did not try.
+Reproducing it found the real defect: capping the cue *count* says nothing about
+*duration*, because time is shared out by character count with **no floor**, so
+a legal three cues in a 3.0s scene ended in one of **0.042s** — a single frame.
+The fix merges the worst offender into the neighbour it reads with until every
+cue clears `MIN_CUE_SECONDS`; a scene shorter than one readable cue still gets
+one cue of the whole scene, which is the floor rather than a violation. The
+`.max(1)` removal is kept but is **not** what fixes it — tested by restoring
+each defect alone. And `a_short_scene_never_produces_a_flicker` asserted exactly
+the right property on a 2.0s scene with balanced pieces, where neither defect
+can fire: **a test that checks the right thing on an input that cannot exhibit
+the bug is not coverage.** Its replacement sweeps six texts x 120 durations x
+three budgets.
+
+**The window supervises its own render, and a killed run leaves no litter**
+(D-115). Three claims, and testing them changed the fix. **FFmpeg is *not*
+orphaned** — every child gets piped stdin, stdout and stderr, so killing the
+parent closes the pipes and four workers were gone within 2 s; do not go looking
+for that leak. What *is* left is **temporaries**: the same kill left four
+`.seg-….partial-<pid>-N.mp4` files, and nothing removed them — not even D-109's
+sweep, which matches only names a segment earned. They are safe to sweep because
+D-113's lock is exclusive per project, so any `.partial-` still there when the
+film joins is litter from a run that is gone (a stranger's `.notes.txt`
+survives). Separately, the window's render slot was released by a statement
+**after** `handle.await…?`, so a panicked render left it claimed and every later
+render was refused with "a render is already running in this window" until
+restart — it is an `ActiveRender` guard now, which a `?` cannot skip and which
+runs while a panic unwinds. And there was **no `on_window_event` at all**: the
+CLI has had a signal ladder since D-045 and the window had nothing, so
+`CloseRequested` now requests cancellation. The close is deliberately not
+prevented. **Coverage is partial and the decision says so:** the guard and the
+cancel path are unit-tested and fail without the fix; the handler firing on a
+real close mid-render needs GUI automation this project does not have.
+
+**Output geometry has a ceiling, derived from the level table** (D-114).
+`OutputSpec::new` had no upper bound and unchecked arithmetic, and it is
+reachable from `project.yaml`, `still render-scene --short-edge`, **and the
+window's `subtitle_preview` IPC command**, whose `short_edge: u32` comes
+straight from the webview. Three failures from one missing bound: debug
+**panicked** on overflow, release **wrapped** and accepted
+`3340530112x4294967292` as *"no problems"*, and `1431655776` produced a
+prescale canvas of `3340530176x`**32** — both output dimensions plausible while
+the prescale height had wrapped. A non-overflowing `90000` gave a 57 GB RGBA
+frame. The cap is **36 864 macroblocks**, which is H.264 level 5.2's `MaxFS` —
+*not chosen*: past the table `h264_level` returns 52 regardless, so a larger
+frame gets labelled 5.2 while being unplayable by any 5.2 decoder, and D-041
+then confirms the label we wrote ourselves. 4K renders; 8K is refused because we
+cannot honestly label it. `MAX_MACROBLOCKS` is in core, which cannot import the
+table, so a `spoonstill-media` test pins their agreement. With the cap, the
+prescale multiply cannot overflow — the invariant belongs to the constructor.
+Also fixed the message this exposed: `reason` strings are noun phrases now, so
+`` `short_edge`: "…" is not a size this renders `` reads as a sentence instead
+of doubling its subject.
+
+**The render lock is the operating system's, not the file's** (D-113). The
+lock was a file whose *existence* was the lock — `create_new` to take,
+`remove_file` on `Drop` to release, `--force` to overwrite — and the three
+compound. Demonstrated: A renders, B `--force`s in while A is alive, **both
+run**; B finishes and its `Drop` deletes the shared file, so the project is
+unlocked with A still going and a **third** render starts unrefused.
+`std::fs::File::try_lock` is stable since Rust 1.89 and this workspace pins
+1.94, so the kernel's lock is available with no dependency and no `unsafe`.
+**The file's existence now carries no authority and it is never deleted.** Both
+defects disappear: a lock cannot go stale (the OS releases it when the holder
+dies — verified by killing a render and re-rendering with the file still there
+and **no flag**), and one run cannot unlock another (releasing is closing a
+handle). `--force` is kept, does not override, and says why. Two things had
+encoded the bug: the unit test ended `Lock::take(&root, true).expect("forced")`,
+and gate 5 wrote `pid 999999` into the file and demanded a refusal — which was
+demanding the tool stay stuck after a crash.
+
+**The film's destination is contained by the same code as its inputs**
+(D-112). `destination` checked `output:` **lexically** — no absolute path, no
+`..` — and a symlink is neither, so a project carrying `escape -> /tmp` and
+`output: escape/film.mp4` wrote its film outside the folder and reported
+success. This was already the stated rule (the `output:` setting "is manifest
+data and is held to D-054 like every other path"); only a weaker check was
+implemented. `path_safety` had done it properly since M2, but `resolve_within`
+answers for an *input*, so an absent path is an error — and a destination is
+normally absent. The decision is now factored into `resolve_contained`, with
+`resolve_destination_within` on top: **reading a file and writing one cannot
+drift into two ideas of what "inside the project" means.** Held fixed and
+tested: `--out` still goes wherever the operator points it, a symlink that
+stays inside resolves to where it really points, a nested destination that does
+not exist yet still works, and D-089's trailing-space folder still renders.
+
+**The folder scan sorts, folds case, and refuses to guess** (D-111). Three
+defects out of two lines in `from_convention`. `Shot.jpg` beside `shot.wav` was
+**two** groups, because the raw stem was in the key — so a recorded voiceover
+rendered as a silent still with a "pairs with no image" warning; meanwhile
+`ingest::stem_of` had folded case all along, so `still add` paired those files
+and the folder scan did not — **one convention implemented twice, disagreeing**.
+`001.jpg` beside `001.png` kept whichever `read_dir` yielded first, discarded
+the other, and printed **"no problems"** over a scene built from a still nobody
+chose; `ProblemKind::DuplicateId` had documented that exact case since M2 but
+convention mode collapsed the group before validation could see it, so the
+problem it was written for was unreachable. New `AmbiguousScene { slot,
+candidates }` at **Error**, naming the files — the operator needs to know which
+one to delete. And the scan **sorts before it pairs**, because `read_dir` order
+is unspecified and differs by filesystem (D-071). Measured honestly: the winner
+was *stable* across creation orders on APFS here, so the audit's claim of
+run-to-run nondeterminism is **not** confirmed — what is true is that nobody
+decided png should beat jpg.
+
+**A segment is reused only at the length the plan asked for** (D-110). The
+reuse check asserted the `SegmentProfile` — container, codec, colour, geometry,
+frame rate — which **says nothing about length**, so a file with a segment's
+name and shape was reused at any duration and the frame count printed for it
+was the *planned* one, which nothing had checked. The film's own D-041
+assertion did catch the short film, so no wrong film ever reached an operator;
+what it did instead was leave the project **permanently unrenderable** — the
+bad entry survived (only a profile failure removed one), so every later render
+repeated a failure that blamed a vanished temp file and named no scene, and the
+only way out was deleting a folder nobody knows exists. The fix compares the
+declared `nb_frames` already sitting in the probe and thrown away, so it is
+free: 200 scenes fully cached re-render in 12.35 s against 12.2 s. It stays a
+**header read** — D-096 forbids a decoding probe here. Gate 4e asserts the
+*recovery*: the entry is dropped, that one scene re-renders, the other is still
+reused, and the film decodes to exactly the right frame count.
+
+**The segment cache keeps three generations, not all of them** (D-109).
+Nothing ever removed a superseded segment, so a project gained one dead
+generation per render forever. Measured in the author's own folder: **1.6 MB of
+photographs and scripts had produced 159 MB of `.spoonstill/`** — 52 segments
+for 10 scenes, of which at most 10 could be live. Keeping only what the film
+used would have been worse, though: choosing a theme means rendering A, B, then
+A again, and that would re-encode 200 scenes each flip. So the sweep keeps the
+live set **plus two spare generations**, oldest-first — bounded at three times
+the film, and flipping back to either recent answer is free. Both halves are one
+gate, because each is trivial alone and useless without the other. It runs
+**only after the join succeeds**, touches **only names `render_segments` wrote**
+(a `holiday.mp4` in that folder survives), never fails a render, and
+`--keep-cache` turns it off. **Audio is deliberately not swept** — a segment is
+CPU, a narration is a network call and under D-014 money.
+
+**Work for one cache key is done once, not once per worker** (D-108).
+`resolve` checked the cache with `path.exists()` and did the whole job on a
+miss, so eight audio workers all saw an empty cache and all spoke the same line:
+sixteen scenes sharing one narration called `edge-tts` **eight times**. Many
+scenes resolving to one entry is the *ordinary* case here — one recording used
+throughout, a repeated line, stills with no narration — and against a metered
+provider (D-014) that is eight times the bill. It is now one mutex per key, with
+the work done under it after a second look. **The fast path takes no lock**, so
+distinct keys never contend: 200 scenes cold-render in 433 s against a 459 s
+baseline at the same 795 MB. **Only the locked look evicts a bad entry**, because
+an unprobeable file may be one another worker is mid-write. The gate uses silent
+stills, so it provokes the collision with no network at all.
+
+**A segment's cache key holds the narration it contains** (D-107). The key
+had the image, the frame count, the move, the geometry, the encoder and the
+subtitles — and not the audio. Frame count is derived from the narration's
+*duration*, so duration was standing in for identity, and two takes of the same
+length are not the same film: re-recording a line reused the old segment and
+the operator got their previous take in a film that reported success. The
+identity was already computed — `audio::resolve` stores the normalized artifact
+under a content key and used to throw it away — so the fix is `ResolvedAudio.key`
+threaded into `segment_key`. **Gate 4 could only ever exercise the hit**; gate
+4b renders, swaps a 440 Hz second for an 880 Hz second, and asserts a miss, a
+different film, *and* that putting the original back reproduces the first film
+byte for byte. It was run against the unfixed key and seen to fail first.
 
 **A missing tool is something to press, not a sentence to read** (D-105). The
 Voice screen reported `` `edge-tts` is not on this machine. Install it with

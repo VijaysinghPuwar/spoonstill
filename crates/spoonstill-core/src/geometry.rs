@@ -61,7 +61,9 @@ pub enum GeometryError {
     UnusableShortEdge {
         /// The short edge the caller asked for.
         short_edge: u32,
-        /// Why it cannot be used.
+        /// What it is not, as a noun phrase: this reads after "is not" both in
+        /// this error's own `Display` and in the `still validate` line that
+        /// embeds it (D-114).
         reason: &'static str,
     },
     /// Frame rate outside the supported range.
@@ -75,11 +77,31 @@ pub enum GeometryError {
     },
 }
 
+impl GeometryError {
+    /// The noun phrase alone, without the subject this error would print.
+    ///
+    /// For a caller that has its own subject to put in front of it —
+    /// `ProblemKind::UnusableSetting` renders `` `field`: "value" is not
+    /// {expected} ``, and handing it the whole `Display` produced
+    /// *"…" is not short edge 4294967292 is not a size this renders* (D-114).
+    #[must_use]
+    pub const fn reason(&self) -> &'static str {
+        match self {
+            GeometryError::UnusableShortEdge { reason, .. } => reason,
+            GeometryError::UnusableFps(_) => "a frame rate between 1 and 120",
+            GeometryError::DegenerateSource { .. } => "an image with two non-zero dimensions",
+        }
+    }
+}
+
 impl fmt::Display for GeometryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            // Phrased as a noun so it reads correctly both alone and after
+            // "is not", which is how `ProblemKind::UnusableSetting` composes it
+            // into a `still validate` line (D-114).
             GeometryError::UnusableShortEdge { short_edge, reason } => {
-                write!(f, "short edge {short_edge} is unusable: {reason}")
+                write!(f, "short edge {short_edge} is not {reason}")
             }
             GeometryError::UnusableFps(fps) => {
                 write!(f, "frame rate {fps} is outside the supported range 1..=120")
@@ -107,6 +129,31 @@ pub struct OutputSpec {
     aspect: Aspect,
 }
 
+/// The largest frame this program will render, in 16x16 macroblocks (D-114).
+///
+/// **Derived, not chosen.** 36 864 is `MaxFS` for H.264 level 5.2, the highest
+/// level `spoonstill_media::profile::h264_level` models — and past the table it
+/// returns 52 regardless, so a larger frame would be *labelled* 5.2 while being
+/// something no 5.2 decoder can play. D-041 rests on the segment profile being
+/// a true description of the file, so the ceiling is the largest frame that
+/// description stays true for.
+///
+/// In practice: 4K UHD is 32 400 macroblocks and renders; 8K is 129 600 and is
+/// refused. A test in `spoonstill-media` asserts this number still agrees with
+/// the level table, because they live in different crates and only a test can
+/// keep them from drifting.
+pub const MAX_MACROBLOCKS: u64 = 36_864;
+
+/// One reason string, used by every refusal that means "past the ceiling".
+const TOO_LARGE: &str =
+    "a size this renders — H.264 level 5.2 tops out at 36864 macroblocks, which is 4K";
+
+/// Macroblocks a frame occupies, counted exactly as the level table counts
+/// them: partial blocks at the right and bottom edges are whole blocks.
+const fn macroblocks(width: u32, height: u32) -> u64 {
+    (width.div_ceil(16) as u64) * (height.div_ceil(16) as u64)
+}
+
 impl OutputSpec {
     /// Build an output spec from an aspect and its **short edge**.
     ///
@@ -124,13 +171,13 @@ impl OutputSpec {
         if short_edge == 0 {
             return Err(GeometryError::UnusableShortEdge {
                 short_edge,
-                reason: "must be positive",
+                reason: "a positive number",
             });
         }
         if !short_edge.is_multiple_of(2) {
             return Err(GeometryError::UnusableShortEdge {
                 short_edge,
-                reason: "must be even — H.264 4:2:0 cannot represent odd dimensions",
+                reason: "even — H.264 4:2:0 cannot represent odd dimensions",
             });
         }
         let long_edge = match aspect {
@@ -138,17 +185,28 @@ impl OutputSpec {
                 if !short_edge.is_multiple_of(9) {
                     return Err(GeometryError::UnusableShortEdge {
                         short_edge,
-                        reason: "16:9 needs a short edge divisible by 9 to stay integer",
+                        reason: "divisible by 9, which 16:9 needs to stay integer",
                     });
                 }
-                short_edge / 9 * 16
+                // Checked: `short_edge / 9 * 16` overflows `u32` above about
+                // 2.4 billion, and an overflow here panicked in debug and
+                // **wrapped in release** — 4294967292 was accepted as a valid
+                // 3340530112x4294967292 output with no problem reported
+                // (D-114). The division happens first, so only the multiply
+                // can go.
+                (short_edge / 9)
+                    .checked_mul(16)
+                    .ok_or(GeometryError::UnusableShortEdge {
+                        short_edge,
+                        reason: TOO_LARGE,
+                    })?
             }
             Aspect::Square1x1 => short_edge,
         };
         if !long_edge.is_multiple_of(2) {
             return Err(GeometryError::UnusableShortEdge {
                 short_edge,
-                reason: "produces an odd long edge",
+                reason: "a size whose long edge is even",
             });
         }
         if fps == 0 || fps > 120 {
@@ -160,6 +218,18 @@ impl OutputSpec {
             Aspect::Portrait9x16 => (short_edge, long_edge),
             Aspect::Square1x1 => (short_edge, short_edge),
         };
+
+        // The ceiling, and it is derived rather than picked (D-114). See
+        // [`MAX_MACROBLOCKS`]: past it the segment profile would have to
+        // declare an H.264 level no decoder honours, and the prescale canvas
+        // would be nine times a frame that is already too big.
+        if macroblocks(width, height) > MAX_MACROBLOCKS {
+            return Err(GeometryError::UnusableShortEdge {
+                short_edge,
+                reason: TOO_LARGE,
+            });
+        }
+
         Ok(Self {
             width,
             height,
@@ -204,6 +274,12 @@ impl OutputSpec {
     /// Derived, never a constant. `scale=8000:-1` is superseded: 8000 is 7.4x
     /// for 1080p and 4.2x for 1080x1920, the same number meaning different
     /// things per aspect (`ffmpeg-findings.md` §1).
+    ///
+    /// Cannot overflow, and that is an invariant of the constructor rather
+    /// than of this line: [`MAX_MACROBLOCKS`] caps an edge far below
+    /// `u32::MAX / 3`. It used to overflow — `short_edge: 1431655776` produced
+    /// a prescale canvas of 3340530176x**32**, the height having wrapped
+    /// (D-114) — which is why the cap exists and why a test pins the boundary.
     #[must_use]
     pub const fn prescale_width(&self) -> u32 {
         self.width * PRESCALE_FACTOR
@@ -372,5 +448,78 @@ mod tests {
             assert_eq!(Aspect::parse(text), Some(want), "parsing {text:?}");
         }
         assert_eq!(Aspect::parse("4:3"), None);
+    }
+
+    /// D-114. The constructor is reachable from `project.yaml`, from
+    /// `still render-scene --short-edge`, and from the window's
+    /// `subtitle_preview` IPC command, so every one of these is operator input.
+    #[test]
+    fn a_short_edge_too_large_to_render_is_refused_rather_than_wrapped() {
+        // The two that overflowed. In debug this panicked with "attempt to
+        // multiply with overflow"; in release it *wrapped* and was accepted —
+        // 4294967292 became a 3340530112x4294967292 output that `validate`
+        // reported as "no problems", and 1431655776 produced a prescale canvas
+        // of 3340530176x32, the height having wrapped to 32.
+        for edge in [4_294_967_292u32, 1_431_655_776] {
+            for aspect in [
+                Aspect::Landscape16x9,
+                Aspect::Portrait9x16,
+                Aspect::Square1x1,
+            ] {
+                assert!(
+                    OutputSpec::new(aspect, edge, 30).is_err(),
+                    "{aspect:?} accepted a short edge of {edge}"
+                );
+            }
+        }
+
+        // Not an overflow, and still refused: 160000x90000 is 43 200 000
+        // macroblocks and a raw RGBA frame of it is 57 GB.
+        assert!(OutputSpec::new(Aspect::Landscape16x9, 90_000, 30).is_err());
+
+        // The boundary, both sides. 4K is the largest real size and renders;
+        // 8K is past what the profile could honestly label.
+        let uhd = OutputSpec::new(Aspect::Landscape16x9, 2160, 30).expect("4K renders");
+        assert_eq!((uhd.width(), uhd.height()), (3840, 2160));
+        assert!(macroblocks(uhd.width(), uhd.height()) <= MAX_MACROBLOCKS);
+        assert!(
+            OutputSpec::new(Aspect::Landscape16x9, 4320, 30).is_err(),
+            "8K would be declared level 5.2 and no 5.2 decoder can play it"
+        );
+    }
+
+    /// The invariant `prescale_width`/`prescale_height` rely on: the cap keeps
+    /// every accepted frame far below `u32::MAX / 3`, so tripling cannot
+    /// overflow. Asserted at the largest frame the cap admits, which is the
+    /// only place it could ever fail.
+    #[test]
+    fn the_prescale_canvas_cannot_overflow_at_the_ceiling() {
+        for aspect in [
+            Aspect::Landscape16x9,
+            Aspect::Portrait9x16,
+            Aspect::Square1x1,
+        ] {
+            // Walk down to the biggest short edge this aspect accepts.
+            let mut edge = 4608;
+            let spec = loop {
+                if let Ok(spec) = OutputSpec::new(aspect, edge, 30) {
+                    break spec;
+                }
+                edge -= 18;
+                assert!(edge > 0, "{aspect:?} accepted nothing");
+            };
+            assert_eq!(
+                spec.prescale_width(),
+                spec.width()
+                    .checked_mul(PRESCALE_FACTOR)
+                    .expect("no overflow"),
+            );
+            assert_eq!(
+                spec.prescale_height(),
+                spec.height()
+                    .checked_mul(PRESCALE_FACTOR)
+                    .expect("no overflow"),
+            );
+        }
     }
 }

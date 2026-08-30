@@ -2187,6 +2187,1488 @@ narrated from one long recording is the ordinary case at the design point**,
 not a contrived one, and no test in the suite ran enough identical scenes at
 once to open the window.
 
+### D-107 — A segment's cache key holds the narration it contains · Accepted
+
+Found 2026-08-29 by audit and reproduced end to end before it was believed.
+
+`segment_key` in `spoonstill_app::film` held the image content, the frame
+count, the move, the geometry, the encoder settings and the subtitles — and
+**not the narration**. The frame count is derived from the narration's
+*duration*, so duration was standing in for identity. It is not identity: two
+recordings of the same length are two different films.
+
+The reproduction, which is now gate 4b of `scripts/m2-gates.sh`:
+
+```
+render 001.jpg + a 1.000s 440 Hz tone   -> film A
+replace 001.wav with a 1.000s 880 Hz tone
+render again                            -> "1 segment reused", film A byte for byte
+```
+
+The audio cache did its job perfectly — the new recording was hashed,
+normalized and stored under a new key. The segment cache then ignored all of
+it, because the only thing it took from the audio was a number that had not
+changed. **The operator re-recorded a line, the tool reported success, and the
+film contained the previous take.** Nothing warned, because from the renderer's
+point of view nothing was wrong.
+
+The fix is one field. `ResolvedAudio` now carries the `key` it was already
+stored under — the content hash of the narration and its normalization profile,
+computed in `audio::resolve` and previously thrown away — and `segment_key`
+hashes it with everything else.
+
+Three things worth keeping:
+
+- **The identity was already computed.** The audio cache had the right answer
+  the whole time; the segment cache simply never asked for it. A content-
+  addressed cache that keys on a *derivative* of the content (a duration, a
+  size, a modification time) is not content-addressed, and the failure is
+  silent by construction — a hit is a hit.
+- **The cache still works, and that is half the gate.** Putting the original
+  recording back reuses the segment and reproduces the first film byte for
+  byte. A fix that made every render a miss would pass "different audio,
+  different film" and be a worse bug at n=500 than the one it replaced.
+- **Gate 4 could not have caught this and gate 4b was written to fail first.**
+  Gate 4 renders an unchanged project twice and asserts everything is reused,
+  so it only ever exercised the hit. The new gate was run against the
+  unfixed key and observed to fail before the fix was restored — per this
+  file's own rule that a fixture encoding a hazard must be shown to encode it.
+
+D-043 said "never key on a path". The other half, now written down: **key on
+everything the artifact contains.** A segment contains its narration.
+
+### D-108 — Work for one cache key is done once, not once per worker · Accepted
+
+Found 2026-08-29 by audit, and measured before it was believed. Sixteen scenes
+sharing one line, `--audio-jobs 8`, cold cache:
+
+```
+unique narrations needed:   1
+times edge-tts was called:  8
+```
+
+`resolve` looked at the cache with `path.exists()`, found nothing, and did the
+whole job. Eight workers ran that at once, all eight saw an empty cache, and
+all eight spoke the same line to the same provider. Today that is eight times
+the network. Once a metered provider lands (D-014) **it is eight times the
+bill**, and the bill is the entire reason D-043 says never to key on a path.
+
+This is not an exotic case. **Many scenes resolving to one cache entry is the
+ordinary case at the design point** — one recording used throughout, a repeated
+line, a folder of stills with no narration at all. It is also the same shape as
+the `move_into_place` race found while building D-106.
+
+The fix is a keyed single-flight: one `Mutex` per cache key, and the work is
+done under it after a **second** look at the cache. Three details worth
+keeping:
+
+- **The fast path takes no lock.** The overwhelmingly common case is a hit, and
+  a hit answers before the lock is ever reached. Measured at the design point:
+  200 scenes with 200 distinct keys cold-render in 433 s against a 459 s
+  baseline, at an identical 795 MB peak. Distinct keys never contend, so
+  single-flight costs nothing where there is nothing to share.
+- **Only the locked look evicts.** An artifact that will not probe may be one
+  another worker is *mid-write*; deleting it there would be the check causing
+  the corruption it exists to detect. Unlocked: report a miss. Locked: nobody
+  else is writing, so a bad entry is genuinely bad and is removed.
+- **In-process is the correct scope.** An `AudioCache` lives under one
+  project's `.spoonstill/`, and two renders of one project are already refused
+  by `render.lock`. The only writers that can collide are threads of this
+  process, so an OS lock would be answering a question nothing asks.
+
+The gate is offline and needs no voice service: stills with no script and no
+recording all resolve to the same silence, which provokes the identical
+collision with no network. It discriminates exactly — **8 narrations from
+cache without the lock, 15 with it**, out of 16 — and was run against the
+unlocked build and seen to fail first.
+
+A note recorded because it surprised us while testing this: re-rendering a
+200-scene project after deleting the audio cache produces a **byte-identical
+video stream and a different audio stream**. D-077's determinism holds over
+everything we compute; `edge-tts` does not return identical bytes for identical
+text. The film is reproducible because the narration is *cached*, not because
+the provider is deterministic — which is one more reason the cache is a
+correctness feature and not an optimisation.
+
+### D-109 — The segment cache keeps three generations, not all of them · Accepted
+
+Found 2026-08-29 while testing D-107 against the author's own project folder,
+and it is the kind of defect only real data shows. Nothing ever removed a
+superseded segment, so a project accumulated **one dead generation per render,
+forever**. Measured in `~/Downloads/RANDOM vidoe `:
+
+```
+source media          1.6 MB
+.spoonstill/          159 MB
+  segments            134 MB   52 files, 10 scenes — at most 10 can be live
+  cache/audio          25 MB
+```
+
+Roughly 108 MB of that is files nothing will ever read again. The ratio is the
+point: **the derived data is a hundred times the input**, and at the design
+point of 500 scenes the same five generations are several gigabytes inside a
+folder the operator thinks contains their photographs.
+
+#### Why not simply keep what the film used
+
+Because that punishes the loop this tool exists for. Choosing a subtitle theme
+means rendering A, then B, then A again; so does choosing between two voices.
+Keeping only the live set makes every flip a full re-encode — at 200 scenes,
+seven and a half minutes to see a theme that was rendered five minutes ago.
+
+So the rule keeps the live set **plus two spare generations**
+(`SPARE_GENERATIONS`), evicted oldest-first by mtime. Both halves are asserted
+together in gate 4d, because each is trivial to satisfy alone and worthless
+without the other: bounded alone is "delete everything", free-to-flip alone is
+"keep everything". Measured on the author's folder: 52 files and 127 MB became
+30 files and 73 MB, and it stays at 30 through any number of themes.
+
+The bound is a **count that scales with the project** rather than a byte
+budget, because there is no honest number of megabytes to write down — three
+times the film is a sentence an operator can check, and it is the same sentence
+at four scenes and at five hundred.
+
+#### The rules the sweep obeys
+
+- **Only after the join succeeds.** A failed or cancelled render leaves the
+  whole cache untouched, so the next attempt is as fast as this one would have
+  been. Verified: a project with a corrupt still sweeps nothing.
+- **Only files we wrote.** `is_our_segment` matches exactly the name
+  `render_segments` emits — `seg-`, four digits, sixteen hex, `.mp4` — because
+  a cache is not a licence to delete a stranger's file. A `holiday.mp4` an
+  operator dropped in that folder survives, and there is a test listing nine
+  near-misses that must not match.
+- **Never fails a render.** The film is already made and already asserted. A
+  cache that cannot be tidied is not a reason to withhold it, so every error in
+  the sweep is logged and stepped over.
+- **`--keep-cache` is the way out**, for an operator who would rather spend the
+  disk than ever re-encode. The window inherits the sweeping default through
+  `..defaults`, which is right: it is the surface where a project is iterated on
+  hardest.
+
+**Audio is deliberately not swept.** A segment is pure CPU to rebuild; a
+narration is a network call and, under D-014, money. The asymmetry that makes
+D-108 worth doing is the same one that makes sweeping audio a bad trade — and
+at 25 MB against 134 MB it is not where the disk goes anyway.
+
+This does not contradict D-100's "nothing is ever deleted". That rule is about
+the **operator's own files**, which move to `removed/` and are never destroyed.
+A segment is derived data this program wrote, reproducible from the still, the
+narration and the settings. The distinction is worth keeping sharp: we delete
+only what we can rebuild.
+
+### D-110 — A segment is reused only at the length the plan asked for · Accepted
+
+Found 2026-08-29 by audit. The reuse check in `render_one` probed the cached
+file and asserted its `SegmentProfile` — which pins container, codec, profile,
+level, pixel format, colour, geometry, frame rate and time base, and **says
+nothing about length**. So a file carrying a segment's name and a segment's
+shape was reused at any duration, and the frame count reported for it was
+`plan.frames`: the planned number, which nothing had checked against the file.
+
+Reproduced by putting a 60-frame segment under a 240-frame segment's cache
+name — every profile field identical, four times the wrong length.
+
+#### The consequence was not a wrong film, and was worse to live with
+
+The audit that found this predicted a wrong-length film. It is not what
+happens: D-041's assertion on the joined film compares the total against the
+sum of the planned frame counts, so the short film is caught and the render
+refuses. **No wrong film reaches an operator, and that half of the design
+worked exactly as written.**
+
+What happens instead is that the project becomes **permanently unrenderable**:
+
+```
+[  1/2] 002   240 frames  8.000s  (reused)     <- a number nothing verified
+still: /tmp/.film.mp4.partial-17757-1.mp4 does not match the segment profile
+  nb_frames: expected "300", found "120"
+```
+
+Every subsequent render repeats it. The progress line claims the bad scene
+succeeded at its planned length, the failure blames a temporary file that no
+longer exists, no scene is named, and the offending cache entry is left in
+place because the profile assertion — the only thing that removes a bad
+entry — passed. The one way out is deleting a folder the operator does not
+know exists.
+
+So this is filed as a defect of **reporting a number we did not check**, and
+the fix restores the property that makes the cache recoverable: an entry that
+cannot be shown to be right is removed and re-made.
+
+#### The check is free, and deliberately reads the header
+
+`is_the_planned_length` compares the video stream's declared `nb_frames` with
+the plan. That value is **already in the probe the reuse check performs** — it
+was being discarded. Measured at the design point: a fully cached 200-scene
+re-render takes 12.35 s against a 12.2 s baseline.
+
+It must stay a header read. D-096 is explicit that the reuse check has to be as
+fast on six hours as on four seconds, and counting frames means decoding: at
+200 scenes a decoding probe per scene would cost far more than the re-encode it
+saves. The header is the right evidence for the same reason the film's own
+assertion trusts it — this file was written by our muxer, and it only ever
+*got* this name by passing the counted assertion in `scene.rs` (D-042).
+
+Three cases, all tested: a declared count must match exactly, since the join
+asserts an exact total and one frame out is out; with no declared count the
+duration must be within one frame; with neither, the file is not reusable,
+because re-rendering costs one scene and trusting it costs a wrong film.
+
+Gate 4e asserts the **recovery**, not the refusal — the bad entry is dropped,
+that one scene re-renders, the good one is still reused, and the film decodes
+to exactly 300 frames. Run against the unguarded build first, where it fails.
+
+### D-111 — The folder scan sorts, folds case, and refuses to guess · Accepted
+
+Found 2026-08-29 by audit; both halves reproduced before either was changed.
+`from_convention` keyed its groups on `(natural_key(stem), stem)` — the **raw**
+spelling — and filled each slot with `get_or_insert_with` over an unsorted
+`read_dir`. Three defects came out of those two lines.
+
+#### A stem is one scene whatever its case
+
+```
+Shot.jpg + shot.wav
+  ->  1 scene — 0 narrated, 0 supplied, 1 silent
+      warn: "shot.wav" pairs with no image
+```
+
+The operator recorded a voiceover and got a **silent film** and a warning.
+`natural_key` already lowercases, so the two stems sorted adjacently and then
+became separate entries anyway, purely because the raw stem was also in the key.
+
+The decisive evidence that folding is the intended rule is that the other half
+of this convention already did it: `ingest::stem_of` lowercases, and its doc
+comment says "folded for comparison". So `still add` paired these two files and
+the folder scan did not — **one convention, implemented twice, disagreeing.**
+
+#### Two files claiming one job is reported, not resolved quietly
+
+```
+001.jpg + 001.png + 001.wav + 001.mp3
+  ->  1 scene, built from 001.png and 001.wav
+      no problems
+```
+
+`get_or_insert_with` keeps the first and discards the rest in silence. "No
+problems" is printed over a scene assembled from a still the operator never
+chose. `ProblemKind::DuplicateId` had documented this exact case since M2 —
+*"In convention mode this is `001.png` and `001.jpg`"* — but convention mode
+collapses the group before validation can ever see two of anything, so the
+problem it was written for could not be produced.
+
+New `ProblemKind::AmbiguousScene { slot, candidates }`, at `Error`, named
+against the scene:
+
+```
+error scene 001: 2 files claim to be this scene's image (001.jpg, 001.png)
+                 — remove or rename all but one
+```
+
+An error rather than a warning, for the reason `ConflictingAudioSources`
+already gives: guessing which one the operator meant is how a project renders
+500 scenes of the wrong thing. Naming the candidates is the point — the
+operator has to know *which file to delete*, not that something is wrong.
+
+#### The choice must not depend on the filesystem
+
+`read_dir` order is unspecified by std and differs between APFS, ext4 and NTFS,
+and this loop decided which of two files a scene got. Honesty about what was
+measured: on APFS here the winner was stable across creation orders — `001.png`
+beat `001.jpg` either way — so **run-to-run nondeterminism was not observed on
+this machine**, and the audit's claim of it is not confirmed. What is true is
+that the order is arbitrary and unowned: nobody decided png beats jpg, and
+D-071 says this code targets Windows too. The scan now sorts the folder before
+pairing, so the choice is `001.jpg` — alphabetical, stable, and nameable in a
+decision.
+
+#### Cost
+
+The scan reads the folder into a `Vec` and sorts it before pairing, rather than
+streaming `read_dir`. At the design point that is 1 500 short strings for 500
+scenes; the probes that follow dominate it entirely.
+
+Three tests, each run against the unfixed code and seen to fail first: a folded
+stem pairs, two candidates are reported by name with the scene attached and at
+`Error`, and the file chosen does not depend on the order it was written.
+
+### D-112 — The film's destination is contained by the same code as its inputs · Accepted
+
+Found 2026-08-29 by audit and reproduced. `destination` tested the `output:`
+setting **lexically** — reject an absolute path, reject any `..` component —
+and then joined it onto the project root. A symlink is neither of those things:
+
+```
+project/escape -> /tmp/outside
+project.yaml:  output: escape/film.mp4
+
+  -> render succeeds, film written to /tmp/outside/film.mp4
+```
+
+This is a defect against the project's own stated rule, not a new requirement.
+`CLAUDE.md` already says the `output:` setting "is *manifest data* and is held
+to D-054 like every other path in the file — a project that renders itself into
+`../../etc` is the thing containment exists to prevent." The rule was written;
+only a weaker check was implemented.
+
+`path_safety` has done this correctly since M2 — canonical, component-wise,
+symlink-following, with `deepest_real_ancestor` closing the existence-oracle
+leak. The reason `destination` did not use it is real rather than careless:
+`resolve_within` answers for an **input**, so a path that does not exist is
+`PathError::Missing`, and a destination normally does not exist.
+
+So the containment decision is factored into `resolve_contained`, which returns
+the resolved path *and* whether it exists. `resolve_within` keeps its meaning
+(absent is an error); the new `resolve_destination_within` returns the path
+either way. **Reading a file and writing one now cannot drift into two ideas of
+what "inside the project" means** — the rule is one function, and the only
+thing the callers disagree about is whether absence is a failure.
+
+Four behaviours held fixed, each tested:
+
+- **`--out` is still honoured wherever it points.** It is an argument the
+  operator typed for this run; the setting is data in a file that may have come
+  from somewhere else. That asymmetry is the whole of D-054.
+- **A symlink that stays inside resolves to where it really points.** The
+  output is reported as `project/real/film.mp4`, not `project/here/film.mp4`,
+  because the operator's spelling is a request and not an address.
+- **A nested destination that does not exist yet still works**
+  (`renders/2026/film.mp4`), which is the case `resolve_within` could not have
+  served.
+- **D-089 survives.** A project folder whose name ends in a space renders, and
+  the path is not trimmed anywhere in the new route.
+
+One behaviour deliberately changed: `destination` now requires the project root
+to **exist**, because containment is decided on canonical paths and a root that
+is not there contains nothing. A test had been passing an invented
+`/projects/demo`; it now uses a real folder. That test was not wrong about the
+old code — it was checking a string join, which is what the old code did.
+
+### D-113 — The render lock is the operating system's, not the file's · Accepted
+
+Found 2026-08-29 by audit, reproduced end to end 2026-08-30. The lock was a
+file whose *existence* was the lock: `create_new` to take it, `remove_file` on
+`Drop` to release it, and `--force` to overwrite it. Every one of those three
+is wrong, and they compound.
+
+Demonstrated with two real renders of one 24-scene project:
+
+```
+A: still render …               -> takes the lock, pid 43746
+B: still render … --force       -> takes it anyway, while A is running
+   both alive at once, writing the same segment paths
+B finishes, its Drop removes the shared file
+   -> the project is now UNLOCKED with A still rendering
+C: still render …               -> not refused. three renders, one project.
+```
+
+`--force` could not tell the case it existed for — "a machine that lost power
+leaves a lock behind" — from the case the lock exists to prevent. And release
+was unlinking a *shared path*, so whichever run finished first unlocked the
+other.
+
+#### The fix is to stop inventing a lock
+
+`std::fs::File::try_lock` is stable as of Rust 1.89 and this workspace pins
+1.94, so the kernel's own advisory lock is available with no dependency and no
+`unsafe`. `render.lock` is opened and locked; **the file's existence carries no
+authority and it is never deleted.**
+
+Both defects disappear rather than being patched:
+
+- **A lock cannot go stale.** The operating system releases it when the holding
+  process dies — crash, `kill`, or power loss. Verified: kill the holder, and
+  the next render succeeds *with the lock file still on disk and no flag*.
+- **One run cannot unlock another.** Releasing is closing a handle, not
+  unlinking a path two runs share.
+
+#### `--force` is kept and no longer overrides
+
+There is nothing left for it to rescue: the crashed-run case is now automatic,
+and a refusal from the kernel means a live process is holding the lock. So
+`--force` is accepted, does not override, and says why:
+
+```
+another render is working on this project (pid 45241)
+--force cannot take a lock a running render holds. Wait for it, or stop it.
+```
+
+Kept rather than removed so scripts do not break, and answered with a sentence
+rather than silence so an operator who reaches for it learns what changed. The
+flag's help text says the same. **This is strictly better in both directions:
+safer against the case that corrupts a film, and more convenient in the case
+the flag was invented for.**
+
+#### Two tests had encoded the bug
+
+Worth recording, because it is the second time in this audit that the thing
+asserting correctness was asserting the defect:
+
+- `a_second_render_of_one_project_is_refused_until_the_first_finishes` ended
+  with `Lock::take(&root, true).expect("forced")` — **`--force` taking a lock a
+  live run held, asserted as correct.**
+- Gate 5 wrote `pid 999999` into the file and required a refusal. Under the new
+  design that file is not a lock, and requiring a refusal was requiring the tool
+  to stay stuck after a run the machine lost.
+
+Gate 5 now holds a **real** lock — a render running in the background, waited
+for rather than slept past — and asserts both that a second render is refused
+and that `--force` is refused too. Run against a build where `--force` still
+overrode, it fails.
+
+### D-114 — Output geometry has a ceiling, and it is derived from the level table · Accepted
+
+Found 2026-08-30 by audit. `OutputSpec::new` had no upper bound and unchecked
+arithmetic, and it is reachable from three places that all take operator input:
+`project.yaml`'s `short_edge`, `still render-scene --short-edge`, and the
+window's `subtitle_preview` IPC command, whose `short_edge: u32` arrives
+straight from the webview.
+
+Measured, in both profiles:
+
+```
+debug    short_edge 4294967292 -> panic: attempt to multiply with overflow
+release  short_edge 4294967292 -> 3340530112x4294967292, "no problems"
+release  short_edge 1431655776 -> prescale canvas 3340530176x32
+release  short_edge 90000      -> 160000x90000, a 57 GB RGBA frame
+```
+
+Three different failures from one missing bound. The middle one is the nastiest:
+both output dimensions look plausible while the **prescale height has wrapped to
+32**, so the filter graph gets a canvas that is not remotely the shape the rest
+of the pipeline assumes. And `still validate` reported *no problems* for all
+three, which is the part that matters — the whole promise of `validate` is that
+it says everything that is wrong before anything is rendered.
+
+#### The ceiling is 36 864 macroblocks, and it was not chosen
+
+`spoonstill_media::profile::LEVELS` tops out at H.264 level 5.2, `MaxFS`
+36 864 — and past the table `h264_level` returns 52 **regardless**. So a larger
+frame is not merely big: it gets *labelled* level 5.2 while being something no
+5.2 decoder can play, and D-041's assertion then cheerfully confirms the label
+we wrote ourselves. The segment profile has to be a true description of the
+file, so the ceiling is the largest frame that description stays true for.
+
+4K UHD is 32 400 macroblocks and renders. 8K is 129 600 and is refused. That is
+a real restriction and it is the honest one: we cannot currently label 8K.
+
+`MAX_MACROBLOCKS` lives in `spoonstill-core`, which depends on nothing and so
+cannot import the level table it comes from. A test in `spoonstill-media`
+asserts the two still agree, because the drift would be silent in exactly the
+way described above. The table moved to module scope so that test reads the
+same array the function does rather than a copy of it.
+
+With the cap in place the prescale multiply cannot overflow — an accepted edge
+is far below `u32::MAX / 3` — so `prescale_width`/`prescale_height` keep their
+plain multiplication and document the invariant, with a test that walks down to
+the largest frame each aspect admits and checks it there. **The invariant
+belongs to the constructor, which is why the constructor exists.**
+
+#### A message that was already wrong, made visible
+
+`ProblemKind::UnusableSetting` renders `` `field`: "value" is not {expected} ``,
+and `settings.rs` was handing it the whole `GeometryError` `Display` — itself a
+complete sentence. With the old short reasons that read badly; with a longer one
+it read as nonsense:
+
+```
+`short_edge`: "4294967292 at 16:9, 30 fps" is not short edge 4294967292 is not a size this renders …
+```
+
+Fixed rather than left, since this change is what exposed it. Every `reason` is
+now a **noun phrase**, so it reads correctly both alone ("short edge 1081 is not
+even — H.264 4:2:0 cannot represent odd dimensions") and after a caller's own
+subject; `GeometryError::reason()` hands over the phrase without the subject.
+That also removed a `Box::leak` per malformed setting.
+
+### D-115 — The window supervises its own render, and a killed run leaves no litter · Accepted
+
+Found 2026-08-30 by audit. Three separate claims, and testing them changed what
+the fix should be — one of the three does not happen.
+
+#### What does not happen: FFmpeg is not orphaned
+
+The audit predicted that killing the parent leaves FFmpeg running. Measured on
+a four-worker render, SIGKILL on the parent:
+
+```
+ffmpeg processes before kill: 4
+2s after:                     0
+```
+
+`command::spawn` gives every child piped stdin, stdout **and** stderr, so when
+the parent dies the pipes close and FFmpeg exits on its own. That is incidental
+rather than designed, but it is real, and it is the difference between "the
+window leaks CPU forever" and "the window leaves some files behind". Recorded
+because the next person to read the audit will otherwise go looking for a
+process leak that is not there.
+
+#### What does happen: temporaries with nobody to rename them
+
+The same kill left **four** `.seg-….partial-66085-N.mp4` files. `atomic` writes
+beside-then-renames (D-042), so a run that dies mid-encode leaves one temporary
+per scene in flight, and **nothing ever removed them** — not even D-109's
+sweep, which deliberately matches only names a segment earned.
+
+They are safe to remove at the sweep, and the reason is D-113: the render lock
+is exclusive per project and held for the whole run, so no other render can own
+a temporary in that folder, and this run's own have been renamed away by the
+time the film is joined. Anything still called `.partial-` is litter from a run
+that is gone. A stranger's dotfile is not touched — `.notes.txt` survives, and
+there is a test listing five near-misses.
+
+#### The slot the window could never release
+
+`render_project` claimed the window's one render slot, then released it with a
+statement placed **after** `handle.await…?`. A panic in the render thread makes
+that join return `Err`, the `?` returns past the release, and the slot stays
+claimed: every later render is refused with "a render is already running in this
+window" until the application is restarted. It is now an `ActiveRender` guard,
+which an early return cannot skip and which runs while a panic unwinds.
+
+#### Closing the window now asks the render to stop
+
+There was no `on_window_event` and no `RunEvent` handling at all: the CLI has
+had a signal ladder since D-045 and the window had nothing, so closing it
+mid-encode simply ended the process. `CloseRequested` now calls `cancel.request()`
+on the active slot — the same thing the Cancel button does.
+
+The close is deliberately **not** prevented. A window that refuses to shut is a
+worse failure than a scene that has to be re-encoded, every artifact is written
+beside-then-renamed so there is nothing half-written to find, and the lock
+releases itself now (D-113). What the operator gets is an orderly stop instead
+of an abrupt one, and — with the sweep above — no litter from it either.
+
+**Honesty about coverage.** The guard and the cancel-through-the-slot mechanism
+are unit tested, and both tests were run against the unfixed code and fail
+there. The handler *firing on a real close during a real render* is not: that
+needs GUI automation this project does not have. What was checked by hand is
+that the window still opens and closes cleanly with the handler registered.
+`ui_contract.rs` cannot help here — it asserts ids and commands, and this is
+neither.
+
+### D-116 — No cue is a flicker, and the count was never the guarantee · Accepted
+
+Found 2026-08-30 by audit, which named one defect. Reproducing it found a
+second, and the second is the real one.
+
+**What the audit found.** The tail join was
+`pieces.split_off(allowed.saturating_sub(1).max(1))`, and with `allowed == 1`
+that `.max(1)` kept one piece *and* appended the joined rest — two cues where
+one was allowed:
+
+```
+"one two three four five six seven. eight" in 1.0s  ->  0.872s + 0.128s
+```
+
+Also at 1.5s, which the audit did not try: `floor(1.5 / 0.9)` is still 1, so it
+produced a **0.192s** cue — six frames at 30fps.
+
+**What it missed, and it is the general case.** Capping the *count* was never a
+guarantee about *duration*. Time is shared out by character count, with no
+floor, so a perfectly legal number of cues can still contain a sliver:
+
+```
+"aaaa…(40) bbbb…(30). c" in 3.0s  ->  3 cues (allowed 3), the last 0.042s
+```
+
+One frame. The count was legal; the arithmetic that turned it into times was
+not bounded at all.
+
+So the fix is not the off-by-one. After the pieces are chosen, the worst
+offender is merged into the neighbour it reads with — the one following it,
+except at the end — and that repeats until every cue clears
+[`MIN_CUE_SECONDS`] or only one remains. Each pass strictly reduces the count,
+so it terminates. **A scene shorter than one readable cue still gets one cue of
+the whole scene**, because that is the floor rather than a violation of it.
+
+Honestly: the `.max(1)` removal is kept but is **not** what fixes this. Tested
+by restoring each defect separately — with the off-by-one back and the merge
+loop present, every test still passes, because merging subsumes it. It stays
+because the tail join should honour `allowed` on its own terms rather than
+leaving a contract violation for a later stage to clean up.
+
+#### Why the existing test did not catch either
+
+`a_short_scene_never_produces_a_flicker` asserts exactly the right property —
+`cue.duration() >= MIN_CUE_SECONDS` — on a 2.0s scene whose text splits into
+pieces of similar length. `allowed` is 2 there, so the off-by-one cannot fire,
+and the pieces are balanced, so the missing floor cannot either. **A test that
+checks the right thing on an input that cannot exhibit the bug is not
+coverage**, and this is the third time in this audit that a test has quietly
+been that.
+
+Its replacement sweeps: six texts against 120 durations from 0.25s to 30s
+across three budgets, asserting the minimum on every cue, that a sub-minimum
+scene collapses to exactly one, and that the cues still tile the narration
+exactly. That is the shape of test that finds the *next* one.
+
+### D-117 — A shadow fits inside the canvas it is drawn on · Accepted
+
+Found 2026-08-30 by audit, and the arithmetic it reported is exactly right:
+`Mask::shadow` runs **three** box blurs, three passes of radius `r` spread
+`3r`, and the band reserved `shadow_blur * 2`. The outermost ring of every soft
+shadow was therefore cut off against the edge of its own canvas.
+
+**Measured, because "can be clipped" and "is clipped" are different claims.**
+Reading the maximum alpha on the outermost rows and columns of every theme:
+
+```
+1080p   classic  edges 0            band  edges 205  (its plate, blur = 0)
+        card     bottom 2           boxed edges 172  (its plate, blur = 0)
+        minimal  bottom 1           punch edges 0
+```
+
+So it is **real and it is small**: alpha 1–2 of 255 on one row. Nobody has ever
+seen it. It is fixed anyway, for three reasons: the change is one constant, the
+existing comment already claimed to reserve "the blur in every direction", and
+the size of the error scales with `shadow_blur` — `card` is today's largest at
+0.22 and a softer theme added later would clip visibly.
+
+Two details worth keeping, because both explain the shape of the evidence:
+
+- **Only the bottom edge ever clipped.** The shadow is offset down and to the
+  right, so upward it needs `3r - offset` and downward `3r + offset`, while the
+  margins reserve `outline + 2r` and `outline + offset + 2r`. Downward is
+  therefore the binding direction, and it is short by exactly `r - outline` —
+  which is why `classic` and `punch`, whose outlines are wide relative to their
+  blur, showed nothing at all.
+- **It clipped identically at 720p, 1080p and 4K.** That is not a coincidence,
+  it is D-106's scale-invariance working: every length is a fraction of the
+  frame, so the bug is a fraction too. The same property that makes one theme
+  one design at every size makes one bug the same bug at every size.
+
+The blur count is now `SHADOW_BLUR_PASSES`, used by both the blur loop and the
+margin, because the disagreement between a `3` in one place and a `2` in the
+other **is** this defect. Cost: `card`'s band grows 142 rows to 162 at 1080p,
+about 150 KB per cue against the 780 MB per worker of §10.
+
+The test asserts a property of the **output** rather than of the arithmetic —
+*a theme that casts a shadow leaves the edge of its canvas transparent* —
+because a test that recomputed the margin would agree with whatever the code
+did. Themes with no shadow are excluded on purpose: `band` is full-frame-width
+by design and `boxed` runs flush top and bottom, so their edges are *meant* to
+carry ink. It runs at 720p and 1080p; 4K was measured during the investigation
+and left out because a 3840-wide triple box blur is most of a minute in a debug
+build.
+
+### D-118 — A key that holds an operator's words is length-prefixed · Accepted
+
+Found 2026-08-30 by audit. `segment_key` flattened the subtitle spec with
+`key_fields().join("\u{1f}")` and handed the result to `fnv1a_fields`, which
+separates its own fields with the byte `0x1f`.
+
+**`fnv1a_fields` documented this as a precondition and was right to:**
+
+> `0x1f` (ASCII unit separator) cannot occur in a path, a project id, or a hex
+> digest, so it cannot be forged by the field contents.
+
+That was **true when it was written**. Every caller then was a path, an id or a
+digest. D-106 later began feeding it *subtitle text* — a `.txt` an operator
+wrote — and nothing anywhere checks the precondition, so the violation is
+silent and its symptom is a **cache hit**.
+
+Constructed, not argued:
+
+```
+two cues:  ["alpha beta", "gamma"]
+one cue:   ["alpha beta\u{1f}0.000>2.000:gamma"]
+
+joined:    both "theme=classic\u{1f}place=bottom\u{1f}0.000>2.000:alpha beta\u{1f}0.000>2.000:gamma"
+```
+
+Two genuinely different films, one segment key, so one of them renders the
+other's subtitles. And `0x1f` **is not whitespace** — measured:
+`'\u{1f}'.is_whitespace()` is `false` — so `normalize` passes it through into
+cue text untouched. A `.txt` exported from a tool that uses unit separators
+carries it in.
+
+The fix is `hash::fnv1a_prefixed`: every field preceded by its length, so a
+boundary is *stated* rather than *looked for*, and no field content can imitate
+one. `segment_key` uses it and passes each subtitle field separately rather
+than pre-joining. Cost is eight bytes hashed per field.
+
+#### What was deliberately not changed
+
+`MotionSpec::seeded` also calls `fnv1a_fields`, and its `project_id` field is
+the **folder's name** — operator text, so the documented precondition does not
+hold there either. It is left alone, for a reason rather than by omission: a
+collision there needs the field *after* the forged separator to line up, and
+that field is a hex content digest, which cannot contain `0x1f`. So it is not
+constructible. Against that, changing the seed would change **which Ken Burns
+move every existing scene gets** — a visible change to films the author has
+already made, to close a hole nobody can open. If motion's inputs ever stop
+being a digest, this is the decision to revisit.
+
+`fnv1a_fields` keeps its separator and gains a much louder doc comment: the
+precondition is stated as a requirement, D-118 is named as what breaking it
+looked like, and it points at the prefixed variant for any field that can hold
+arbitrary bytes. Its test now asserts the collision *as a fact about the
+function* — `fnv1a_fields(["a\x1fb"]) == fnv1a_fields(["a","b"])` — so the
+limitation is pinned rather than remembered.
+
+### D-119 — `move_into_place` is one rename, because Rust's already replaces · Accepted
+
+Found 2026-08-30 by audit. `move_into_place` removed the destination and then
+renamed over it, on a premise stated in its own doc comment:
+
+> `fs::rename` replaces the destination silently on Unix but fails on Windows
+> when it already exists, so the destination is removed first.
+
+**The second half is not true of Rust.** It is true of the raw `MoveFile` API
+and of several other languages, which is presumably where the belief came from.
+Checked against the pinned toolchain's own source rather than from memory:
+`std::fs::rename` is documented as *"Renames a file or directory to a new name,
+replacing the original file if `to` already exists"*, and
+`library/std/src/sys/fs/windows.rs` calls
+`MoveFileExW(old, new, MOVEFILE_REPLACE_EXISTING)`. The only caveat in the
+platform note concerns directories, and both sides here are files.
+
+So the removal bought nothing on either platform, and cost two things:
+
+- **A window with no artifact in it.** Between the unlink and the rename the
+  destination did not exist. A crash there destroys the file that was already
+  good — and this function moves the finished **film**, not only cache entries,
+  so re-rendering over yesterday's film could lose yesterday's film.
+- **A race that then had to be handled.** Two workers finish one cache entry
+  whenever two scenes share a narration, which is the ordinary case at the
+  design point. Both saw `exists()`, both unlinked, and the loser failed the
+  whole render with "No such file or directory" about a file it had just been
+  told was there. That was found and patched during D-106 — a patch for a
+  problem the removal itself created.
+
+Both disappear by deleting four lines. `rename` is last-writer-wins, so
+concurrent finishers simply both succeed.
+
+The test is the property rather than the implementation: one thread replaces a
+file three hundred times while another asks nothing but *is it there*. Against
+the old code it fails on the first replacement; there is no reasoning about
+crash windows in it at all. The D-106 race test is **kept** with its rationale
+rewritten — the race cannot arise now, but the two cases it exercises (moving
+onto nothing, moving onto something) must both work either way.
+
+Verified at the design point afterwards, because every artifact in the program
+goes through this function: 200 scenes cold in 454 s at 795 MB peak, in line
+with the 433-459 s of the runs before it.
+
+### D-120 — A scene file is never seen holding part of a photograph · Accepted
+
+Found 2026-08-30 by audit. `copy_in` opened the **real** destination with
+`create_new` — the no-clobber check — and then filled it with `fs::copy`. So
+the operator's own `001.jpg` existed, at its final name, holding incomplete
+media for the whole of the copy.
+
+**It is invisible on the machine this was written on.** `fs::copy` on APFS is a
+copy-on-write clone and finishes in microseconds; a watcher polling from a shell
+never caught it, and a `kill -9` after 250 ms was far too late. So the
+reproduction was done on the filesystem the operator's media actually lives on —
+a FAT32 volume, an external drive — where the same 400 MB copy takes 0.77 s:
+
+```
+still add … &  ; kill -9 after 0.3s
+  ->  001.jpg   232783872 bytes   (the source is 419430400)
+  still validate: source geometry 0x0 — the image is unreadable or truncated
+```
+
+A broken scene at a real scene name, a scene number consumed, and something for
+the operator to find and delete. `validate` does catch it, which is the system
+working; it is still a project the operator has to repair by hand after an
+interruption they may not even have noticed.
+
+The copy now goes to `atomic::partial_path` beside the destination, and the
+name is claimed **after** it, then renamed over (D-119's rename replaces our own
+empty claim atomically). Same kill, same volume, afterwards: no scene file at
+all, one hidden `.partial`, and the retry takes `001` as if nothing had
+happened.
+
+#### What this does not achieve, stated plainly
+
+The destination still exists as an **empty** file for the two syscalls between
+the claim and the rename. Removing even that needs an atomic create-exclusive
+rename, and the portable primitive for it is `hard_link` — which **FAT32 does
+not support**: measured, `Operation not supported (os error 45)`, on the very
+volume the defect matters on. So the choice is between refusing to overwrite and
+appearing atomically, and refusing to overwrite is rule 2 of the module. An
+empty file for two syscalls with no I/O between them is a different thing from
+232 MB of a photograph for the length of a copy, and that is the honest claim.
+
+#### Three tests that pass against the broken code
+
+Worth recording, because it nearly went unnoticed. The obvious tests here —
+complete content, no leftover temporary, an existing name still refused — all
+pass **either way**, because they inspect the end state and the defect is a
+window. That is exactly the trap D-116 named one decision earlier, walked into
+while fixing something else.
+
+The test that does distinguish watches: one thread copies 64 MB while another
+asks only for the destination's *size*, and fails if it is ever between zero and
+whole. Against the old order it catches 1 MB of 64 MB. It also had to be
+written twice — the first version asserted the destination never *exists* during
+the copy, which fails against the fix too, for the empty-claim reason above. The
+assertion has to be the property the fix actually buys.
+
+### D-121 — An interrupted renumber is finished or undone, never left · Accepted
+
+Found 2026-08-30 by audit and reproduced end to end. `renumber` renames a
+scene's files to `.arranging-…` and back in two passes, and every step is
+`rename(..)?` — so an interruption returns early and leaves the files parked.
+The parked names begin with a dot, and D-050's folder scan ignores dotfiles.
+
+A 2000-scene project, `still remove` killed 120 ms in:
+
+```
+433 files parked, 434 scenes gone
+still validate:  1566 scenes — no problems
+```
+
+**That last line is the defect.** Nothing was deleted, so D-100 held; but 434 of
+the operator's photographs were invisible, `validate` said the project was
+fine, and every arrange command then refused it — *"`.arranging-0002-jpg.jpg` is
+not a numbered scene"* — so the one surface that could have repaired it was the
+one that turned it away. There was no recovery command, and no message anywhere
+said what had happened.
+
+#### The journal is the filename
+
+A parked file is now `.arranging-<from>-to-<wanted>.<ext>`, carrying both where
+it came from and where it was going. That makes recovery decidable from the disk
+alone, with no separate journal to keep in step:
+
+- **Destination free → put it there.** After pass one every numbered name has
+  been vacated, so this is always the branch for an interruption during pass
+  two. It finishes the job.
+- **Destination taken → put it back where it came from.** Its old name must be
+  free, because pass one moved it away and pass two had not begun to fill
+  anything in. That is the branch for pass one, and it is a rollback.
+- **Neither free → leave it parked.** There is nothing safe to do, and leaving
+  a file parked beats overwriting a photograph. `validate` still reports it.
+
+`recover` runs at the top of `scenes`, so it happens **before the project is
+read**, not merely before it is written — a folder is never *shown* to anyone
+in the half-renamed state.
+
+Names in the older format are recovered too. A folder damaged by the build that
+shipped this bug has to be repairable by the build that fixes it; those names
+carry only where the file came from, so the only safe reading is "put it back".
+Verified on the actual damaged project from the reproduction: 433 files
+restored, 1566 scenes back to 1999, `validate` clean, and all 2000 photographs
+accounted for — 1999 in the project and one in `removed/`.
+
+#### And `validate` no longer says nothing
+
+`ProblemKind::InterruptedRename` is reported by the folder scan, counted
+**before** the dotfile skip that made these invisible in the first place.
+"1566 scenes — no problems" over a project that had 2000 is the most misleading
+thing this program can say, and it is the same class as D-091: a screen showing
+a true thing in a way that misleads is a defect of the same kind as a wrong
+number.
+
+The recovery tests build each state by hand rather than racing a kill — landing
+the window took eight attempts at varying delays, and a test that reproduces one
+run in eight is a test people learn to re-run.
+
+### D-122 — The activity log is locked, and nothing in it can be run · Accepted
+
+Found 2026-08-30 by audit. Two defects in `runs.csv`, the machine-wide activity
+log — the file D-093 exists so that "what went wrong" can be answered without
+knowing which folder it went wrong in.
+
+#### It is written by several processes and had no lock
+
+`append_line` rolled if large, asked `path.exists()` to decide whether to write
+a header, then wrote the header, a newline, and the row as **three separate
+writes**. Four concurrent `still render` processes into a fresh log:
+
+```
+when,level,scope,project,what happened,details,folder
+when,level,scope,project,what happened,details,folder"2026-08-30T05:45:02.056Z","info",…
+when,level,scope,project,what happened,details,folderwhen,level,scope,project,what happened,details,folder
+```
+
+Three headers, two of them welded onto other rows. Not a file any spreadsheet
+can read, which is the one thing this file is for.
+
+This is the case a per-project lock cannot cover: the writers are different
+projects in different processes. Three changes, each removing one of the ways
+that happened — the file's own lock held across deciding *and* writing;
+"fresh" read from the **locked file's length** rather than `path.exists()`,
+which was a check against one fact and an act on another; and one `write_all`
+instead of three. Eight rounds of four concurrent renders afterwards: clean.
+
+Still silent on failure, deliberately. A render must never fail because a
+spreadsheet could not be written, so a lock that cannot be taken falls through
+to the write rather than dropping the row.
+
+#### RFC 4180 is about parsing, not about running
+
+`field` quoted correctly and stopped there. Excel, LibreOffice and Numbers all
+strip the quotes and *then* read a leading `=`, `+`, `-`, `@`, tab or carriage
+return as the start of a formula — and this file exists to be opened in a
+spreadsheet, from Settings > Activity log and `still diagnostics where`.
+
+Reachable through the operator's own folder name, which is the `project`
+column. Verified end to end: projects in folders called `=1+1`, `@SUM(A1:A9)`,
+`-2+3` and `+1` put exactly that in the column. D-052 already says a name
+someone chose is hostile input; a name someone *else* chose — a project folder
+that arrived from elsewhere — more so.
+
+A leading `'` now defuses those, and **numbers are left alone**: `-16.0` is a
+loudness reading that belongs in the column as a number, and a value that parses
+as `f64` cannot be a function call or a DDE payload. That is the test, not a
+list of exceptions.
+
+#### What the tests prove, and what they do not
+
+The defusing test fails without the fix. The concurrency test fails against the
+original `append_line` — but it does **not** isolate the lock: with only the
+lock removed it still passes, because inside one process the length check and
+the single write are enough. Recorded in the test itself. The lock is for the
+case a unit test cannot reach, and the evidence for it is the eight-round
+process-level reproduction, not the test.
+
+### D-123 — An installer says why it failed, and a temporary cleans itself up · Accepted
+
+Found 2026-08-30 by audit. Two small things, both in the "a missing tool is
+something to press" territory D-105 opened.
+
+#### Every failure was reported as an absence
+
+`tools::install` matched `spawn().and_then(wait_until)` with
+`Err(_) => "`{program}` is not on this machine"`. That expression can fail four
+ways — `BinaryMissing`, `Spawn`, `Timeout`, `Cancelled` — and only the first one
+means what the message says.
+
+The realistic one is the timeout. `INSTALL_TIMEOUT` is 900 seconds and
+`brew install ffmpeg` on a slow connection genuinely outlives it, so the
+operator watched their package manager run for a quarter of an hour and was
+then told it **was not on the machine** — a wrong diagnosis, not a vague one,
+and one that sends them to install what they already have. D-105 exists because
+a screen that reports a problem it could have ended is a defect; a screen that
+reports the *wrong* problem is worse.
+
+`describe_failure` now answers each case in its own terms, and the timeout's
+answer says "it is installed" in as many words.
+
+**Honesty about the reproduction.** The two reachable-in-a-test failures turn
+out to be handled correctly already: a non-executable candidate is skipped by
+`locate` (which is right), and an unexecutable one comes back through
+`posix_spawn`'s shell fallback as `exited 126: cannot execute binary file`,
+which the `Ok(finished)` arm reports accurately. The gap is `Timeout` and
+`Cancelled`, and a 900-second timeout is not something a test waits for — so the
+evidence is the code path plus a unit test over the four error values, not an
+end-to-end run.
+
+#### A cleanup loop is only reached on the paths somebody remembered
+
+`Edge::speak` removed its part files in a loop placed **after**
+`join_mp3(&parts, &audio)?`. A failed join returns past it, leaving every part
+in the **audio cache** — which, unlike the segment directory, has nothing that
+sweeps it (D-115). A failed `move_into_place` leaked the joined file the same
+way. The in-loop failure path did clean up, which is what makes this the kind of
+omission that survives review: the cleanup exists, it is just not on every exit.
+
+It is a `Scratch` guard now, holding every temporary the call makes, removing
+them all on `Drop`. The manual loops are gone rather than duplicated. The
+finished audio is registered too: on success it has already been renamed away so
+removing it is a no-op, and on a failed rename it is exactly what wants removing.
+
+### D-124 — What is embedded in the binary is named in the binary · Accepted
+
+Raised 2026-08-30 by audit. Three weights of Inter are compiled into every
+build with `include_bytes!` — they exist because `brew install ffmpeg` ships
+without `libass` and `libfreetype`, so spoonstill rasterizes subtitle text
+itself (D-106). Their licence sat beside the `.ttf` files in the repository and
+went **nowhere else**: the release archives were `tar -czf … still`, one file,
+and `tauri.conf.json` declared no resources.
+
+The SIL Open Font License is unusually direct about this, in condition 2:
+
+> Original or Modified Versions of the Font Software may be bundled,
+> redistributed and/or sold with any software, **provided that each copy
+> contains the above copyright notice and this license.** These can be included
+> either as stand-alone text files, human-readable headers or in the appropriate
+> machine-readable metadata fields within text or binary files as long as those
+> fields can be easily viewed by the user.
+
+A published archive contained the font and not the licence. That is a plain
+mismatch with a condition written in the licence's own words — not a legal
+opinion, which this file is not the place for.
+
+Three things now carry it, in increasing order of how hard they are to lose:
+
+- `THIRD-PARTY-NOTICES.md` at the workspace root, in **both** release archives
+  (staged beside the binary so an operator extracting into Downloads gets two
+  files rather than a folder) and in the window's bundle resources.
+- **`still licences`**, which prints the file `include_str!`'d into the binary.
+  So every copy contains the notice *however it was obtained* — extracted,
+  copied off another machine, or built here — which is the second form the OFL
+  itself offers. The installers were left alone deliberately: they install only
+  the binary, and the binary is now sufficient.
+- A test that asserts the notices file contains the licence **read from the
+  fonts' own `LICENSE-Inter.txt`**, rather than a copy of the words. Replace the
+  fonts and it fails until the notice is updated. `include_bytes!` makes an
+  obligation invisible at the call site; nothing else in this build would have
+  noticed.
+
+#### What is deliberately not claimed
+
+The Rust dependencies are **not** reproduced. Most are MIT or Apache-2.0, both
+of which ask for their notice on a binary distribution, and doing it honestly
+means generating the roll-up from `Cargo.lock` at release time — `cargo-about`
+is the usual tool — so that it cannot drift from what was actually linked.
+Hand-writing it would produce a file that is wrong by the next `cargo update`.
+The gap is written into `THIRD-PARTY-NOTICES.md` itself so the next person finds
+it rather than assuming the file is complete.
+
+`README.md`'s licence section said "Not yet chosen" and stopped, which read as
+though nothing about licensing was settled. It now separates the two questions:
+spoonstill's own code is still undecided (D-062), and the third-party material
+inside it is answered.
+
+### D-125 — A release is pinned, scoped, and checked by name · Accepted
+
+Raised 2026-08-30 by audit, covering two things that both decide whether a
+published release can be trusted.
+
+#### Every action is a commit now
+
+`actions/checkout@v4`, `dtolnay/rust-toolchain@stable`,
+`Swatinem/rust-cache@v2` and — worst — `cargo-bins/cargo-binstall@**main**`.
+A moving tag means the thing that builds and signs a release can change without
+a commit here, and `@main` means it can change between two runs of the same
+workflow. Every one is now a full commit SHA with the old ref beside it as a
+comment. The SHAs were **resolved from GitHub**, not written from memory:
+
+```
+actions/checkout         11d5960a326750d5838078e36cf38b85af677262  # v4
+Swatinem/rust-cache      6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2
+dtolnay/rust-toolchain   4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable
+cargo-bins/cargo-binstall 75b4bfae1b2c753a6806bbce6e6cb89b602de33c # v1.22.0
+```
+
+The Tauri CLI was `--version '^2'`, which resolves at release time, so two tags
+cut a week apart could bundle with two different CLIs and nothing would record
+which. It is `=2.11.4` now, matching the `tauri` 2.11.5 that `Cargo.lock` pins.
+`cargo tauri build` gained `--locked` for the reason the CLI job already had it:
+a release is built from the versions that were tested.
+
+`permissions: contents: write` was declared once at the top and therefore
+applied to every step in every job, including the ones that only compile. It is
+`read` at the top now, and the four jobs that touch the release ask for `write`
+themselves.
+
+#### Twelve of the wrong files is still twelve
+
+The publish gate was `[ "$count" -ge 12 ]`. That is satisfied by twelve assets
+with the wrong names — a leg that uploaded a stale file from a re-run, or
+exactly the rename D-098 warns about, where the release looks complete and every
+installer 404s.
+
+It asserts the **exact set** now, and then downloads every asset and verifies
+every `.sha256` before undrafting. Finding a bad checksum here costs a re-run;
+finding it in `install.sh` costs an operator a release that refuses to install.
+
+The logic was run against four cases before being committed to a file nobody
+can execute locally: the complete set publishes; a missing leg refuses; **twelve
+files with one renamed refuses**, naming both the missing and the unexpected;
+and an unexpected extra warns without withholding a release that is otherwise
+complete.
+
+#### The names are a contract, and nothing type-checked it
+
+They live in three places — the workflow that builds them, the gate that
+requires them, and the two installers that download them — and D-098 is the
+record of what one-sided changes cost. `release_assets.rs` now asserts all
+three agree, in both directions: every built asset is required by the gate with
+its checksum, every name the gate requires is one that is built, and both
+installers ask for names the release publishes. Verified by renaming an asset
+in the workflow alone, where two of the three tests fail. It runs as its own CI
+step, because a failure means the next tag publishes something that cannot be
+installed.
+
+### D-126 — A file is measured before it is read · Accepted
+
+Raised 2026-08-30 by audit. Several reads pulled a whole file into memory with
+no idea how big it was. The one that matters is the narration script, and it is
+worth the number:
+
+```
+a 191 MB 001.txt
+  still validate  ->  607 MB resident, and "no problems"
+```
+
+Three copies — the `Vec<u8>`, the `String`, and the trimmed clone — and the
+verdict was that this is a **valid narrated scene**. D-095's refusal of a line
+no scene could hold is real, but it lives in the provider and does not run until
+render, so `validate` — whose entire promise is to say everything that is wrong
+before anything is rendered — said nothing.
+
+`MAX_SCRIPT_BYTES` is **derived, not chosen**, from limits that already exist:
+
+```text
+MAX_SCENE_SECONDS 3600 x SPEECH_CHARS_PER_SECOND 17.3 x 4 bytes/char = 249 120
+```
+
+rounded up to 256 KiB. A `.txt` past that is not a narration that happens to be
+too long, it is a file that landed in the folder by mistake. It lives in
+`spoonstill-core`, and the measurement it comes from lives in `spoonstill-tts`,
+which core cannot see — so a test asserts the cap stays **above** every
+speakable line and not absurdly above it. Same shape as D-114, and the same
+reason: a drift here fails quietly in the worse direction, refusing a script the
+provider would have spoken.
+
+Afterwards the same folder validates in **14 MB** and names the problem.
+
+`project.yaml` gained a plain 1 MiB ceiling, which is honestly labelled as a
+round number rather than a derivation — a settings file has no natural length,
+and the fixtures' are under 200 bytes.
+
+#### And one function existed twice
+
+`scene.rs` hashed a still with `std::fs::read` — the whole image — while
+`film.rs` had already written a streaming loop for the same job. Two
+implementations that must agree on a **cache key**: if they ever diverged,
+`still render` and `still render-scene` would key the same scene differently and
+neither would reuse the other's work. There is one now, in `spoonstill-media`,
+and it streams. Verified afterwards that a real project still reuses all ten of
+its segments and renders byte-identically.
+
+#### Not done
+
+The window's recent-projects and settings JSON are still read whole. They are
+files this program writes itself, in its own config directory, so the hostile
+input D-052 is about does not reach them the way it reaches a project folder.
+Recorded rather than silently skipped.
+
+### D-127 — The window's authority is the project it has open · Accepted
+
+Raised 2026-08-30 by audit, which was careful to say this is **not exploitable
+today** — the CSP is static, the frontend is local files, and there is no remote
+content. It is defence in depth, and both halves are places where a rule this
+codebase already wrote down was applied to some commands and not others.
+
+#### The grant did not match its own comment
+
+```rust
+// Thumbnails are real files, so the webview has to be allowed to read
+// them — and only them.
+let _ = app.asset_protocol_scope().allow_directory(&root, false);
+```
+
+`allow_directory` is every recording, every script, `removed/` and
+`.spoonstill/` besides — not "only them". It is now one `allow_file` per still
+actually shown, which is what the sentence always claimed.
+
+**The obvious fix is a trap, and it is worth writing down.** The audit suggested
+revoking the previous project's scope. Tauri's scope keeps an allow list and a
+*deny* list; `is_allowed` checks deny first and nothing removes from allow. So
+`forbid_directory` on a project the operator navigated away from would block it
+for the rest of the session, and reopening it would show a grid of broken
+thumbnails. Checked in `tauri-2.11.5/src/scope/fs.rs` rather than assumed. What
+is bounded instead is the *size* of each grant.
+
+#### The rule was written for two commands and needed to cover six
+
+`Session` carries this note, from D-086:
+
+> the frontend must never hand a path to a command that opens something.
+> `open_film` and `reveal_project` take no arguments at all.
+
+Meanwhile `set_narration`, `add_media`, `remove_scene`, `move_scene` and
+`preview_voice` took `root: String` straight from the webview — so the rule
+covered the two commands that *open a file* and not the four that **rearrange
+the operator's photographs**.
+
+They go through `project_root` now, which returns the session's own root. The
+page's value is **compared rather than ignored**, so a page that has drifted
+onto a stale project is told so instead of quietly rearranging the one that
+happens to be open. Canonical comparison, with a plain equality fallback, so
+`./x` and `/tmp/x` are the same project.
+
+#### Verification, and its limit
+
+The `State` parameter is injected by Tauri, not sent from JavaScript, so
+`app.js` needed no change — the pattern was already proven by `render_project`,
+which mixes `State<Active>` with page arguments. The window was built and
+launched on a real 10-scene project and opened clean with an empty log.
+
+**Clicking Remove inside the window is still not covered**, and that needs the
+GUI automation this project does not have. What replaces it is a contract test:
+every one of the five commands must still be invoked *with* a `root`, because
+Rust now compares it — and a page that stopped sending one would have every edit
+refused, silently, which is the failure mode `ui_contract.rs` exists for. A
+first attempt to check this with `grep` reported three of the five as broken;
+they are invoked through an `arrange` helper, and the test reads the call site
+properly.
+
+### D-128 — Windows is a different shell and a different PATH · Accepted
+
+Raised 2026-08-30 by audit. Two places where code written on macOS is wrong on
+the other platform D-071 says is in scope — and which nothing has ever been run
+on.
+
+#### A paste-ready command that does not paste
+
+`shell_quote` produced POSIX single quoting, `'...'` with `'\''` for an
+embedded quote. The audit is right that the *invocation* is safe — it is an
+argument vector, and `no_shell_strings.rs` enforces that structurally — this is
+only the form shown to a human. But that form exists for one purpose: D-016's
+"when a render fails at scene 147 the operator's first move is to run that exact
+command in a terminal". A line that does not paste fails at exactly that moment.
+
+PowerShell's single quotes are literal, which is right for a Windows path full
+of backslashes, but an embedded quote is escaped by **doubling** it. So
+`Dad's photos` — not an exotic filename — came out as `'Dad'\''s photos'`,
+which PowerShell will not parse.
+
+`posix_quote` and `windows_quote` now exist separately, selected by `cfg`, and
+**both are compiled and tested on every platform**. That is the point rather
+than a detail: a rule that only compiles on Windows is a rule nobody here
+checks, and the test asserts among other things that the two never agree on
+`Dad's photos`.
+
+`cmd.exe` is deliberately not served. It has no single quoting at all, so no one
+form can satisfy both shells; PowerShell is what the shipped installer is
+written in and what a modern Windows terminal opens.
+
+**The function had to be renamed.** `powershell_quote` tripped
+`no_shell_strings.rs`, whose denylist contains that word. That guard is a blunt
+source scan **on purpose** — its own header says so, because what it prevents is
+somebody adding a second way to spawn a process years from now. The right
+response to a false positive from a guard like that is to move, not to widen the
+guard. It is `windows_quote`, and the doc comment names the shell freely because
+`code_only` strips `//`-prefixed lines.
+
+#### `-like "*$InstallDir*"` is not a PATH lookup
+
+`install.ps1` decided whether its folder was already on PATH by substring. Two
+failures, and the first one is silent:
+
+```
+PATH contains …\spoonstill\bin-old
+InstallDir is  …\spoonstill\bin
+  -> "already on PATH"  -> the real folder is never added
+  -> `still` is not found after a successful install
+```
+
+And `-like` reads `[` and `]` in its pattern as a character class, so a user
+folder containing either would never match itself. PATH is a list, and it is
+split on `;`, trimmed, and compared entry by entry now.
+
+`Copy-Item … -Force` straight onto the live `still.exe` also truncates it first,
+so a copy that fails part-way leaves the operator with neither the build they
+had nor the one they asked for. Both installers stage beside and then replace —
+the same rule as D-119 and D-120.
+
+#### What was run, and what was not
+
+There is **no PowerShell on this machine**, so `install.ps1` is reviewed and not
+executed. Said plainly rather than implied. What was run: the Unix installer's
+staged replacement, where the old build keeps working while the new one is
+staged and then swaps in one step; and the PATH comparison as a shell stand-in
+for the same rule, which reproduces the `bin-old` false positive exactly. What
+guards the rest is a test asserting the two wrong shapes have not come back —
+the substring test and the in-place copy — because a file nothing can execute
+here is a file that otherwise rots unwatched.
+
+### D-129 — Eighteen warnings nobody read become one gate that fails · Accepted
+
+Raised 2026-08-30 by audit. Its numbers reproduce exactly: 516 crates, **zero
+vulnerabilities**, 18 warnings — 17 unmaintained and 1 unsound. The finding was
+not that any of them is dangerous; it was that nothing in this repository
+recorded having looked, and nothing would notice a nineteenth.
+
+#### The triage, which is the actual work
+
+The audit guessed "much of the GTK/glib group is Linux-only through Tauri". It
+is, and here it is per target, from
+`cargo tree --target <triple> -e normal -i <crate>`:
+
+| | macOS | Windows | Linux |
+|---|---|---|---|
+| gtk, glib, atk, gdk\* (11 crates, incl. the one **unsound**) | absent | absent | present |
+| proc-macro-error | absent | absent | present (build only) |
+| unic-\* (5 crates) | present | present | present |
+| ttf-parser | present | present | present |
+
+Spoonstill ships macOS and Windows and no Linux build — five `target:` entries
+in `release.yml`, none of them Linux. So **twelve of the eighteen, including the
+only unsound advisory, are not in anything an operator can download.** That is
+worth stating precisely rather than as a shrug: it is not that they do not
+matter, it is that they do not reach a shipped binary *today*, and the day a
+Linux target is added the file that says so is wrong until it is re-read.
+
+Six do ship. Five `unic-*` reach the **window only**, through
+`urlpattern -> tauri-utils`. The sixth is the one that describes a risk actually
+carried: **`ttf-parser`, through `fontdue`, in the CLI and the window, on every
+platform** — it draws every burned-in subtitle (D-106).
+
+And there is nothing to upgrade to. crates.io's newest `ttf-parser` on
+2026-08-30 is **0.25.1**, exactly what `Cargo.lock` holds: the crate is
+unmaintained *at its latest release*. So the remediations are replacing
+`fontdue` or vendoring, and neither is worth doing for an unmaintained flag with
+no advisory behind it. What would change that — a vulnerability against it, or
+`fontdue` itself going quiet — is what the review date exists to look for.
+
+#### The list is only worth having if something reads it
+
+`.cargo/audit.toml` carries the eighteen, each annotated with which shipped
+target it reaches, and a review date. CI runs `cargo audit --deny warnings` in
+its own job, because it is the one check here that can fail without a line of
+our code changing — an advisory published this morning breaks it, which is the
+point.
+
+That inverts what the audit found: eighteen warnings nobody reads become
+**zero** warnings and a build that stops on the nineteenth. Verified by removing
+`ttf-parser`'s entry, where `--deny warnings` exits 1 and names it.
+
+A test asserts the file keeps its shape — a review date, a bound, and a comment
+beside every silenced id. An unexplained `RUSTSEC-` line in that file is exactly
+what the file exists to prevent, and it also asserts CI still runs the thing,
+because an ignore list nothing consults is decoration.
+
+### D-130 — The caption rasterizer is measured, and then it is fast · Accepted
+
+Raised 2026-08-30 by audit, which asked for benchmarks rather than asserting a
+problem. The benchmark found one, and it is worse at 4K than anyone had guessed
+— which matters now, because D-114 has just made 4K the largest size this
+renders.
+
+Milliseconds per cue, release build, one line of the author's own narration:
+
+```
+             1080p   4K
+  classic     28.5   336.5
+  boxed        1.3     4.6
+  band         1.6     5.8
+  card        33.9   238.1
+  punch       41.3   604.3
+  minimal     14.4   107.2
+```
+
+**Six hundred milliseconds for one cue.** The two themes that cost nothing —
+`boxed` and `band` — are the two with no outline and no shadow, which names the
+culprits exactly. And `punch` going 41 ms to 604 ms is 14.6x for a 4x area:
+cost was growing with the **fourth power of the resolution**, because both hot
+loops scale with the frame *and* with a radius that is itself a fraction of the
+frame.
+
+#### Both were the same shape of mistake
+
+`Mask::dilate` built the disc as a list of ~pi*r^2 offsets and walked all of
+them for every pixel: `O(area * r^2)`. But a disc is the union of its rows, and
+each row is an interval — so dilating by a disc is the maximum over row offsets
+of a **one-dimensional** dilation, and a 1-D dilation is `O(1)` per pixel with a
+sliding-window maximum. `O(area * r)`.
+
+`Mask::box_blur` was already separable but re-added all `2r+1` samples per
+pixel. Consecutive windows differ by one sample at each end, so the sum carries
+across: `O(area)` per pass.
+
+Together:
+
+```
+             1080p          4K
+  classic     28.5 ->  7.6   336.5 ->  47.3    7.1x
+  card        33.9 ->  3.7   238.1 ->  19.1   12.5x
+  punch       41.3 ->  9.7   604.3 ->  61.7    9.8x
+  minimal     14.4 ->  1.8   107.2 ->   7.9   13.6x
+```
+
+At the design point — 500 scenes, two cues each, 4K, `punch` — that is ten
+minutes of drawing text becoming one.
+
+#### The output is identical, and that is the whole risk
+
+An optimisation to a rasterizer is worthless if it changes a pixel, and nothing
+about a shadow being one shade different would be noticed until two builds were
+compared. So it is asserted three ways rather than reasoned about:
+
+- The **original implementations are kept in the tests** as the definition of
+  right, and the new ones are asserted equal to them across a dot, the four
+  edges, a diagonal of greys, an empty band, and radii from 0 to 20 — including
+  radii wider than the mask, where a window runs entirely off the data.
+- The border rule is preserved deliberately: samples off the end count as zero
+  and the divisor stays `2r+1`, so shadows fade into the border exactly as
+  before. That is arguably not the *best* rule; changing it is a different
+  decision from this one.
+- End to end, a three-scene film rendered with `punch` — which uses both — is
+  **byte-identical** before and after, with only those two functions swapped.
+
+#### What the benchmark also settled
+
+`CLAUDE.md` recorded the subtitle cost at 1080p as "about 5%". Re-measured on
+the author's ten-scene project: `punch` 17.17 s against 16.79 s with subtitles
+off, and `card` 16.36 s against 17.32 s — the heaviest theme came out *faster*
+than none. **At 1080p the cost is now inside run-to-run noise**, and the honest
+statement is that it cannot be measured end to end rather than that it is some
+particular percentage. 4K is where the per-cue numbers still matter, and they
+are recorded above.
+
+`caption_bench.rs` is `#[ignore]`d, like the live TTS suite: it measures and
+prints a table rather than asserting a threshold, because a timing assertion on
+a shared CI runner is a test that fails for reasons that are not defects.
+
+### D-131 — Coverage went where the defects were · Accepted
+
+The last item of the 2026-08-30 audit, and the one that is a measurement rather
+than a defect. Re-run after everything above, with `cargo llvm-cov`:
+
+```
+                                    audit    now
+  TOTAL (lines)                    75.09%  77.35%
+  crates/spoonstill-app/film.rs    42.91%  61.05%
+  apps/desktop/src/main.rs         10.03%  18.10%
+  crates/spoonstill-media/concat.rs 35.66%  35.66%
+  crates/spoonstill-media/audio.rs  51.00%  51.00%
+```
+
+The shape of that is the point, and it is not a flattering-numbers exercise:
+**the two files that moved are the two this work touched, and the two that did
+not move are the two it never went near.** `film.rs` gained eighteen points
+because D-107 through D-110, D-112 and D-115 all live there; the window gained
+eight for the same reason. `concat.rs` and `media/audio.rs` are exactly where
+they were, and saying so is more useful than an average.
+
+`spoonstill-cli/main.rs` went **down**, 18.46% to 17.46%, because D-124 and
+D-109 added surface — `still licences` and `--keep-cache` — whose printing paths
+nothing exercises. A number that only moves upward is a number being managed.
+
+#### The eight tests the audit asked for exist
+
+It listed the cases that should have caught these defects in CI. All of them do
+now, and each was run against the unfixed code first:
+
+| asked for | where it lives |
+|---|---|
+| changed same-duration narration | gate 4b (D-107) |
+| output symlink escape | `film.rs` (D-112) |
+| duplicate convention files | `rows.rs` (D-111) |
+| case-only stem pairing | `rows.rs` (D-111) |
+| same cache key requested concurrently | gate 4c (D-108) |
+| forced lock ownership | gate 5 (D-113) |
+| close during render | `apps/desktop` (D-115) |
+| filesystem failure during renumber | `arrange.rs` (D-121) |
+| filesystem failure during copy | `ingest.rs` (D-120) |
+
+#### What is deliberately still open
+
+- **No coverage threshold in CI.** A number with a gate on it becomes a number
+  people satisfy; the audit's own advice was to spend effort on orchestration,
+  filesystem failure and shutdown rather than on more small pure-function tests,
+  and a percentage gate pushes the other way.
+- **The shell gates stay macOS-only.** Windows CI runs `cargo test --workspace`,
+  which includes the integration suites that render real media through real
+  FFmpeg — `segment_integrity`, `subtitles`, `motion_matrix`. What it does not
+  run is `m1-gates.sh` and `m2-gates.sh`, which want `shasum`, `seq -w` and
+  friends. That is the existing note in `ci.yml` — the Rust tests build their own
+  fixtures "precisely so that this job does not need bash" — and it is still the
+  right trade.
+- **No GUI automation**, so D-115's close-during-render handler and D-127's
+  bound commands are unit-tested at the seam and not clicked. Both decisions say
+  so in their own text.
+
 ---
 
 ## Reference repositories

@@ -627,13 +627,33 @@ fn validate(
 /// and `Automated-Video-Generator`'s path-keyed asset cache is the mistake this
 /// avoids. With BYOK a cache miss costs the operator money, so this is a
 /// correctness requirement rather than an optimisation.
-fn hash_file(path: &Path) -> Result<String, MediaError> {
-    let bytes = std::fs::read(path).map_err(|source| MediaError::Io {
+pub fn hash_file(path: &Path) -> Result<String, MediaError> {
+    use std::io::Read;
+
+    // Streamed, not read whole (D-126). A still can be a 400 MB scan, and
+    // there is no reason for the whole of one to be resident to hash it.
+    // `spoonstill-app` had already written this loop for the film path; having
+    // it twice meant two functions that must agree on the cache key, and only
+    // one of them bounded.
+    let mut file = std::fs::File::open(path).map_err(|source| MediaError::Io {
         doing: "reading",
         path: path.to_path_buf(),
         source,
     })?;
-    Ok(format!("{:016x}", spoonstill_core::hash::fnv1a(&bytes)))
+    let mut hash = spoonstill_core::hash::Fnv1a::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|source| MediaError::Io {
+            doing: "reading",
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if read == 0 {
+            break;
+        }
+        hash.write(&buffer[..read]);
+    }
+    Ok(format!("{:016x}", hash.finish()))
 }
 
 #[cfg(test)]

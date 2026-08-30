@@ -19,8 +19,12 @@ on:
         description: "Existing tag to build and publish, e.g. v0.1.0"
         required: true
 
+# Read by default; the three jobs that touch the release ask for `write`
+# themselves (D-125). Nothing here needs to write to the repository, and a
+# workflow-wide `contents: write` hands it to every step including the ones
+# that only compile.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,10 +35,12 @@ jobs:
   draft:
     name: draft release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           fetch-depth: 0
@@ -159,6 +165,8 @@ jobs:
   cli:
     name: still · ${{ matrix.target }}
     needs: draft
+    permissions:
+      contents: write
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -189,11 +197,11 @@ jobs:
             pretty: still-Windows
             smoke: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.draft.outputs.tag }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -208,7 +216,7 @@ jobs:
         shell: bash
         run: rustup target add ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
 
@@ -222,7 +230,15 @@ jobs:
           TAG: ${{ needs.draft.outputs.tag }}
         run: |
           name="${{ matrix.pretty }}.tar.gz"
-          tar -czf "$name" -C "target/${{ matrix.target }}/release" still
+          # The notices travel with the binary, because the font compiled into
+          # it is under a licence that asks each copy to carry it (D-124).
+          # Staged beside the binary so the archive has no directory in it —
+          # `tar -C` takes one directory, and an operator extracting into
+          # ~/Downloads should get two files, not a folder.
+          stage="$(mktemp -d)"
+          cp "target/${{ matrix.target }}/release/still" "$stage/"
+          cp THIRD-PARTY-NOTICES.md "$stage/"
+          tar -czf "$name" -C "$stage" still THIRD-PARTY-NOTICES.md
           shasum -a 256 "$name" > "$name.sha256"
           echo "ASSET=$name" >> "$GITHUB_ENV"
 
@@ -233,7 +249,9 @@ jobs:
           TAG: ${{ needs.draft.outputs.tag }}
         run: |
           $name = "${{ matrix.pretty }}.zip"
-          Compress-Archive -Path "target/${{ matrix.target }}/release/still.exe" -DestinationPath $name -Force
+          # See the unix step: the notices ship with the binary (D-124).
+          $files = @("target/${{ matrix.target }}/release/still.exe", "THIRD-PARTY-NOTICES.md")
+          Compress-Archive -Path $files -DestinationPath $name -Force
           $hash = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
           # Same two-field shape `shasum -c` writes, so one installer format serves both.
           "$hash  $name" | Out-File -FilePath "$name.sha256" -Encoding ascii -NoNewline
@@ -268,6 +286,8 @@ jobs:
   desktop:
     name: app · ${{ matrix.target }}
     needs: draft
+    permissions:
+      contents: write
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -285,11 +305,11 @@ jobs:
             rust-targets: x86_64-pc-windows-msvc
             bundles: nsis,msi
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.draft.outputs.tag }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           targets: ${{ matrix.rust-targets }}
 
@@ -304,18 +324,27 @@ jobs:
             rustup target add "$target"
           done
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: desktop-${{ matrix.target }}
 
       # There is no npm build step: `frontendDist` is a folder of static files.
-      - uses: cargo-bins/cargo-binstall@main
+      - uses: cargo-bins/cargo-binstall@75b4bfae1b2c753a6806bbce6e6cb89b602de33c # v1.22.0
       - name: Install the Tauri CLI
         # `-y` *is* `--no-confirm`; binstall rejects the pair as one argument twice.
-        run: cargo binstall --no-confirm tauri-cli --version '^2'
+        # An exact version, not a range (D-125). `^2` resolves at release
+        # time, so two tags cut a week apart could bundle with two different
+        # CLIs and nothing would record which. 2.11.4 is the current stable and
+        # matches the `tauri` crate `Cargo.lock` pins at 2.11.5.
+        run: cargo binstall --no-confirm tauri-cli --version '=2.11.4'
 
       - name: Bundle
-        run: cargo tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+        # `--locked` for the same reason the CLI job has it: a release is built
+        # from the dependency versions that were tested, not from whatever
+        # resolved this morning (D-125).
+        run: >
+          cargo tauri build --target ${{ matrix.target }}
+          --bundles ${{ matrix.bundles }} -- --locked
         working-directory: apps/desktop
 
       - name: Collect and checksum
@@ -348,18 +377,64 @@ jobs:
   publish:
     name: publish
     needs: [draft, cli, desktop]
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Undraft
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.draft.outputs.tag }}
         run: |
-          # Six CLI files, one universal .dmg and the two Windows installers,
-          # each with a checksum: twelve. Anything less and the installers,
-          # which verify before they install, would fail on a live release.
-          count=$(gh release view "$TAG" --json assets --jq '.assets | length')
-          echo "$count assets attached"
-          [ "$count" -ge 12 ] || { echo "::error::only $count assets — not publishing"; exit 1; }
+          set -euo pipefail
+
+          # The exact set, not a count (D-125). A count of twelve is satisfied
+          # by twelve *wrong* files — a leg that uploaded a stale asset from a
+          # re-run, or a rename that D-098 warns turns every installer into a
+          # 404. These names are the contract `install.sh` and `install.ps1`
+          # construct, and a test in the workspace asserts they still agree.
+          expected=$(cat <<'NAMES'
+          spoonstill-Windows-Installer.exe
+          spoonstill-Windows-Installer.exe.sha256
+          spoonstill-Windows-Installer.msi
+          spoonstill-Windows-Installer.msi.sha256
+          spoonstill-macOS.dmg
+          spoonstill-macOS.dmg.sha256
+          still-Windows.zip
+          still-Windows.zip.sha256
+          still-macOS-AppleSilicon.tar.gz
+          still-macOS-AppleSilicon.tar.gz.sha256
+          still-macOS-Intel.tar.gz
+          still-macOS-Intel.tar.gz.sha256
+          NAMES
+          )
+          expected=$(echo "$expected" | sed 's/^ *//' | grep . | sort)
+
+          actual=$(gh release view "$TAG" --json assets --jq '.assets[].name' | sort)
+
+          missing=$(comm -23 <(echo "$expected") <(echo "$actual") || true)
+          extra=$(comm -13 <(echo "$expected") <(echo "$actual") || true)
+
+          if [ -n "$missing" ]; then
+            echo "::error::these assets are missing:"; echo "$missing"
+          fi
+          if [ -n "$extra" ]; then
+            # Loud, not fatal: an asset nobody expected is a mistake worth
+            # seeing, but it is not a reason to withhold a complete release.
+            echo "::warning::these assets were not expected:"; echo "$extra"
+          fi
+          [ -z "$missing" ] || exit 1
+
+          # Every checksum verified against the file it names, before anyone can
+          # download either. The installers check this too — and finding out
+          # here costs a re-run, while finding out there costs an operator a
+          # release that refuses to install.
+          work=$(mktemp -d); cd "$work"
+          gh release download "$TAG" --clobber
+          for sum in *.sha256; do
+            sha256sum -c "$sum"
+          done
+
+          echo "12 assets, every checksum verified"
           gh release edit "$TAG" --draft=false --latest

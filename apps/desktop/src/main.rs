@@ -479,6 +479,82 @@ enum ProgressView {
 #[derive(Default)]
 struct Active(Mutex<Option<Cancel>>);
 
+/// Holds the window's one render slot for as long as the render runs (D-115).
+///
+/// The slot is what makes `cancel_render` able to reach a running render and
+/// what stops a second one starting. Releasing it was a statement placed after
+/// `handle.await?` — so an `Err` from the join, which is what a **panic** in
+/// the render thread produces, returned past it and left the slot claimed
+/// forever. The window then refused every later render with "a render is
+/// already running in this window", and only restarting the app cleared it.
+///
+/// A guard cannot be skipped by an early return, and runs while a panic
+/// unwinds.
+struct ActiveRender<'a>(&'a Active);
+
+impl<'a> ActiveRender<'a> {
+    fn claim(active: &'a Active, cancel: Cancel) -> Result<Self, String> {
+        let mut slot = active
+            .0
+            .lock()
+            .map_err(|_| "the render state is poisoned")?;
+        if slot.is_some() {
+            return Err("a render is already running in this window".to_owned());
+        }
+        *slot = Some(cancel);
+        drop(slot);
+        Ok(ActiveRender(active))
+    }
+}
+
+impl Drop for ActiveRender<'_> {
+    fn drop(&mut self) {
+        // A poisoned mutex is recovered from rather than propagated: leaving
+        // the slot claimed is the failure this type exists to prevent, and
+        // there is no invariant in an `Option<Cancel>` a panic could break.
+        let mut slot = self
+            .0
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = None;
+    }
+}
+
+/// The project this window is open on, and a refusal if the page named another
+/// one (D-127).
+///
+/// `open_film` and `reveal_project` take no path at all, for a reason written
+/// down beside `Session`: the frontend must never hand a path to a command that
+/// acts on it. The commands that *write* — remove a scene, move one, edit a
+/// narration, copy media in — were taking `root: String` straight from the
+/// webview, so the rule was applied to the two that open a file and not to the
+/// four that rearrange the operator's folder.
+///
+/// The supplied value is still compared rather than ignored, so a page that has
+/// drifted onto a stale project is told so instead of silently rearranging the
+/// one that happens to be open.
+fn project_root(session: &Session, claimed: &str) -> Result<PathBuf, String> {
+    let open = session
+        .root
+        .lock()
+        .map_err(|_| "the window's project state is poisoned")?
+        .clone()
+        .ok_or("no project is open in this window")?;
+
+    let same = std::fs::canonicalize(&open)
+        .ok()
+        .zip(std::fs::canonicalize(claimed).ok())
+        .is_some_and(|(a, b)| a == b)
+        || open.as_path() == std::path::Path::new(claimed);
+
+    if same {
+        Ok(open)
+    } else {
+        Err("that is not the project this window has open".to_owned())
+    }
+}
+
 /// What the window is looking at, remembered on the Rust side.
 ///
 /// Two things live here for one reason: **the frontend must never hand a path
@@ -624,11 +700,25 @@ async fn validate_project(
     .map_err(|e| format!("the validation thread failed: {e}"))??;
 
     // Thumbnails are real files, so the webview has to be allowed to read
-    // them — and only them. The grant is per project and happens here, when
-    // the operator has just chosen the folder, rather than as a wildcard in
-    // the capability file.
+    // them — **and only them** (D-127). That sentence was already here; the
+    // code under it granted the whole folder with `allow_directory`, which is
+    // every recording, every script, `removed/` and `.spoonstill/` besides.
+    // Granting the stills one at a time is what the comment always claimed.
+    //
+    // Additive on purpose, and there is no undoing it: Tauri's scope has an
+    // allow list and a *deny* list, deny wins, and nothing removes from allow —
+    // so `forbid_directory` on a project the operator navigated away from would
+    // block it for the rest of the session, and reopening it would show a grid
+    // of broken thumbnails. What is bounded instead is the *size* of the grant:
+    // the stills actually displayed, rather than everything beside them.
+    let scope = app.asset_protocol_scope();
+    for scene in &view.scenes {
+        if !scene.image_path.is_empty() {
+            let _ = scope.allow_file(&scene.image_path);
+        }
+    }
+
     let root = PathBuf::from(&view.root);
-    let _ = app.asset_protocol_scope().allow_directory(&root, false);
     remember(&app, &root);
     if let Ok(mut slot) = session.root.lock() {
         *slot = Some(root);
@@ -648,7 +738,13 @@ async fn validate_project(
 /// window that quietly wrote a `.txt` beside it would create exactly the
 /// two-sources-disagree conflict D-056 rejects.
 #[tauri::command]
-async fn set_narration(root: String, scene: String, text: String) -> Result<(), String> {
+async fn set_narration(
+    session: State<'_, Session>,
+    root: String,
+    scene: String,
+    text: String,
+) -> Result<(), String> {
+    let root = project_root(&session, &root)?;
     // The id came from a row we produced, but it reaches us as a string from a
     // webview, so it is checked like any other untrusted input (D-052, D-054).
     if scene.is_empty()
@@ -731,7 +827,12 @@ async fn create_project(path: String) -> Result<String, String> {
 /// does. The report comes back as rows because the operator is entitled to see
 /// exactly which of their files became which scene.
 #[tauri::command]
-async fn add_media(root: String, files: Vec<String>) -> Result<IngestView, String> {
+async fn add_media(
+    session: State<'_, Session>,
+    root: String,
+    files: Vec<String>,
+) -> Result<IngestView, String> {
+    let root = project_root(&session, &root)?;
     tauri::async_runtime::spawn_blocking(move || {
         let sources: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
         let report = spoonstill_app::add_media(std::path::Path::new(&root), &sources)
@@ -772,7 +873,12 @@ async fn add_media(root: String, files: Vec<String>) -> Result<IngestView, Strin
 /// them, and the window says so, because "delete" in a tool that owns the
 /// operator's only copy of a photograph has to be a promise it can keep.
 #[tauri::command]
-async fn remove_scene(root: String, scene: String) -> Result<String, String> {
+async fn remove_scene(
+    session: State<'_, Session>,
+    root: String,
+    scene: String,
+) -> Result<String, String> {
+    let root = project_root(&session, &root)?;
     tauri::async_runtime::spawn_blocking(move || {
         let removed = spoonstill_app::arrange::remove(std::path::Path::new(&root), &scene)
             .map_err(|e| e.to_string())?;
@@ -793,7 +899,13 @@ async fn remove_scene(root: String, scene: String) -> Result<String, String> {
 /// `to` counts from 1 and is clamped, so the last row's "move down" is a no-op
 /// rather than an error.
 #[tauri::command]
-async fn move_scene(root: String, scene: String, to: usize) -> Result<String, String> {
+async fn move_scene(
+    session: State<'_, Session>,
+    root: String,
+    scene: String,
+    to: usize,
+) -> Result<String, String> {
+    let root = project_root(&session, &root)?;
     tauri::async_runtime::spawn_blocking(move || {
         let after = spoonstill_app::arrange::move_to(std::path::Path::new(&root), &scene, to)
             .map_err(|e| e.to_string())?;
@@ -887,12 +999,16 @@ fn resolve_output(dir: String, name: String) -> Result<String, String> {
 /// own state directory, not a path the frontend named.
 #[tauri::command]
 async fn preview_voice(
+    session: State<'_, Session>,
     root: String,
     provider: String,
     voice: String,
     text: String,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
+    // An audition writes into the named project's audio cache, so it is bound
+    // to the open project like the commands that rearrange it (D-127).
+    let root = project_root(&session, &root)?;
     let spoken = tauri::async_runtime::spawn_blocking(move || {
         let line = if text.trim().is_empty() {
             spoonstill_app::audio::PREVIEW_LINE
@@ -1052,16 +1168,11 @@ async fn render_project(
     };
 
     let cancel = Cancel::new();
-    {
-        let mut slot = active
-            .0
-            .lock()
-            .map_err(|_| "the render state is poisoned")?;
-        if slot.is_some() {
-            return Err("a render is already running in this window".to_owned());
-        }
-        *slot = Some(cancel.clone());
-    }
+    // Claimed through a guard, so the slot is released on **every** exit path
+    // (D-115). It used to be cleared by a line after `handle.await?`, which the
+    // `?` skips: one panicked render and the window believed a render was
+    // running for the rest of the session, refusing every later one.
+    let _claim = ActiveRender::claim(&active, cancel.clone())?;
 
     let handle = tauri::async_runtime::spawn_blocking({
         let cancel = cancel.clone();
@@ -1100,9 +1211,6 @@ async fn render_project(
         .await
         .map_err(|e| format!("the render thread failed: {e}"))?;
 
-    if let Ok(mut slot) = active.0.lock() {
-        *slot = None;
-    }
     if let (Ok(film), Ok(mut slot)) = (&result, session.film.lock()) {
         *slot = Some(PathBuf::from(&film.path));
     }
@@ -1277,6 +1385,29 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .manage(Active::default())
         .manage(Session::default())
+        // Closing the window during a render asks it to stop, the same way the
+        // Cancel button does (D-115). Without this the process simply ended
+        // mid-encode: the CLI has had a signal ladder since D-045 and the
+        // window had nothing, so every scene in flight left a `.partial` file
+        // behind and the operator was told nothing.
+        //
+        // `request()` is cooperative and returns immediately — the pool stops
+        // admitting work and each running FFmpeg is asked, then forced. The
+        // close is **not** prevented: a window that refuses to shut is a worse
+        // failure than a scene that has to be re-encoded, and every artifact is
+        // written beside-then-renamed (D-042), so there is nothing half-written
+        // for a caller to find.
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                use tauri::Manager;
+                if let Some(active) = window.try_state::<Active>()
+                    && let Ok(slot) = active.0.lock()
+                    && let Some(cancel) = slot.as_ref()
+                {
+                    cancel.request();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             initial_project,
             recent_projects,
@@ -1390,5 +1521,117 @@ mod tests {
         let error =
             resolve_output(String::new(), "out.mp4".to_owned()).expect_err("no folder was chosen");
         assert!(error.contains("choose a folder"), "{error}");
+    }
+
+    /// D-115. The window's render slot is released on every exit path.
+    ///
+    /// It used to be released by a statement after `handle.await?`, and a
+    /// panic in the render thread makes that `?` return — so the slot stayed
+    /// claimed and the window refused every later render with "a render is
+    /// already running in this window" until the app was restarted.
+    #[test]
+    fn the_render_slot_is_released_even_when_the_render_panics() {
+        let active = Active::default();
+
+        // Held: a second claim is refused, which is the behaviour that must
+        // survive the fix rather than be traded away for it.
+        let first = ActiveRender::claim(&active, Cancel::new()).expect("claims");
+        assert!(
+            ActiveRender::claim(&active, Cancel::new()).is_err(),
+            "two renders at once in one window"
+        );
+        drop(first);
+        assert!(active.0.lock().unwrap().is_none(), "not released on drop");
+
+        // Unwound past: the guard still runs.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _claim = ActiveRender::claim(&active, Cancel::new()).expect("claims");
+            panic!("the render thread died");
+        }));
+        assert!(panicked.is_err(), "the panic should have propagated");
+        assert!(
+            active.0.lock().unwrap().is_none(),
+            "a panicked render left the window believing one was still running"
+        );
+
+        // So the next render can start, which is the whole point.
+        let after = ActiveRender::claim(&active, Cancel::new()).expect("claims after a panic");
+        drop(after);
+    }
+
+    /// Closing the window during a render asks it to stop (D-115).
+    ///
+    /// The handler itself needs a running Tauri window, so what is asserted
+    /// here is the part that is ours: the slot a `CloseRequested` reaches
+    /// carries a live `Cancel`, and requesting it is observable. Without the
+    /// slot holding a cancel there would be nothing for the handler to call.
+    #[test]
+    fn an_active_render_can_be_cancelled_through_the_slot() {
+        let active = Active::default();
+        let cancel = Cancel::new();
+        let _claim = ActiveRender::claim(&active, cancel.clone()).expect("claims");
+
+        assert!(!cancel.is_requested(), "nothing has asked it to stop yet");
+        // Exactly what the close handler and `cancel_render` both do.
+        if let Some(held) = active.0.lock().unwrap().as_ref() {
+            held.request();
+        }
+        assert!(
+            cancel.is_requested(),
+            "the cancel in the slot is not the one the render is watching"
+        );
+    }
+
+    /// D-127. A command that writes acts on the project this window has open,
+    /// not on a path the page named.
+    ///
+    /// `open_film` and `reveal_project` have taken no path since D-086, for the
+    /// reason written beside `Session`. The four commands that *rearrange the
+    /// operator's folder* — remove, move, edit a narration, copy media in —
+    /// took `root: String` straight from the webview, so the rule covered the
+    /// two that open a file and not the ones that move photographs.
+    #[test]
+    fn a_command_that_writes_is_bound_to_the_project_that_is_open() {
+        let dir = std::env::temp_dir().join(format!("spoonstill-bound-{}", std::process::id()));
+        let other = dir.join("somebody-elses-project");
+        let open = dir.join("the-open-project");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&other).expect("scratch");
+        std::fs::create_dir_all(&open).expect("scratch");
+
+        let session = Session::default();
+
+        // Nothing open: every write is refused, rather than acting on whatever
+        // the page happened to send.
+        let error =
+            project_root(&session, &open.display().to_string()).expect_err("no project is open");
+        assert!(error.contains("no project is open"), "{error}");
+
+        *session.root.lock().unwrap() = Some(open.clone());
+
+        // The project that is open, named the way the page names it.
+        assert_eq!(
+            project_root(&session, &open.display().to_string()).expect("the open project"),
+            open
+        );
+
+        // Any other folder is refused, which is the whole point.
+        let error = project_root(&session, &other.display().to_string())
+            .expect_err("another project must be refused");
+        assert!(
+            error.contains("not the project this window has open"),
+            "{error}"
+        );
+
+        // And a path that resolves to the same folder by another spelling is
+        // the same project — a page is not wrong for saying `./x` where Rust
+        // remembered `/tmp/x`.
+        let spelled = open.join("..").join("the-open-project");
+        assert_eq!(
+            project_root(&session, &spelled.display().to_string()).expect("same folder"),
+            open
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

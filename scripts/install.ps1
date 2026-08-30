@@ -74,7 +74,13 @@ try {
   if (-not (Test-Path $exe)) { Die "The archive did not contain still.exe." }
 
   New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-  Copy-Item $exe (Join-Path $InstallDir 'still.exe') -Force
+  # Beside, then over (D-128, and the same rule as D-119/D-120). `Copy-Item`
+  # straight onto the live `still.exe` truncates it first, so a copy that fails
+  # part-way leaves the operator with neither the old build nor the new one.
+  $final = Join-Path $InstallDir 'still.exe'
+  $staged = Join-Path $InstallDir 'still.exe.new'
+  Copy-Item $exe $staged -Force
+  Move-Item -Path $staged -Destination $final -Force
   # Unsigned until M5: clear the download mark so the first run is not a dialog
   # the operator has no way to interpret.
   Unblock-File (Join-Path $InstallDir 'still.exe')
@@ -86,8 +92,20 @@ try {
 
 # --- 3. PATH -----------------------------------------------------------------
 
+# PATH is a list, so it is compared as one (D-128). `-like "*$InstallDir*"` was
+# wrong twice: a substring match means an unrelated
+# `...\spoonstill\bin-old` entry counts as this one and the real folder is
+# never added, and `-like` reads `[` and `]` in the pattern as a character
+# class, so a user folder containing either would never match itself.
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if ($userPath -notlike "*$InstallDir*") {
+$onPath = $false
+if (-not [string]::IsNullOrEmpty($userPath)) {
+  foreach ($entry in $userPath.Split(';')) {
+    $trimmed = $entry.Trim().TrimEnd('\')
+    if ($trimmed -and ($trimmed -eq $InstallDir.TrimEnd('\'))) { $onPath = $true; break }
+  }
+}
+if (-not $onPath) {
   Step "Adding $InstallDir to your PATH"
   $joined = if ([string]::IsNullOrEmpty($userPath)) { $InstallDir } else { "$userPath;$InstallDir" }
   [Environment]::SetEnvironmentVariable('Path', $joined, 'User')

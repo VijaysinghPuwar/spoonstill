@@ -71,12 +71,26 @@ pub fn fnv1a(bytes: &[u8]) -> u64 {
     hash.finish()
 }
 
-/// Hash several fields as one value, with an unambiguous separator.
+/// Hash several fields as one value, separated by `0x1f`.
 ///
 /// The separator matters. Without it `("ab", "c")` and `("a", "bc")` hash
 /// identically, which would let two different scenes share a motion seed and a
-/// cache key. `0x1f` (ASCII unit separator) cannot occur in a path, a project
-/// id, or a hex digest, so it cannot be forged by the field contents.
+/// cache key.
+///
+/// # This function has a precondition
+///
+/// **No field may contain the byte `0x1f`.** A field that does is
+/// indistinguishable from two fields, which is the same collision the
+/// separator exists to prevent. That held for every original caller — paths,
+/// project ids, hex digests — and it is exactly the kind of assumption a later
+/// caller breaks without noticing, because nothing here can check it and the
+/// result is a silent cache hit rather than an error. D-118 is what that looked
+/// like: D-106 began feeding this function **subtitle text**, which is a `.txt`
+/// an operator wrote, and `0x1f` is not whitespace so it survives normalization
+/// intact.
+///
+/// If a field can hold arbitrary bytes, use [`fnv1a_prefixed`] instead. It has
+/// no precondition at all.
 #[must_use]
 pub fn fnv1a_fields(fields: &[&[u8]]) -> u64 {
     let mut hash = OFFSET_BASIS;
@@ -91,6 +105,25 @@ pub fn fnv1a_fields(fields: &[&[u8]]) -> u64 {
         }
     }
     hash
+}
+
+/// Hash several fields as one value, each prefixed with its own length.
+///
+/// The variant with **no precondition** (D-118): a field may hold any bytes at
+/// all, including `0x1f`, and still cannot be confused with a field boundary,
+/// because the boundary is stated as a count rather than looked for in the
+/// data. Use this wherever a field can be an operator's own text.
+///
+/// The cost over [`fnv1a_fields`] is eight bytes hashed per field, which at
+/// n=500 is not measurable against reading the images those fields describe.
+#[must_use]
+pub fn fnv1a_prefixed(fields: &[&[u8]]) -> u64 {
+    let mut hash = Fnv1a::new();
+    for field in fields {
+        hash.write(&(field.len() as u64).to_be_bytes());
+        hash.write(field);
+    }
+    hash.finish()
 }
 
 #[cfg(test)]
@@ -142,5 +175,31 @@ mod tests {
             fnv1a_fields(&[b"proj", b"7"]),
             fnv1a_fields(&[b"proj", b"7"])
         );
+    }
+
+    /// D-118. The prefixed variant has no precondition: a field may contain
+    /// the separator byte the other variant relies on, and still cannot be
+    /// confused with a boundary.
+    #[test]
+    fn a_prefixed_field_may_contain_anything_including_the_separator() {
+        // The collision `fnv1a_fields` is documented to be unable to survive.
+        assert_eq!(
+            fnv1a_fields(&[b"a\x1fb"]),
+            fnv1a_fields(&[b"a", b"b"]),
+            "this is the precondition, stated as a fact so it cannot be \
+             forgotten: one field holding 0x1f *is* two fields to this function"
+        );
+
+        // And the one that has no such hole.
+        assert_ne!(fnv1a_prefixed(&[b"a\x1fb"]), fnv1a_prefixed(&[b"a", b"b"]));
+        assert_ne!(
+            fnv1a_prefixed(&[b"ab", b"c"]),
+            fnv1a_prefixed(&[b"a", b"bc"])
+        );
+        assert_ne!(fnv1a_prefixed(&[b"", b"a"]), fnv1a_prefixed(&[b"a", b""]));
+        assert_ne!(fnv1a_prefixed(&[b"a"]), fnv1a_prefixed(&[b"a", b""]));
+
+        // Stable across calls, or nothing is ever reused.
+        assert_eq!(fnv1a_prefixed(&[b"a", b"b"]), fnv1a_prefixed(&[b"a", b"b"]));
     }
 }

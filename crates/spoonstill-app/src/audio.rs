@@ -46,8 +46,10 @@
 //! (D-021) — the artifact is probed on every run, which is what catches a
 //! half-written or hand-corrupted entry.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use spoonstill_core::diagnostics::Diagnostics;
 use spoonstill_core::hash::{Fnv1a, fnv1a_fields};
@@ -111,6 +113,12 @@ const HASH_CHUNK: usize = 64 * 1024;
 pub struct ResolvedAudio {
     /// The normalized artifact, in the cache.
     pub path: PathBuf,
+    /// The content key of that artifact — the cache name it was stored under.
+    ///
+    /// This is the narration's *identity*, and it is what a segment key needs
+    /// (D-107). Two recordings of the same length are not the same narration,
+    /// and the duration alone cannot tell them apart.
+    pub key: u64,
     /// Its duration in seconds, measured on that artifact (D-021).
     pub duration: f64,
     /// Whether the artifact was already there (D-043's whole point).
@@ -421,19 +429,25 @@ pub fn resolve(
 
     let path = cache.path_for(kind, key);
 
-    // A hit is measured, not assumed. `measure` re-asserts the normalization
-    // profile too, so an artifact from an older profile — or a truncated one —
-    // is regenerated rather than believed.
-    if path.exists() {
-        match audio::measure(tools, &path) {
-            Ok(measured) => return finish(kind, measured.path, measured.duration, true),
-            Err(_) => {
-                // Unusable: remove it and make it again. Not an error yet —
-                // the operator does not need to know that a cache entry was
-                // bad, only that their scene rendered.
-                let _ = std::fs::remove_file(&path);
-            }
-        }
+    // The common case, and it takes no lock: the artifact is already there.
+    // A project re-rendered after one edit answers here for every other scene.
+    if let Some(hit) = cached(tools, kind, key, &path, false) {
+        return hit;
+    }
+
+    // A miss. From here the work is done **once per key** (D-108): the scenes
+    // that share this narration queue behind whoever got here first rather
+    // than each speaking the same line to the same provider.
+    let lock = key_lock(key);
+    let _held = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    // Asked again, now that this thread is the only writer. Whoever held the
+    // lock before us has finished, so this is the hit their work produced —
+    // and it is reported as `reused`, which is true: this run did not make it.
+    if let Some(hit) = cached(tools, kind, key, &path, true) {
+        return hit;
     }
 
     let made = match work {
@@ -481,7 +495,7 @@ pub fn resolve(
             audio::normalize(tools, &spoken, &path, &Shape::spoken(policy.trim), log)?
         }
     };
-    finish(kind, made.path, made.duration, false)
+    finish(kind, key, made.path, made.duration, false)
 }
 
 /// What resolving this source will take, once the cache has been asked.
@@ -508,8 +522,79 @@ enum Work<'a> {
     },
 }
 
+/// One lock per cache key, so identical work is done once (D-108).
+///
+/// The audio pool runs `audio_jobs` scenes at a time and a project routinely
+/// has many scenes resolving to **one** cache entry — the same recording used
+/// throughout, or one line repeated. Every one of those workers used to run
+/// `path.exists()`, see nothing, and do the whole job: at `--audio-jobs 8`,
+/// sixteen scenes sharing one line called the provider **eight times** for one
+/// artifact. That is eight times the network today and, once a metered
+/// provider lands (D-014), eight times the money.
+///
+/// In-process is the right scope. An [`AudioCache`] lives under one project's
+/// `.spoonstill/` and two renders of one project are already refused by
+/// `render.lock`, so the only writers that can collide are threads of this
+/// process.
+fn key_lock(key: u64) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<u64, Arc<Mutex<()>>>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+
+    // Poisoning is recovered from rather than propagated: the guarded value is
+    // `()`. There is no in-memory invariant a panicking worker could have left
+    // broken — the disk is re-checked under the lock by whoever gets it next.
+    let mut map = locks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    // Bounded: entries nobody is holding are dropped once the map is large
+    // enough to be worth sweeping. At n=500 this never fires; over a long
+    // desktop session across many projects it keeps the map the size of the
+    // work actually in flight.
+    if map.len() > 1024 {
+        map.retain(|_, held| Arc::strong_count(held) > 1);
+    }
+
+    Arc::clone(map.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
+}
+
+/// The cache entry for `key`, if there is a usable one.
+///
+/// A hit is measured, not assumed. `measure` re-asserts the normalization
+/// profile too, so an artifact from an older profile — or a truncated one — is
+/// reported as a miss rather than believed.
+///
+/// `evict` is false for the unlocked look and true for the one under the key's
+/// lock, and the difference matters: an unmeasurable file may be one another
+/// worker is in the middle of writing, and deleting it there would be this
+/// function causing the corruption it exists to detect. Under the lock nobody
+/// else is writing, so a bad entry is genuinely bad and is removed.
+fn cached(
+    tools: &Tools,
+    kind: &'static str,
+    key: u64,
+    path: &Path,
+    evict: bool,
+) -> Option<Result<ResolvedAudio, AudioError>> {
+    if !path.exists() {
+        return None;
+    }
+    match audio::measure(tools, path) {
+        Ok(measured) => Some(finish(kind, key, measured.path, measured.duration, true)),
+        Err(_) => {
+            if evict {
+                // The operator does not need to know that a cache entry was
+                // bad, only that their scene rendered.
+                let _ = std::fs::remove_file(path);
+            }
+            None
+        }
+    }
+}
+
 fn finish(
     kind: &'static str,
+    key: u64,
     path: PathBuf,
     duration: f64,
     reused: bool,
@@ -519,6 +604,7 @@ fn finish(
     }
     Ok(ResolvedAudio {
         path,
+        key,
         duration,
         reused,
         kind,
@@ -898,5 +984,65 @@ mod tests {
         )
         .expect_err("no such provider");
         assert!(error.to_string().len() < long.len(), "{error}");
+    }
+
+    /// D-108. The primitive itself: one lock per key, shared between threads.
+    ///
+    /// The gate proves the wiring end to end; this proves the thing the wiring
+    /// depends on, and it is the part that would break silently if the map
+    /// ever handed out a fresh lock per call.
+    #[test]
+    fn one_key_is_one_lock_and_two_keys_are_two() {
+        let a = key_lock(0xfeed_face);
+        let b = key_lock(0xfeed_face);
+        let c = key_lock(0xdead_beef);
+
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "the same key handed out two different locks, so two workers \
+             holding 'the' lock would both be inside the critical section"
+        );
+        assert!(
+            !Arc::ptr_eq(&a, &c),
+            "two keys share one lock — unrelated narrations would serialize"
+        );
+    }
+
+    /// The behaviour the provider bill depends on: N threads racing for one
+    /// key run the work once. Deliberately a bare counter rather than real
+    /// audio, so it runs offline and cannot be slow enough to pass by luck.
+    #[test]
+    fn racing_threads_do_the_work_for_one_key_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let done = AtomicUsize::new(0);
+        let ran = AtomicUsize::new(0);
+        let key = 0x0051_971e_f117_u64;
+
+        std::thread::scope(|scope| {
+            for _ in 0..16 {
+                scope.spawn(|| {
+                    // The shape of `resolve`: look, and if there is nothing,
+                    // take the key's lock and look again before working.
+                    if done.load(Ordering::SeqCst) == 0 {
+                        let lock = key_lock(key);
+                        let _held = lock
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if done.load(Ordering::SeqCst) == 0 {
+                            ran.fetch_add(1, Ordering::SeqCst);
+                            done.store(1, Ordering::SeqCst);
+                        }
+                    }
+                });
+            }
+        });
+
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            1,
+            "sixteen workers did one job {} times",
+            ran.load(Ordering::SeqCst)
+        );
     }
 }

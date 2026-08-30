@@ -254,7 +254,10 @@ impl std::error::Error for ImportError {
 
 /// `std::fs::canonicalize`, which is the one thing `spoonstill-core` cannot do
 /// for itself (D-010, D-054).
-struct StdFs;
+///
+/// Visible to the crate because the render destination is held to the same
+/// containment rule as every input path, by the same code (D-112).
+pub(crate) struct StdFs;
 
 impl RealPath for StdFs {
     fn real_path(&self, path: &Path) -> Option<PathBuf> {

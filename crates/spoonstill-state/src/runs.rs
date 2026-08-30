@@ -112,32 +112,68 @@ impl ActivityLog {
         &self.path
     }
 
+    /// Append one row, under the file's own lock (D-122).
+    ///
+    /// This file is **machine-wide**, so its writers are different processes
+    /// rendering different projects — the one case a per-project lock cannot
+    /// cover. Without a lock the three steps below interleave, and they did:
+    /// four concurrent renders into a fresh log produced **three header lines**,
+    /// two of them welded onto other rows —
+    /// `…,folder"2026-08-30T05:45:02.056Z","info",…` and
+    /// `…,folderwhen,level,scope,…` — a file no spreadsheet can read.
+    ///
+    /// Three changes, and each removes one of the ways that happened:
+    ///
+    /// - **The lock**, held across deciding and writing.
+    /// - **"Fresh" is the locked file's length**, not `path.exists()`. That was
+    ///   a check against one fact and an act on another, and it is also more
+    ///   correct: a file that exists but is empty needs a header too.
+    /// - **One `write_all`.** The header used to be three separate writes, so
+    ///   another process could land between the header and its newline.
+    ///
+    /// Still silent on failure, by design: a render must never fail because a
+    /// spreadsheet could not be written.
     fn append_line(&self, line: &str) {
-        self.roll_if_large();
-        let fresh = !self.path.exists();
-        let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-        else {
-            return;
-        };
-        if fresh {
-            let _ = file.write_all(HEADER.as_bytes());
-            let _ = file.write_all(b"\n");
-        }
-        let _ = file.write_all(line.as_bytes());
-    }
+        // Twice at most: once to discover the file is due to roll, once to
+        // write into the fresh one it becomes.
+        for _ in 0..2 {
+            let Ok(file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+            else {
+                return;
+            };
+            // Blocking: a log line is worth waiting a moment for, and the
+            // alternative is dropping it. A poisoned or unsupported lock is not
+            // a reason to lose the row, so failure here falls through to the
+            // write rather than returning.
+            let locked = file.lock().is_ok();
 
-    fn roll_if_large(&self) {
-        let Ok(meta) = std::fs::metadata(&self.path) else {
+            let len = file.metadata().map_or(0, |m| m.len());
+            if len >= MAX_BYTES {
+                if let Some(dir) = self.path.parent() {
+                    let _ = std::fs::rename(&self.path, dir.join(PREVIOUS_FILE));
+                }
+                if locked {
+                    let _ = file.unlock();
+                }
+                drop(file);
+                continue;
+            }
+
+            let mut body = String::with_capacity(line.len() + HEADER.len() + 1);
+            if len == 0 {
+                body.push_str(HEADER);
+                body.push('\n');
+            }
+            body.push_str(line);
+            let _ = (&file).write_all(body.as_bytes());
+
+            if locked {
+                let _ = file.unlock();
+            }
             return;
-        };
-        if meta.len() < MAX_BYTES {
-            return;
-        }
-        if let Some(dir) = self.path.parent() {
-            let _ = std::fs::rename(&self.path, dir.join(PREVIOUS_FILE));
         }
     }
 }
@@ -201,7 +237,37 @@ fn field(value: &str) -> String {
         .chars()
         .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
         .collect();
+    let cleaned = defuse_formula(&cleaned);
     format!("\"{}\"", cleaned.replace('"', "\"\""))
+}
+
+/// Stop a spreadsheet treating a logged value as something to *run* (D-122).
+///
+/// RFC 4180 quoting is about parsing, not evaluation: Excel, LibreOffice and
+/// Numbers all strip the quotes and then read a leading `=`, `+`, `-`, `@`,
+/// tab or carriage return as the start of a formula. This file is written for
+/// a human to open in a spreadsheet — Settings > Activity log, and
+/// `still diagnostics where` — so that is not a theoretical audience.
+///
+/// It is reachable through the operator's own folder name, which is the
+/// `project` column. Verified: a project in a folder called `=1+1`, `+1`,
+/// `-2+3` or `@SUM(A1:A9)` put exactly that in the column, quoted and
+/// therefore live. D-052's rule is that a name someone chose is hostile input,
+/// and a name someone *else* chose — a shared project folder — more so.
+///
+/// A leading `'` is the conventional defusing and survives being read back.
+/// **Numbers are left alone**: `-16.0` is a loudness reading and belongs in the
+/// column as a number, and it cannot be a formula on its own.
+fn defuse_formula(value: &str) -> String {
+    let dangerous = value
+        .chars()
+        .next()
+        .is_some_and(|c| matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r'));
+    if dangerous && value.parse::<f64>().is_err() {
+        format!("'{value}")
+    } else {
+        value.to_owned()
+    }
 }
 
 #[cfg(test)]
@@ -271,5 +337,113 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    /// D-122. Quoting is about parsing; a spreadsheet strips the quotes and
+    /// then decides whether to *run* what is inside.
+    ///
+    /// Reachable through the operator's own folder name, which is the `project`
+    /// column: verified end to end that a project in a folder called `=1+1`
+    /// put exactly `=1+1` in that column, quoted and live.
+    #[test]
+    fn a_value_a_spreadsheet_would_execute_is_defused() {
+        for payload in [
+            "=1+1",
+            "=cmd|' /C calc'!A1",
+            "@SUM(A1:A9)",
+            "-2+3",
+            "+1+cmd|' /C calc'!A1",
+            "\tstarts with a tab",
+        ] {
+            let out = field(payload);
+            assert!(
+                out.starts_with("\"'"),
+                "{payload:?} reached the file able to run: {out}"
+            );
+        }
+
+        // Numbers are left alone. `-16.0` is a loudness reading and belongs in
+        // the column as a number; it cannot be a formula on its own, which is
+        // exactly what parsing as one proves.
+        for number in ["-16.0", "+1", "-2", "0.5", "-0.75"] {
+            assert_eq!(
+                field(number),
+                format!("\"{number}\""),
+                "a number should not have been defused"
+            );
+        }
+
+        // And ordinary text is untouched.
+        assert_eq!(field("render"), "\"render\"");
+    }
+
+    /// The file is machine-wide, so its writers are *different processes* —
+    /// the one case a per-project lock cannot cover (D-122).
+    ///
+    /// Measured before the fix: four concurrent `still render` **processes**
+    /// into a fresh log gave three header lines, two of them welded onto other
+    /// rows; afterwards, eight rounds clean.
+    ///
+    /// **What this test does and does not cover.** It fails against the
+    /// original `append_line`, which is what makes it a regression test. It
+    /// does *not* isolate the lock: with the lock alone removed it still
+    /// passes, because within one process the length check and the single
+    /// `write_all` are enough. The lock is for the case this test cannot
+    /// reach — two operating-system processes, which is the only way this
+    /// machine-wide file is ever written — and the evidence for that is the
+    /// eight-round reproduction above, not this.
+    #[test]
+    fn concurrent_writers_produce_one_header_and_whole_rows() {
+        // Its own folder: the test above uses `spoonstill-runs-<pid>/runs.csv`
+        // and they run in one process, so sharing it makes both flaky.
+        let dir =
+            std::env::temp_dir().join(format!("spoonstill-runs-concurrent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let path = dir.join("runs.csv");
+
+        std::thread::scope(|scope| {
+            for worker in 0..8 {
+                let path = path.clone();
+                scope.spawn(move || {
+                    let log = ActivityLog {
+                        path,
+                        project: format!("project-{worker}"),
+                        folder: "/somewhere".to_owned(),
+                    };
+                    for n in 0..40 {
+                        log.record(
+                            &spoonstill_core::diagnostics::Event::info("render", "a row")
+                                .with("worker", worker.to_string())
+                                .with("n", n.to_string()),
+                        );
+                    }
+                });
+            }
+        });
+
+        let text = std::fs::read_to_string(&path).expect("read");
+        let lines: Vec<&str> = text.lines().collect();
+
+        assert_eq!(
+            lines.iter().filter(|l| l.starts_with("when,level")).count(),
+            1,
+            "more than one header — two writers both thought the file was new"
+        );
+        assert_eq!(lines[0], HEADER, "the header must be the first line, whole");
+        assert_eq!(
+            lines.len(),
+            8 * 40 + 1,
+            "a row was lost or split: {} lines",
+            lines.len()
+        );
+        for line in &lines[1..] {
+            assert!(
+                line.starts_with('"') && line.ends_with('"'),
+                "a torn row: {line}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

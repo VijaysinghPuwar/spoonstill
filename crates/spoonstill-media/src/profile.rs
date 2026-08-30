@@ -372,29 +372,34 @@ fn compare_num(field: &'static str, expected: i64, actual: Option<i64>, out: &mu
 /// From Annex A's `MaxFS` (frame size in macroblocks) and `MaxMBPS`
 /// (macroblocks per second). Derived rather than guessed, because the level is
 /// a pinned profile field: if the encoder chose it for us, the profile would be
+/// `(level_idc, MaxFS, MaxMBPS)`, in ascending order.
+///
+/// At module scope rather than inside [`h264_level`] so that a test can read
+/// the same table the function does. `spoonstill_core::geometry::MAX_MACROBLOCKS`
+/// is derived from the last row's `MaxFS` and lives in a crate that cannot
+/// import this one (D-114), so their agreement is asserted rather than assumed.
+pub(crate) const LEVELS: [(i64, u64, u64); 16] = [
+    (10, 99, 1_485),
+    (11, 396, 3_000),
+    (12, 396, 6_000),
+    (13, 396, 11_880),
+    (20, 396, 11_880),
+    (21, 792, 19_800),
+    (22, 1_620, 20_250),
+    (30, 1_620, 40_500),
+    (31, 3_600, 108_000),
+    (32, 5_120, 216_000),
+    (40, 8_192, 245_760),
+    (41, 8_192, 245_760),
+    (42, 8_704, 522_240),
+    (50, 22_080, 589_824),
+    (51, 36_864, 983_040),
+    (52, 36_864, 2_073_600),
+];
+
 /// asserting whatever the encoder felt like doing.
 #[must_use]
 pub fn h264_level(width: u32, height: u32, fps: u32) -> i64 {
-    /// `(level_idc, MaxFS, MaxMBPS)`, in ascending order.
-    const LEVELS: [(i64, u64, u64); 16] = [
-        (10, 99, 1_485),
-        (11, 396, 3_000),
-        (12, 396, 6_000),
-        (13, 396, 11_880),
-        (20, 396, 11_880),
-        (21, 792, 19_800),
-        (22, 1_620, 20_250),
-        (30, 1_620, 40_500),
-        (31, 3_600, 108_000),
-        (32, 5_120, 216_000),
-        (40, 8_192, 245_760),
-        (41, 8_192, 245_760),
-        (42, 8_704, 522_240),
-        (50, 22_080, 589_824),
-        (51, 36_864, 983_040),
-        (52, 36_864, 2_073_600),
-    ];
-
     let macroblocks = u64::from(width.div_ceil(16)) * u64::from(height.div_ceil(16));
     let per_second = macroblocks * u64::from(fps);
 
@@ -611,5 +616,38 @@ mod tests {
         assert!(h264_level(1920, 1080, 120) > 40);
         // And the table is ordered, so the answer is the *lowest* that fits.
         assert_eq!(h264_level(1920, 1080, 60), 42);
+    }
+
+    /// D-114. `spoonstill_core::geometry::MAX_MACROBLOCKS` is derived from the
+    /// `LEVELS` table above, and the two live in different crates — core
+    /// depends on nothing, so it cannot import this. Only a test can stop them
+    /// drifting apart, and drifting is silent: past the table `h264_level`
+    /// returns 52 regardless, so an oversized frame would be *labelled* 5.2
+    /// while being something no 5.2 decoder can play, and D-041's assertion
+    /// would happily confirm the label it wrote itself.
+    #[test]
+    fn the_geometry_ceiling_is_the_largest_frame_this_table_can_label() {
+        use spoonstill_core::geometry::MAX_MACROBLOCKS;
+
+        let (top_level, max_fs, _) = *LEVELS.last().expect("a level table");
+        assert_eq!(
+            MAX_MACROBLOCKS, max_fs,
+            "core's ceiling and level {top_level}'s MaxFS have drifted apart"
+        );
+
+        // The largest frame core will build, labelled honestly.
+        let biggest = OutputSpec::new(Aspect::Landscape16x9, 2160, 30).unwrap();
+        assert!(
+            h264_level(biggest.width(), biggest.height(), biggest.fps()) <= top_level,
+            "the biggest frame core admits needs a level this table does not have"
+        );
+
+        // And the frame just past it would be mislabelled rather than refused,
+        // which is the whole reason the ceiling exists.
+        assert_eq!(
+            h264_level(7680, 4320, 30),
+            top_level,
+            "8K reports level 5.2 — a claim, not a fact"
+        );
     }
 }

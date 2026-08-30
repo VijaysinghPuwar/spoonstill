@@ -32,7 +32,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use spoonstill_core::project::{Problem, ProblemKind, SceneDraft};
+use spoonstill_core::project::{MAX_SCRIPT_BYTES, Problem, ProblemKind, SceneDraft, SceneId};
 
 use super::settings::Settings;
 
@@ -261,9 +261,20 @@ fn from_convention(root: &Path, settings: &Settings) -> Result<Rows, RowsError> 
 
     // Keyed by stem so pairing is a lookup rather than a search, and ordered
     // by the natural key so the render order is stable (see the module docs).
+    //
+    // The stem half of the key is **case-folded** (D-111). `Shot.jpg` beside
+    // `shot.wav` is one scene to the operator who named them, and keying on the
+    // raw spelling made it two: a silent still, and a recording reported as
+    // pairing with no image.
     let mut groups: BTreeMap<(Vec<NaturalPart>, String), Group> = BTreeMap::new();
     let mut problems = Vec::new();
 
+    // Read the whole folder, then sort it. `read_dir` order is whatever the
+    // filesystem returns — unspecified by std, and different between APFS, ext4
+    // and NTFS — and this loop decides which of two candidate files a scene
+    // gets. A project must not resolve differently on the machine it is
+    // rendered on (D-071, D-111).
+    let mut names: Vec<String> = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|source| RowsError::Unreadable {
             path: root.to_path_buf(),
@@ -272,8 +283,27 @@ fn from_convention(root: &Path, settings: &Settings) -> Result<Rows, RowsError> 
         if !entry.file_type().is_ok_and(|t| t.is_file()) {
             continue;
         }
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
+        if let Some(name) = entry.file_name().to_str() {
+            names.push(name.to_owned());
+        }
+    }
+    names.sort_unstable();
+
+    // Files an interrupted `arrange` left behind (D-121). Counted before the
+    // dotfile skip below, because that skip is exactly why they were invisible:
+    // a project of 2000 scenes reported "1566 scenes — no problems".
+    let interrupted = names
+        .iter()
+        .filter(|name| name.starts_with(".arranging-"))
+        .count();
+    if interrupted > 0 {
+        problems.push(Problem::in_project(ProblemKind::InterruptedRename {
+            files: interrupted,
+        }));
+    }
+
+    for name in &names {
+        let name = name.as_str();
         // `.DS_Store`, `._resource forks`, editor swap files. Never scenes.
         if name.starts_with('.') {
             continue;
@@ -302,24 +332,52 @@ fn from_convention(root: &Path, settings: &Settings) -> Result<Rows, RowsError> 
         };
 
         let group = groups
-            .entry((natural_key(stem), stem.to_owned()))
+            .entry((natural_key(stem), stem.to_lowercase()))
             .or_insert_with(|| Group {
                 stem: stem.to_owned(),
                 ..Group::default()
             });
+        // Every candidate is kept, not just the first. Keeping only the first
+        // meant `001.jpg` beside `001.png` silently discarded one and reported
+        // "no problems" (D-111).
         match slot {
-            Slot::Image => group.image.get_or_insert_with(|| name.to_owned()),
-            Slot::Audio => group.audio.get_or_insert_with(|| name.to_owned()),
-            Slot::Text => group.text.get_or_insert_with(|| name.to_owned()),
-        };
+            Slot::Image => group.image.push(name.to_owned()),
+            Slot::Audio => group.audio.push(name.to_owned()),
+            Slot::Text => group.text.push(name.to_owned()),
+        }
     }
 
     let mut drafts = Vec::new();
     for group in groups.into_values() {
-        let Some(image) = group.image else {
+        // Ambiguity is reported before anything is chosen from it (D-111).
+        // Reported per slot and against the scene, so `still validate` prints
+        // the stem, the job, and every file competing for it — the operator
+        // needs to know *which* file to remove, not that something is wrong.
+        for (slot, candidates) in [
+            ("image", &group.image),
+            ("narration", &group.audio),
+            ("text", &group.text),
+        ] {
+            if candidates.len() > 1 {
+                let kind = ProblemKind::AmbiguousScene {
+                    slot,
+                    candidates: candidates.clone(),
+                };
+                problems.push(match SceneId::new(&group.stem) {
+                    Ok(scene) => Problem::in_scene(scene, kind),
+                    Err(_) => Problem::in_project(kind),
+                });
+            }
+        }
+
+        // Sorted above, so "the first" is the same file on every machine.
+        let group_audio = group.audio.into_iter().next();
+        let group_text = group.text.into_iter().next();
+
+        let Some(image) = group.image.into_iter().next() else {
             // Narration with no still. Reported, never skipped in silence:
             // "scene 12 never rendered" has to be answerable (D-050).
-            for orphan in [group.audio, group.text].into_iter().flatten() {
+            for orphan in [group_audio, group_text].into_iter().flatten() {
                 problems.push(Problem::in_project(ProblemKind::UnpairedFile {
                     value: orphan,
                 }));
@@ -335,7 +393,7 @@ fn from_convention(root: &Path, settings: &Settings) -> Result<Rows, RowsError> 
         // the alternative was that an operator who records their own voiceover
         // could never have subtitles at all. This turns an error into a
         // working scene, so it cannot break a project that renders today.
-        let text = match &group.text {
+        let text = match &group_text {
             Some(name) => match read_line(&root.join(name)) {
                 Ok(text) => Some(text),
                 Err(detail) => {
@@ -351,12 +409,12 @@ fn from_convention(root: &Path, settings: &Settings) -> Result<Rows, RowsError> 
         };
 
         // Image alone: a silent scene of the project's default length (D-050).
-        let duration = (group.audio.is_none() && text.is_none() && group.text.is_none())
+        let duration = (group_audio.is_none() && text.is_none() && group_text.is_none())
             .then_some(settings.silent_seconds);
 
         // With a recording present the writing is the caption; without one it
         // is the script to speak.
-        let (text, caption) = if group.audio.is_some() {
+        let (text, caption) = if group_audio.is_some() {
             (None, text)
         } else {
             (text, None)
@@ -366,7 +424,7 @@ fn from_convention(root: &Path, settings: &Settings) -> Result<Rows, RowsError> 
             id: group.stem,
             image: Some(image),
             text,
-            audio: group.audio,
+            audio: group_audio,
             duration,
             voice: None,
             zoom_direction: None,
@@ -385,9 +443,13 @@ fn from_convention(root: &Path, settings: &Settings) -> Result<Rows, RowsError> 
 #[derive(Debug, Default)]
 struct Group {
     stem: String,
-    image: Option<String>,
-    audio: Option<String>,
-    text: Option<String>,
+    /// Every file that could be this scene's still, sorted. More than one is
+    /// an ambiguity to report, not a choice to make quietly (D-111).
+    image: Vec<String>,
+    /// Every file that could be its narration.
+    audio: Vec<String>,
+    /// Every file that could be its words.
+    text: Vec<String>,
 }
 
 enum Slot {
@@ -402,6 +464,22 @@ enum Slot {
 /// a BOM in a TTS request is a spoken artefact or a rejected call depending on
 /// the provider. Strip it here, once.
 fn read_line(path: &Path) -> Result<String, String> {
+    // Asked how big it is before it is read (D-126). A 191 MB `.txt` used to
+    // reach `still validate` as 607 MB resident — the bytes, the `String`, and
+    // the trimmed copy — and be reported as a scene with *no problems*, because
+    // the length refusal lives in the provider and does not run until render.
+    let size = std::fs::metadata(path)
+        .map(|m| m.len())
+        .map_err(|e| format!("could not read it: {e}"))?;
+    if size > MAX_SCRIPT_BYTES {
+        return Err(format!(
+            "is {} MB of text — no scene can hold more than {} KB of narration, \
+             so this is not a script",
+            size / (1024 * 1024),
+            MAX_SCRIPT_BYTES / 1024
+        ));
+    }
+
     let bytes = std::fs::read(path).map_err(|e| format!("could not read it: {e}"))?;
     let text =
         String::from_utf8(bytes).map_err(|_| "not UTF-8 text — re-save it as UTF-8".to_owned())?;
@@ -790,5 +868,144 @@ mod tests {
     fn an_absurd_digit_run_falls_back_to_text() {
         let huge = "9".repeat(60);
         assert_eq!(natural_key(&huge), vec![NaturalPart::Text(huge)]);
+    }
+
+    /// D-126. A file that is not a script is refused by its *size*, before it
+    /// is read.
+    ///
+    /// Measured before this existed: a 191 MB `.txt` took `still validate` to
+    /// **607 MB resident** — the bytes, the `String`, and the trimmed copy —
+    /// and was reported as a scene with **no problems**, because the length
+    /// refusal lives in the provider and does not run until render. Afterwards
+    /// the same folder validates in 14 MB and says what is wrong.
+    #[test]
+    fn a_script_too_large_to_be_narration_is_refused_before_it_is_read() {
+        let big = "x".repeat((MAX_SCRIPT_BYTES + 1) as usize);
+        let scratch = Scratch::new(&[("001.png", ""), ("001.txt", &big)]);
+        let rows = scratch.collect();
+
+        let said: Vec<String> = rows.problems.iter().map(ToString::to_string).collect();
+        assert!(
+            said.iter().any(|p| p.contains("not a script")),
+            "a file too big to be narration was accepted: {said:?}"
+        );
+
+        // And the scene does not quietly become a narrated one on the strength
+        // of a file that was never read.
+        assert!(rows.drafts.iter().all(|d| d.text.is_none()));
+    }
+
+    /// The ordinary case is untouched: a real script is nowhere near the cap,
+    /// and the cap must not cost a `metadata` call its correctness.
+    #[test]
+    fn a_script_of_an_ordinary_length_is_read_as_before() {
+        let scratch = Scratch::new(&[
+            ("001.png", ""),
+            (
+                "001.txt",
+                "Chu Kingdom. Haonan Province. The Floating Cloud Sect.",
+            ),
+        ]);
+        let rows = scratch.collect();
+
+        assert!(rows.problems.is_empty(), "{:?}", rows.problems.len());
+        assert_eq!(
+            rows.drafts[0].text.as_deref(),
+            Some("Chu Kingdom. Haonan Province. The Floating Cloud Sect.")
+        );
+    }
+
+    /// D-111. A stem is matched case-insensitively, because the operator who
+    /// named `Shot.jpg` and `shot.wav` named one scene. Keying on the raw
+    /// spelling made it two: a silent still, and a recording reported as
+    /// pairing with no image — so a recorded voiceover rendered silent.
+    ///
+    /// `ingest::stem_of` already folded case for exactly this reason; this is
+    /// the folder scan agreeing with the other half of its own convention.
+    #[test]
+    fn a_stem_is_one_scene_whatever_its_case() {
+        let scratch = Scratch::new(&[("Shot.jpg", ""), ("shot.wav", "")]);
+        let rows = scratch.collect();
+
+        assert_eq!(ids(&rows), vec!["Shot"], "one scene, not two");
+        assert_eq!(
+            rows.drafts[0].audio.as_deref(),
+            Some("shot.wav"),
+            "the recording must belong to the still it was named for"
+        );
+        assert!(
+            rows.problems.is_empty(),
+            "nothing is unpaired here: {:?}",
+            rows.problems
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Two files claiming one job is reported, not resolved quietly. Before
+    /// this the scan kept whichever `read_dir` yielded first, discarded the
+    /// other, and printed "no problems" over a scene built from a file the
+    /// operator never chose.
+    #[test]
+    fn two_files_claiming_one_scene_are_reported_by_name() {
+        let scratch = Scratch::new(&[
+            ("001.jpg", ""),
+            ("001.png", ""),
+            ("001.wav", ""),
+            ("001.mp3", ""),
+        ]);
+        let rows = scratch.collect();
+
+        let said: Vec<String> = rows.problems.iter().map(ToString::to_string).collect();
+        assert_eq!(said.len(), 2, "one per ambiguous slot: {said:?}");
+
+        let image = said.iter().find(|p| p.contains("image")).expect("image");
+        assert!(
+            image.contains("001.jpg") && image.contains("001.png"),
+            "{image}"
+        );
+        let audio = said
+            .iter()
+            .find(|p| p.contains("narration"))
+            .expect("audio");
+        assert!(
+            audio.contains("001.mp3") && audio.contains("001.wav"),
+            "{audio}"
+        );
+
+        for problem in &rows.problems {
+            assert_eq!(
+                problem.scene.as_ref().map(|s| s.as_str()),
+                Some("001"),
+                "the operator has to be told which scene to go and fix"
+            );
+            assert_eq!(
+                problem.kind.severity(),
+                spoonstill_core::diagnostics::Severity::Error,
+                "guessing which file was meant is how 500 scenes render wrong"
+            );
+        }
+    }
+
+    /// The choice is the same on every machine. `read_dir` order is whatever
+    /// the filesystem returns — unspecified by std, and different between APFS,
+    /// ext4 and NTFS — so the scan sorts before it pairs. Creation order must
+    /// not decide which still a scene gets.
+    #[test]
+    fn the_file_chosen_does_not_depend_on_the_order_it_was_written() {
+        let forwards = Scratch::new(&[("001.jpg", ""), ("001.png", "")]);
+        let backwards = Scratch::new(&[("001.png", ""), ("001.jpg", "")]);
+
+        assert_eq!(
+            forwards.collect().drafts[0].image,
+            backwards.collect().drafts[0].image,
+        );
+        assert_eq!(
+            forwards.collect().drafts[0].image.as_deref(),
+            Some("001.jpg"),
+            "sorted, so it is nameable in a decision rather than whatever \
+             the filesystem happened to hand back"
+        );
     }
 }

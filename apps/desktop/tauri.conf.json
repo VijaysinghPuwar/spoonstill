@@ -30,7 +30,15 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "app", "nsis", "msi"],
+    "resources": [
+      "../../THIRD-PARTY-NOTICES.md"
+    ],
+    "targets": [
+      "dmg",
+      "app",
+      "nsis",
+      "msi"
+    ],
     "shortDescription": "Photos and narration into one film.",
     "longDescription": "spoonstill turns pairs of (still image, narration) into one MP4, with Ken Burns motion on each still and cuts on narration boundaries. A batch renderer, not a video editor.",
     "category": "Video",

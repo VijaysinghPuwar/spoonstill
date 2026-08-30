@@ -241,3 +241,53 @@ fn a_spec_with_no_cues_renders_the_same_bytes_as_none() {
         "an empty subtitle spec changed the segment"
     );
 }
+
+/// D-117. A shadow must fit inside the band it is drawn on.
+///
+/// `Mask::shadow` runs three box blurs, and three passes of radius `r` spread
+/// `3r` — but the canvas reserved `2r`, so the outermost ring of every soft
+/// shadow was cut off against the canvas edge. Measured before the fix: `card`
+/// and `minimal` left alpha at the bottom row at 720p, 1080p and 4K alike,
+/// which is the scale-invariance of D-106 faithfully reproducing a bug.
+///
+/// The rule is stated as a property of the *output*, not of the arithmetic:
+/// **a theme that casts a shadow leaves the edge of its canvas transparent.**
+/// A theme with no shadow is excluded because its plate is *meant* to reach the
+/// edge — `band` is the full frame width by design, and `boxed` runs flush top
+/// and bottom.
+#[test]
+fn a_soft_shadow_is_not_clipped_by_the_edge_of_its_own_canvas() {
+    // 4K was measured too, and clipped identically — but a 3840-wide triple
+    // box blur is most of a minute in a debug build, and the property is
+    // scale-invariant by construction (every length is a fraction of the
+    // frame), so two sizes are the evidence and the third is in D-117.
+    for short_edge in [720u32, 1080] {
+        let output = OutputSpec::new(Aspect::Landscape16x9, short_edge, 30).expect("geometry");
+        for theme in SubtitleTheme::ALL {
+            if theme.style().shadow_blur <= 0.0 {
+                continue;
+            }
+            for placement in [Placement::Bottom, Placement::Top] {
+                let image = spoonstill_media::caption::render_cue(
+                    "A line long enough to need the whole band, and then some more.",
+                    theme,
+                    placement,
+                    output,
+                );
+                let (w, h) = (image.canvas.width(), image.canvas.height());
+                let alpha = |x: u32, y: u32| image.canvas.pixel(x, y).a;
+
+                let worst = (0..w)
+                    .map(|x| alpha(x, 0).max(alpha(x, h - 1)))
+                    .chain((0..h).map(|y| alpha(0, y).max(alpha(w - 1, y))))
+                    .max()
+                    .unwrap_or(0);
+                assert_eq!(
+                    worst, 0,
+                    "{theme:?} at {short_edge}p {placement:?} leaves alpha {worst} on the \
+                     edge of its {w}x{h} canvas — the shadow is being cut off there"
+                );
+            }
+        }
+    }
+}

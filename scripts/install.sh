@@ -101,7 +101,12 @@ tar -xzf "$tmp/$ASSET" -C "$tmp"
 [ -f "$tmp/still" ] || die "The archive did not contain a 'still' binary."
 
 mkdir -p "$INSTALL_DIR"
-install -m 0755 "$tmp/still" "$INSTALL_DIR/still"
+# Beside, then over (D-128). `install` opens the destination and truncates it,
+# so a write that fails part-way leaves the operator with neither the build they
+# had nor the one they asked for. `mv` within one directory replaces in one
+# step — the same rule `move_into_place` follows for every artifact (D-119).
+install -m 0755 "$tmp/still" "$INSTALL_DIR/still.new"
+mv -f "$INSTALL_DIR/still.new" "$INSTALL_DIR/still"
 # These builds are unsigned until M5. Clear the download quarantine so the
 # first run is not a dialog the operator has no way to interpret.
 xattr -d com.apple.quarantine "$INSTALL_DIR/still" 2>/dev/null || true

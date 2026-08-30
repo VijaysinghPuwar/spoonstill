@@ -55,6 +55,9 @@ enum Command {
     /// Check every program spoonstill needs, and offer to install what is
     /// missing (D-105).
     Doctor(DoctorArgs),
+    /// Show the licences of everything built into this binary (D-124).
+    #[command(visible_alias = "licenses")]
+    Licences,
     /// Diagnostics: logs and the bundle to send when something goes wrong.
     #[command(subcommand)]
     Diagnostics(DiagnosticsCommand),
@@ -156,12 +159,23 @@ struct RenderArgs {
     #[arg(long, value_name = "N")]
     audio_jobs: Option<usize>,
 
-    /// Render even though another run appears to hold this project.
+    /// Kept for scripts. It cannot override a lock a running render holds.
     ///
-    /// For the lock a crashed run left behind. Two renders of one project at
-    /// the same time would interleave segments into one film.
+    /// The lock is the operating system's now (D-113), so a run this machine
+    /// lost releases it by itself and the crashed-lock case this flag existed
+    /// for needs no flag. What is left is a *live* render, and taking that
+    /// project out from under it is the interleaving the lock prevents.
     #[arg(long)]
     force: bool,
+
+    /// Keep every superseded segment instead of sweeping the oldest.
+    ///
+    /// A render normally keeps the segments it just used plus two spare
+    /// generations, so flipping between two themes or two voices stays free
+    /// while the folder stays bounded (D-109). This keeps all of them, for an
+    /// operator who would rather spend the disk than ever re-encode.
+    #[arg(long)]
+    keep_cache: bool,
 
     /// Speak every spoken scene in this voice, for this run only.
     ///
@@ -338,6 +352,7 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Validate(args) => validate(args),
         Command::Voices(args) => list_voices(&args),
         Command::Subtitles => list_subtitle_themes(),
+        Command::Licences => show_licences(),
         Command::Doctor(args) => doctor(&args),
         Command::Render(args) => render_project(args),
         Command::RenderScene(args) => render_scene(args),
@@ -771,6 +786,7 @@ fn render_project(args: RenderArgs) -> Result<(), String> {
         jobs: args.jobs.unwrap_or(defaults.jobs).max(1),
         audio_jobs: args.audio_jobs.unwrap_or(defaults.audio_jobs).max(1),
         force: args.force,
+        keep_cache: args.keep_cache,
         voice: args.voice.clone(),
         provider: args.provider.clone(),
         subtitles,
@@ -857,6 +873,44 @@ fn render_project(args: RenderArgs) -> Result<(), String> {
         if film.reused_segments == 1 { "" } else { "s" },
         film.segments_dir.display()
     );
+    if film.freed_bytes > 0 {
+        println!(
+            "  swept {} of superseded segments (--keep-cache keeps them)",
+            human_bytes(film.freed_bytes)
+        );
+    }
+    Ok(())
+}
+
+/// Bytes as an operator reads them. Three significant figures is enough to
+/// answer "was that worth doing" and no more precision means anything here.
+fn human_bytes(bytes: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let mut n = bytes as f64;
+    for unit in ["B", "KB", "MB", "GB"] {
+        if n < 1024.0 || unit == "GB" {
+            return if unit == "B" {
+                format!("{bytes} B")
+            } else {
+                format!("{n:.1} {unit}")
+            };
+        }
+        n /= 1024.0;
+    }
+    unreachable!()
+}
+
+/// Everything third-party that is built into this binary (D-124).
+///
+/// The notices are `include_str!`'d rather than read from beside the
+/// executable, so **every copy of the binary contains them** however it was
+/// obtained — extracted from a release archive, copied off another machine, or
+/// built here. That is the form the SIL Open Font License itself allows for
+/// embedded material: *"machine-readable metadata fields within text or binary
+/// files as long as those fields can be easily viewed by the user"*. A command
+/// that prints them is as easily viewed as it gets.
+fn show_licences() -> Result<(), String> {
+    print!("{}", include_str!("../../../THIRD-PARTY-NOTICES.md"));
     Ok(())
 }
 
