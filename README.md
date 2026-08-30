@@ -54,6 +54,24 @@ Grab the build for your machine from the
 The Mac app is one universal build, so you do not have to know which processor
 you have. The one-line installer below works that out for the command line too.
 
+> **If you are on Windows, please read this.** Windows is a supported target and
+> it is not an afterthought: every push runs the full test suite on a Windows
+> runner — formatting, clippy with warnings denied, and `cargo test --workspace`,
+> which renders real media through real FFmpeg — and the code is additionally
+> cross-compiled for `x86_64-pc-windows-msvc` before a tag is cut (D-132). That
+> has already caught four Windows-only defects that reading the code did not.
+>
+> What has **not** happened is a person sitting at a Windows desktop and running
+> the packaged app. `spoonstill-Windows-Installer.exe` and the PowerShell
+> one-liner are built and shipped by CI but have never been executed by anyone,
+> here or in CI (D-128). The 29 `make gates` checks are macOS-only. Every
+> performance number in [`ffmpeg-findings.md`](ffmpeg-findings.md) is macOS
+> arm64 and none of it has been measured on Windows.
+>
+> So: the Windows build is tested, and it is untried. If you are the first
+> person to run it, an [issue](https://github.com/VijaysinghPuwar/spoonstill/issues)
+> with `still doctor` output is genuinely useful.
+
 ### Or install with one line
 
 **macOS**
