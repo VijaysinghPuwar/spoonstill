@@ -4877,6 +4877,82 @@ release's assets — the guard stops it stealing *latest*, not from running. And
 `README.md` still pipes a script from a mutable `master` URL, which is a
 separate open question.
 
+### D-139 — The unmaintained parser was not the risk; the caption band was · Accepted
+
+Decided 2026-08-30, from an outside read naming `ttf-parser` as *"the one
+genuine supply-chain exposure in the project"*, sitting *"in the path that
+processes operator-supplied text"*, and asking for it to be fuzzed, replaced, or
+vendored.
+
+**The premise is wrong, and checking it is what found a real defect.**
+`ttf-parser` parses **font files**. Every font here is `include_bytes!`d from
+this crate's own assets — three fixed Inter weights, byte-identical in every
+build (D-106, D-124). Grepped for a font arriving from anywhere else — a path, a
+config key, an environment variable, a project folder — and there is none. A
+parser that only ever sees three trusted, compile-time-fixed inputs is a
+materially smaller risk than one fed attacker bytes, whatever its maintenance
+status. **The operator's text never reaches `ttf-parser` as a font**; it becomes
+glyph *lookups* by codepoint.
+
+So the entry in `.cargo/audit.toml` stands as written, with one thing added to
+it: the reason the exposure is small, so the next reader does not re-derive it.
+Replacing `fontdue` or vendoring it would have bought very little.
+
+**What the operator's text does reach is our own code**, and that is where the
+defect was. `render_cue` wraps, shrinks and rasterizes; `cues` splits. A hostile
+input suite over six themes and both placements — empty, whitespace, control
+characters, D-118's `0x1f`, an unbreakable 1 200-character word, a long URL, CJK
+with no spaces, Arabic, Hebrew, ZWJ emoji, combining marks, zero-width joiners,
+codepoints Inter has no glyph for, astral-plane text — found this:
+
+```
+Classic/Bottom/a whole 256 KiB script: 119420px band at y=0 runs off a 1080px frame
+```
+
+**And it is reachable through the documented pipeline, not only by calling the
+function.** D-126 permits a script file of 256 KiB and calls it valid. D-106
+makes a `.txt` beside a recording that scene's caption. `cues` bounds the
+*number* of cues by the scene's duration, so a **short** scene forces the text
+into very few, very long ones. Measured, on the real path:
+
+| | before | after |
+|---|---|---|
+| longest cue | 87 334 chars | 87 334 chars |
+| band on a 1080p frame | 1920x**39 839** | 1920x**1053** |
+| RGBA for one cue | **291.8 MB** | **7.7 MB** |
+| time to draw it | **49 s** | 7.8 s |
+
+Multiplied by `--jobs`, and by three cues a scene. This is **D-114 one layer
+down**: there the *output* geometry had no ceiling, and here a geometry
+**derived** from it had none. The shrink loop already tries to reach
+`style.max_lines` by making the type smaller and gives up at `MIN_SHRINK` —
+after which nothing bounded the line count at all.
+
+**The clamp is the frame, not `max_lines`.** Every theme declares two lines, and
+enforcing that as a hard cap would silently shorten captions that render three
+or four lines today and look correct — a change to films that already exist. The
+frame is the honest limit: past it there is nothing to see either way. Verified:
+the full suite is green, **including D-130's byte-identical caption assertions**,
+so no existing render moved.
+
+**It took two corrections, both from the test rather than from thinking.** The
+first clamp ignored the outline, shadow and blur margins and produced a 1094px
+band on a 1080px frame. The second ignored `style.margin`, the offset that
+pushes the band off the frame edge, and failed only on `Placement::Top` at
+y=42. The clamp now mirrors `draw`'s own geometry instead of approximating it.
+
+**The suite was trimmed from 301 s to 31 s**, deliberately: the twelve
+theme/placement pairs exist to cover the *shapes* of hostile text, and rendering
+the 256 KiB case through all of them cost five minutes for no extra information.
+Length has its own test, once. A five-minute test in `make test` is a test people
+learn to skip, which is D-134's rule about gates applied to a suite.
+
+**Not claimed.** `ttf-parser` is still unmaintained at its latest release and
+still ships in every binary; this decision lowers the estimate of that risk and
+explains why, it does not remove it. The review date in `.cargo/audit.toml` is
+unchanged. No fuzzer is wired into CI — the suite is a fixed corpus of hostile
+shapes, not a fuzzer, and it says so.
+
 ### D-074 — The `kenburns-batch` master brief does not exist on this machine · Accepted
 
 Searched 2026-08-26: no file matching `*kenburns*` anywhere under `~/Desktop`,

@@ -590,7 +590,67 @@ pub fn render_cue(
         lines = wrap(&fonts, text, px as f32, limit);
     }
     let px_f = px as f32;
-    let lines = balance(&fonts, text, px_f, limit, lines.len());
+    let mut lines = balance(&fonts, text, px_f, limit, lines.len());
+
+    // The loop above tries to reach `max_lines` by shrinking the type and gives
+    // up at `MIN_SHRINK`. Nothing then stopped `draw` from allocating a band as
+    // tall as however many lines were left over — and a band taller than the
+    // frame cannot be shown, so those pixels are cost with no picture in them.
+    //
+    // Measured before this clamp (D-139): a three-second scene with a caption
+    // file of 256 KiB — which D-126 explicitly permits, and which D-106 makes a
+    // caption by putting a `.txt` beside a recording — split into three cues,
+    // the longest 87 334 characters, and the first rendered as a **1920x39 839**
+    // band: 291.8 MB of RGBA for one cue on a 1080p frame, 49 seconds to draw,
+    // multiplied by `--jobs`. This is D-114's defect one layer down: there the
+    // *output* geometry had no ceiling, here a geometry *derived* from it had
+    // none.
+    //
+    // The clamp is the frame, not `style.max_lines`. Every theme declares two
+    // lines, and enforcing that as a hard cap would silently shorten captions
+    // that render three or four lines today and look fine — a change to films
+    // that already exist. The frame is the honest limit: past it there is
+    // nothing to see either way.
+    // Mirrors `draw`'s own geometry rather than approximating it, because an
+    // estimate that forgets the outline and the shadow puts the band back over
+    // the edge — measured at 1094px on a 1080px frame before these terms were
+    // included.
+    let line_height = (px_f * style.line_spacing as f32).round().max(1.0);
+    let pad_y = (style.padding_y * f64::from(px_f)) as f32;
+    let outline_r = (style.outline_width * f64::from(px_f)).round().max(0.0) as f32;
+    let shadow_off = (style.shadow_offset * f64::from(px_f)).round().max(0.0) as f32;
+    let shadow_blur = (style.shadow_blur * f64::from(px_f)).round().max(0.0) as f32;
+    #[allow(clippy::cast_precision_loss)]
+    let margin = outline_r + shadow_off + shadow_blur * SHADOW_BLUR_PASSES as f32;
+
+    let metrics = fonts
+        .font
+        .horizontal_line_metrics(px_f)
+        .expect("a horizontal font has horizontal line metrics");
+    let first_line = metrics.ascent - metrics.descent;
+
+    // `draw` builds a band of
+    //   line_height * (n - 1) + ascent + descent + 2 * pad_y + 2 * margin
+    // so this is that, solved for n.
+    #[allow(clippy::cast_precision_loss)]
+    let frame_h_f = output.height() as f32;
+    // `draw` also offsets the band from the frame edge by `style.margin`, so
+    // that room is not available for text either. Subtracted once, not twice:
+    // the band is pushed away from one edge, not both.
+    #[allow(clippy::cast_precision_loss)]
+    let placement_margin = (style.margin * f64::from(frame_h_f)) as f32;
+    let spare = frame_h_f - first_line - 2.0 * pad_y - 2.0 * margin - placement_margin;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let fits = if spare <= 0.0 {
+        1
+    } else {
+        ((spare / line_height).floor() as usize)
+            .saturating_add(1)
+            .max(1)
+    };
+    if lines.len() > fits {
+        lines.truncate(fits);
+    }
 
     draw(&fonts, &lines, px_f, &style, placement, output)
 }

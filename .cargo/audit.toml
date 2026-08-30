@@ -70,8 +70,18 @@ ignore = [
     # replacing `fontdue` or vendoring, and neither is worth doing for an
     # unmaintained flag with no advisory behind it.
     #
-    # What would change that: a vulnerability advisory against it, or `fontdue`
-    # itself going quiet. Both are things this file's review date exists to look
-    # for.
+    # **How much risk this actually is, so the next reader does not re-derive
+    # it** (D-139): `ttf-parser` parses *font files*, and every font here is
+    # `include_bytes!`d from spoonstill-media's own assets — three fixed Inter
+    # weights, byte-identical in every build. Nothing loads a font from a path,
+    # a config key, an environment variable or a project. An operator's text
+    # never reaches this crate as a font; it becomes glyph lookups by codepoint.
+    # An unmaintained parser fed three trusted compile-time inputs is a smaller
+    # thing than the same parser fed attacker bytes. That is why replacing
+    # `fontdue` was considered and not done.
+    #
+    # What would change that: a vulnerability advisory against it, `fontdue`
+    # itself going quiet, or spoonstill ever loading a font it did not compile
+    # in — which would make this the highest-priority entry in the file.
     "RUSTSEC-2026-0192", # ttf-parser unmaintained
 ]
