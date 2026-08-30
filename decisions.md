@@ -4595,8 +4595,14 @@ not a type error. `the_log_handle_can_actually_be_locked` is deterministic
 rather than racy, so the Windows runner will fail it every time against the old
 open options instead of one time in three — but **this machine cannot prove
 that**, because `flock` on macOS is happy with an append-only descriptor and the
-test passes here either way. The proof is the Windows CI leg, and this decision
-is not finished until that leg is green.
+test passes here either way. The proof is the Windows CI leg.
+
+**Closed 2026-08-30.** Run `33323926750`: the Windows leg is green, and the log
+shows `runs::tests::the_log_handle_can_actually_be_locked ... ok` on
+`windows-2022`. That is the deterministic half — the handle the program really
+opens can now be locked on the platform where it never could. The racy half
+passed too, but one green run of a race proves nothing on its own and is not
+what this rests on.
 
 ### D-074 — The `kenburns-batch` master brief does not exist on this machine · Accepted
 
