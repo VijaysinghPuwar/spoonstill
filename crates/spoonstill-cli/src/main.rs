@@ -838,8 +838,16 @@ fn render_project(args: RenderArgs) -> Result<(), String> {
             ..
         } => {
             done.set(done.get() + 1);
+            // "done", because the pool finishes scenes in whatever order
+            // workers free up and this counter is a *count*, not a position.
+            // Without the word, `[  1/4] 004` reads as "004 is the first scene
+            // in the film" — which is what D-091 fixed in the window, where
+            // logging completion order "read as a scrambled film". The CLI is
+            // the permanent complete control surface (D-091 says so itself) and
+            // kept the same misreading until somebody rendered a real project
+            // and read the output as a stranger would.
             println!(
-                "  [{:>3}/{}] {id:<12} {frames:>6} frames {duration:>8.3}s{}",
+                "  [{:>3}/{} done] {id:<12} {frames:>6} frames {duration:>8.3}s{}",
                 done.get(),
                 total.get(),
                 if reused { "  (reused)" } else { "" }

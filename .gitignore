@@ -32,3 +32,6 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# Personal learning notes (never committed). Destined for an Obsidian vault.
+/learning/

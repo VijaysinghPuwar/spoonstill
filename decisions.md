@@ -4953,6 +4953,71 @@ explains why, it does not remove it. The review date in `.cargo/audit.toml` is
 unchanged. No fuzzer is wired into CI — the suite is a fixed corpus of hostile
 shapes, not a fuzzer, and it says so.
 
+### D-140 — Reordering re-renders the film, and the alternative is worse · Accepted
+
+Found 2026-08-30 by using the tool rather than testing it: four photographs off
+a camera, four written lines, `still new`, `still render`, then `still move 004 1`
+and render again. The second render said:
+
+```
+4 narrations from cache, 0 segments reused
+```
+
+Nothing about the photographs, the narration, the geometry or the subtitles had
+changed. Only the numbers on the files had.
+
+**Why.** `MotionSpec::seeded(project_id, scene_index, content_hash)` puts the
+scene's **index** in the seed, so a photograph's Ken Burns move is a function of
+where it sits. Demonstrated in `reorder_cost.rs` — one photograph, six
+positions:
+
+```
+  index 0: pan-up@south-east:0.0800
+  index 1: pan-right@east:0.0800
+  index 2: pan-up@center:0.0800
+  index 3: pan-right@north-east:0.1100
+  index 4: zoom-in@south-west:0.1200
+  index 5: pan-down@south:0.0800
+```
+
+A different move is a different segment, so the cache correctly misses. **Two
+costs, and the second is the surprising one:**
+
+1. Moving one scene to the front of a 500-scene film re-encodes all 500. At the
+   rate D-108 measured (200 cold scenes in 433 s) that is roughly eighteen
+   minutes for one drag — and the window has ↑ ↓ buttons on every row (D-100),
+   so this is a cheap gesture with an expensive consequence.
+2. **The motion changes on scenes the operator did not touch.** They moved one
+   photograph; every other photograph now moves differently. Nothing warns them.
+
+**The obvious fix is refused.** Dropping `scene_index` would make the move a
+property of the photograph — reorders free, motion stable, both costs gone. It
+would also change the Ken Burns move on **every scene of every film already
+made**, which is the exact objection D-118 recorded when it left this same
+function alone while fixing the hash beside it. A film that re-renders
+differently than it did last week is a worse defect than a slow reorder, and
+`--jobs 1` and `--jobs 4` producing byte-identical films (D-077, gate 3) is a
+promise this project has already made about reproducibility.
+
+**So it stays, and it is written down instead.** The cost is real, it is
+inherent to seeding motion by position, and the next person to reorder 200
+scenes and wait deserves to find this entry rather than a mystery.
+
+**What would reopen it:** an operator reordering often enough that the wait is
+the tool's main cost, or a decision to version the seed — a `motion_seed: v2`
+in `project.yaml` would let new projects take the stable-per-photo behaviour
+while every existing film keeps rendering exactly as it always has. That is the
+shape of the fix if this is ever worth fixing; it is not a one-line change and
+it should not be made as one.
+
+**Fixed at the same time, from the same session of use:** the CLI's render
+progress printed `[  1/4] 004`, a *completion* counter immediately before a
+scene id, which reads as "004 is the first scene in the film". The film was
+always correct — the display was not. This is precisely what D-091 fixed in the
+window, where logging completion order "read as a scrambled film", and the CLI
+kept the misreading because nobody had rendered a real project and read the
+output as a stranger would. It is `[  1/4 done]` now.
+
 ### D-074 — The `kenburns-batch` master brief does not exist on this machine · Accepted
 
 Searched 2026-08-26: no file matching `*kenburns*` anywhere under `~/Desktop`,
