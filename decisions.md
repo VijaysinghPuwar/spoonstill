@@ -4744,6 +4744,58 @@ would teach people to skip it. It also does not test the *published* one-liner,
 which fetches from a mutable `master` URL; that is a separate question and it is
 still open.
 
+### D-137 — The exit gates run where the author is not · Accepted
+
+Decided 2026-08-30, from noticing while adding D-136 that `make gates` runs in
+**no CI job at all**.
+
+That is a strange gap to have. `README.md` calls `make gates` *"the honest
+answer to 'does this work?'"*, `plan.md` defines every milestone's exit by it,
+and this file's own instruction to anyone checking the work is to run it first.
+29 checks that render real media and assert real properties — and they had only
+ever executed on one laptop. D-131's phrasing, *"the shell gates stay
+macOS-only"*, reads as though they run on the macOS runner; they ran nowhere.
+
+The two jobs that did exist assert something narrower. `cargo test --workspace`
+covers the library and CLI behaviour; the gates cover the promises — frame-exact
+output, byte-identical films across `--jobs`, cache invalidation, the render
+lock, a Unicode filename surviving the join.
+
+**Measured before wiring it up:** 29/29 green in **2m06** locally, with the
+release build and fixture generation inside that. Cheap enough to run on every
+push.
+
+**A shallow clone breaks M0's fifth gate, and that was found before pushing
+rather than after.** The gate is:
+
+```sh
+git log --oneline | tail -1 | grep -q "planning corpus before any code"
+```
+
+`actions/checkout` defaults to `fetch-depth: 1`, where that last line is `HEAD`.
+Verified with a real `git clone --depth 1` of this repository: the gate's own
+command exits 1. The job sets `fetch-depth: 0`.
+
+**`edge-tts` is deliberately not installed on the runner.** M2's gate 7 has two
+halves, and the author's machine can only ever exercise one of them. Without a
+provider, a written line must make the render **fail and name the missing
+tool** — never quietly substitute silence for something a person wrote (D-020).
+That half has never been checked by anything but reading, and now it runs on
+every push.
+
+**The duplication is deliberate.** M0's gates 2 through 4 are `cargo test`,
+`cargo clippy` and `cargo fmt --check`, which the `check` job also runs. A gate
+that pointed at another job and assumed it had run would be the same move as
+D-125's publish gate counting assets without fetching any.
+
+**Known risk, written down before its first run rather than after.** M1's
+cancellation gate starts a render, waits for it to report a frame, then sends
+`SIGINT`. If a runner ever completes that render between those two points, the
+gate reports *"an interrupted render reported success"* — a timing failure, not
+a defect. It has not happened here. If it happens there, the fix is a longer
+narration fixture, which the gate's own message already says; it is not to
+relax the assertion.
+
 ### D-074 — The `kenburns-batch` master brief does not exist on this machine · Accepted
 
 Searched 2026-08-26: no file matching `*kenburns*` anywhere under `~/Desktop`,
