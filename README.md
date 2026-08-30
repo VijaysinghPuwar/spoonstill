@@ -261,7 +261,7 @@ make fixtures   # synthesize the test media
 make gates      # every milestone's exit gates — the real state of the build
 ```
 
-`make gates` is the honest answer to "does this work?". It runs 25 checks
+`make gates` is the honest answer to "does this work?". It runs 29 checks
 across M0, M1 and M2 and prints pass/fail for each.
 
 ---

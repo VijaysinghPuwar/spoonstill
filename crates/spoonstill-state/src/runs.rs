@@ -76,6 +76,27 @@ pub fn index_path() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join(RUNS_FILE))
 }
 
+/// Open the activity log for an append that can actually be locked.
+///
+/// `read` is not here to read. On Windows a handle opened only for append
+/// carries neither `GENERIC_READ` nor `FILE_WRITE_DATA`, and `LockFileEx`
+/// needs one of them — so `File::lock` returned `Err` on every Windows write
+/// this program has ever made, and D-122's lock existed on macOS only.
+/// `std::fs::File::lock` says so in as many words: *"locking a file will fail
+/// if the file is opened only for append. To lock a file, open it with one of
+/// `.read(true)`, `.read(true).append(true)`, or `.write(true)`."*
+///
+/// It is a function rather than four lines inside `append_line` so that
+/// `the_log_handle_can_actually_be_locked` tests the handle this program
+/// really opens, instead of a copy of it that can drift.
+fn open_for_locked_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(path)
+}
+
 /// A [`Diagnostics`] sink that appends every event to the machine-wide CSV.
 ///
 /// Bound to one project at construction, because the column that makes this
@@ -137,17 +158,19 @@ impl ActivityLog {
         // Twice at most: once to discover the file is due to roll, once to
         // write into the fresh one it becomes.
         for _ in 0..2 {
-            let Ok(file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)
-            else {
+            let Ok(file) = open_for_locked_append(&self.path) else {
                 return;
             };
             // Blocking: a log line is worth waiting a moment for, and the
             // alternative is dropping it. A poisoned or unsupported lock is not
             // a reason to lose the row, so failure here falls through to the
             // write rather than returning.
+            //
+            // That tolerance is why the Windows defect above stayed invisible:
+            // a lock whose failure is survivable is a lock whose failure is
+            // silent. `the_log_handle_can_actually_be_locked` is the test that
+            // makes this particular failure loud, because it is not a race —
+            // it was every write on that platform.
             let locked = file.lock().is_ok();
 
             let len = file.metadata().map_or(0, |m| m.len());
@@ -377,6 +400,43 @@ mod tests {
         assert_eq!(field("render"), "\"render\"");
     }
 
+    /// The lock D-122 relies on must actually be acquired, not merely attempted.
+    ///
+    /// `append_line` tolerates a failed lock — dropping an operator's log row is
+    /// worse than a rare interleave — and that tolerance hid a permanent
+    /// failure: on Windows the handle was opened for append only, `LockFileEx`
+    /// refused it, and every write on that platform went unlocked. A race that
+    /// is lost occasionally looks like flakiness; this asserts the thing that
+    /// was never true there at all.
+    ///
+    /// It exercises `open_for_locked_append`, which is the function
+    /// `append_line` itself calls, so the two cannot drift apart.
+    #[test]
+    fn the_log_handle_can_actually_be_locked() {
+        let dir =
+            std::env::temp_dir().join(format!("spoonstill-runs-lockable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let path = dir.join("runs.csv");
+
+        // Both states the real code meets: a log that does not exist yet, and
+        // one that already has rows in it.
+        for round in ["a fresh log", "an existing log"] {
+            let file = open_for_locked_append(&path).expect("open");
+            file.lock().unwrap_or_else(|e| {
+                panic!(
+                    "{round}: the activity log cannot be locked, so D-122's \
+                     cross-process guarantee does not hold here: {e}"
+                )
+            });
+            file.unlock().expect("unlock");
+            drop(file);
+            std::fs::write(&path, "a row\n").expect("seed");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The file is machine-wide, so its writers are *different processes* —
     /// the one case a per-project lock cannot cover (D-122).
     ///
@@ -385,13 +445,17 @@ mod tests {
     /// rows; afterwards, eight rounds clean.
     ///
     /// **What this test does and does not cover.** It fails against the
-    /// original `append_line`, which is what makes it a regression test. It
-    /// does *not* isolate the lock: with the lock alone removed it still
-    /// passes, because within one process the length check and the single
-    /// `write_all` are enough. The lock is for the case this test cannot
-    /// reach — two operating-system processes, which is the only way this
-    /// machine-wide file is ever written — and the evidence for that is the
-    /// eight-round reproduction above, not this.
+    /// original `append_line`, which is what makes it a regression test.
+    ///
+    /// It was documented here as *not* isolating the lock — "within one
+    /// process the length check and the single `write_all` are enough". That
+    /// was wrong, and Windows disproved it: with no effective lock two threads
+    /// both observe `len == 0` between the open and the write, and both write a
+    /// header. The reasoning mistook a check and a write in sequence for an
+    /// atomic one. This test found the Windows defect precisely because the
+    /// claim was false — but only when the race lost, so it passed two CI runs
+    /// and failed the third. `the_log_handle_can_actually_be_locked` is the
+    /// deterministic half.
     #[test]
     fn concurrent_writers_produce_one_header_and_whole_rows() {
         // Its own folder: the test above uses `spoonstill-runs-<pid>/runs.csv`

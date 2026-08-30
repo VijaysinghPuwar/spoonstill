@@ -4519,6 +4519,85 @@ Availability verified 2026-08-26: `spoonstill` free on crates.io and npm;
 The workspace directory is still `vidio/` and renaming it is the author's call;
 nothing in the build depends on it (D-013's constant is the only coupling).
 
+### D-135 — A lock whose failure is tolerated is a lock that was never taken · Accepted
+
+Decided 2026-08-30, from the Windows CI leg failing on `master` at the commit
+`v0.1.5` was cut from. The failing test was D-122's own:
+
+```
+test runs::tests::concurrent_writers_produce_one_header_and_whole_rows ... FAILED
+assertion `left == right` failed: more than one header — two writers both
+thought the file was new
+```
+
+**It is a race, not a regression.** `runs.rs` has not changed since D-122
+landed, and the same commit range passed the Windows leg twice (runs
+`33300757792`, `33301401098`) and failed it once (`33301841728`). Code that
+passes twice and fails once is not code that broke; it is code that was always
+wrong and usually got away with it.
+
+**The mechanism, from the pinned toolchain's own source rather than memory.**
+`append_line` opened the log with `.create(true).append(true)`. In
+`library/std/src/sys/fs/windows.rs`, `get_access_mode` maps that to
+`(false, _, true, None) => FILE_GENERIC_WRITE & !FILE_WRITE_DATA` — a handle
+carrying neither `GENERIC_READ` nor `FILE_WRITE_DATA`. `File::lock` is
+`LockFileEx`, which requires one of them, and `std::fs::File::lock`'s own
+documentation says so in as many words:
+
+> On Windows, locking a file will fail if the file is opened only for append.
+> To lock a file, open it with one of `.read(true)`, `.read(true).append(true)`,
+> or `.write(true)`.
+
+So `file.lock()` returned `Err` on **every Windows write this program has ever
+made**. D-122's cross-process guarantee — the one case a per-project lock cannot
+cover — existed on macOS only, and shipped in v0.1.1 through v0.1.5.
+
+**What actually hid it is the line above the lock**, not the lock:
+
+```rust
+// A poisoned or unsupported lock is not a reason to lose the row, so
+// failure here falls through to the write rather than returning.
+let locked = file.lock().is_ok();
+```
+
+That tolerance is right — dropping an operator's log row is worse than a rare
+interleave — and it is also why a *permanent, platform-wide* failure produced no
+signal. The rule this decision is named for: **a lock whose failure is
+survivable must still be a lock whose failure is loud.** Tolerating a failure at
+runtime is not the same as never asserting it can succeed.
+
+The fix is one access right — `.read(true)` — extracted into
+`open_for_locked_append` so that the new test exercises the handle the program
+actually opens rather than a copy of it that can drift.
+
+**D-122's own test comment was wrong, and that is the second finding.** It said:
+
+> It does *not* isolate the lock: with the lock alone removed it still passes,
+> because within one process the length check and the single `write_all` are
+> enough.
+
+Windows disproved it. With no effective lock, two threads both observe `len == 0`
+between the open and the write and both write a header — the reasoning mistook a
+check and a write *in sequence* for an atomic one. The test did detect the
+missing lock; it just detected it only when the race lost, which is why it took
+three CI runs to say so. The comment is corrected in place, because a false
+claim about what a test covers is how the next person decides not to look.
+
+**Every other file lock in the tree was checked, and D-113's is correct.** The
+render lock in `film.rs` opens `.read(true).write(true)`, which carries
+`GENERIC_READ`, so `LockFileEx` succeeds there. The serious lock — the one that
+stops two renders corrupting one project — was never affected. It was checked
+rather than assumed.
+
+**Stated limit, and it is the same one D-132 records.** Compiling for Windows is
+clean both before and after this change: the defect is a runtime access right,
+not a type error. `the_log_handle_can_actually_be_locked` is deterministic
+rather than racy, so the Windows runner will fail it every time against the old
+open options instead of one time in three — but **this machine cannot prove
+that**, because `flock` on macOS is happy with an append-only descriptor and the
+test passes here either way. The proof is the Windows CI leg, and this decision
+is not finished until that leg is green.
+
 ### D-074 — The `kenburns-batch` master brief does not exist on this machine · Accepted
 
 Searched 2026-08-26: no file matching `*kenburns*` anywhere under `~/Desktop`,
