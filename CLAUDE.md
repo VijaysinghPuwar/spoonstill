@@ -178,6 +178,68 @@ cargo build --release -p spoonstill-cli
 cargo run --release -p spoonstill-desktop
 ```
 
+### Later on 2026-08-30 — an outside read, and what running things found
+
+**Two decisions, D-135 and D-136, both from executing something rather than
+reading it.** An outside assessment of the tree was checked claim by claim
+before any of it was acted on, which is the only reason the two real defects
+below were found — neither was in the assessment.
+
+**Check the assessment, not just the code.** Its headline factual claim — *"the
+repo is ahead of the tag, `still --version` is 0.1.5 while the latest release is
+v0.1.4"* — was **stale**: `v0.1.5` is tagged at `HEAD`, pushed, published and
+undrafted with exactly D-133's six assets. D-102's gate had already done its job.
+Two claims were true and are now fixed (the README said `make gates` runs 25
+checks; it runs **29**), and one was true but not mine to act on (the licence is
+D-062 and D-134, and is the author's).
+
+**D-135 — the activity log's lock never worked on Windows.** The Windows CI leg
+was **red on `master`** at the commit `v0.1.5` was cut from, in D-122's own test.
+It is a race, not a regression: the same code passed that leg twice and failed
+once. `append_line` opened `runs.csv` with `.create(true).append(true)`, which
+std maps to `FILE_GENERIC_WRITE & !FILE_WRITE_DATA` — neither `GENERIC_READ` nor
+`FILE_WRITE_DATA` — and `File::lock` is `LockFileEx`, which needs one of them.
+`std::fs::File::lock`'s own documentation says so outright. So the lock returned
+`Err` on **every Windows write this program has ever made**, and D-122's comment
+("failure here falls through to the write") meant it wrote unlocked. Shipped in
+v0.1.1 through v0.1.5. The fix is `.read(true)`. **What hid it is the tolerance,
+not the lock** — a failed lock is survivable by design, which is exactly why a
+permanent failure produced no signal. D-122's own test comment claimed the lock
+could not be isolated; Windows disproved it, and it is corrected in place. Every
+other file lock was checked: **D-113's render lock is correct** and was never
+affected.
+
+**D-136 — the installers had never been executed anywhere.** Not `install.ps1`
+(no PowerShell on this machine, D-128), not `install.sh` in CI. Both are the
+first thing a stranger runs and both are piped into a shell. They now run on
+every push, and the first run found two more things:
+
+1. **A workflow GitHub rejects runs no jobs at all** — no logs, no annotations,
+   `gh run view --log-failed` answering *"log not found"*. `runner.temp` is not
+   an allowed context in a job-level `env:`. From which: **CI cannot check its
+   own syntax**, so `make workflows` (wired into `make lint`) is local and fails
+   loudly when `actionlint` is missing. `actionlint` was **already installed on
+   this machine** when the bad workflow went out — `.github/` was simply the one
+   corner of the tree no gate covered.
+2. **`install.sh`'s error message was unreachable.** Under `set -euo pipefail` a
+   failing `curl -f` killed the script at the pipeline, so the `die` on the next
+   line could never print. Every likely failure — a rate-limit 403, an offline
+   machine, no releases — gave a bare `curl: (56)`. That is D-123's rule broken
+   in the installer's first network call. `install.ps1` did **not** have this
+   defect and passed on its first execution ever.
+
+Both installer jobs are green, and non-vacuously: the macOS job downloads the
+real assets, verifies the checksums, installs, asserts `still --version` carries
+the released tag, and asserts `/Applications/spoonstill.app` has **no
+`com.apple.quarantine` attribute** — D-099 proven for the first time rather than
+reasoned about.
+
+**Still not done, and still the author's call:** the licence (D-062), renaming
+`vidio/`, pinning the installer one-liner's mutable `master` URL (it trades
+against D-133's six-row release page), `PROCESS.md`, a GUI smoke test, the
+`ttf-parser` exposure, and M3 versus splitting one long narration on silence.
+**`make gates` still runs in no CI job at all** — the 29 checks are local-only.
+
 ### State as of 2026-08-30 — an audit, worked through end to end
 
 **Twenty-eight decisions landed in one session, D-107 through D-134.** They came
