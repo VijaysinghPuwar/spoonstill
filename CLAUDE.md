@@ -234,11 +234,64 @@ the released tag, and asserts `/Applications/spoonstill.app` has **no
 `com.apple.quarantine` attribute** — D-099 proven for the first time rather than
 reasoned about.
 
-**Still not done, and still the author's call:** the licence (D-062), renaming
-`vidio/`, pinning the installer one-liner's mutable `master` URL (it trades
-against D-133's six-row release page), `PROCESS.md`, a GUI smoke test, the
-`ttf-parser` exposure, and M3 versus splitting one long narration on silence.
-**`make gates` still runs in no CI job at all** — the 29 checks are local-only.
+**D-137 — the exit gates run where the author is not.** `make gates` ran in no
+CI job at all; 29 checks that render real media had only ever executed on this
+laptop. Now on every push, green in ~10 minutes. A shallow clone breaks M0's
+fifth gate (`git log | tail -1` is HEAD at depth 1), found with a real
+`git clone --depth 1` before pushing. `edge-tts` is deliberately absent on the
+runner, so M2's gate 7 finally exercises the half this machine cannot: without a
+provider a written line must **fail and name the missing tool** (D-020).
+
+**D-138 — the published one-line installer was broken for every user.** Both
+installer jobs failed on the same file within three seconds. That reads exactly
+like a flaky CDN, and the drafted fix was `--retry-all-errors`. Running the
+installer locally killed that theory: `/releases/latest` was returning
+**v0.1.2**, which predates D-133 and has no `SHA256SUMS.txt`, so both installers
+correctly refused to install unverified. Cause: `release.yml` ended with an
+unconditional `gh release edit "$TAG" --draft=false --latest`, and a re-push of
+an old tag marked *itself* latest. `--latest` is now conditional on the tag being
+the greatest published version by `sort -V`. **So a 404 is deliberately not
+retried in either installer** — retrying would have buried the defect under a
+plausible story. The test for the fix also lied at first: it ran under zsh, which
+does not word-split, while the workflow runs bash.
+
+**D-139 — the unmaintained parser was not the risk; the caption band was.** An
+outside read called `ttf-parser` the project's one supply-chain exposure, "in the
+path that processes operator-supplied text". It is not: `ttf-parser` parses
+**font files**, and every font here is `include_bytes!`d — nothing loads a font
+from a path, config, env or project. Checking that premise found the real defect
+in *our* code: a hostile-text corpus produced a **119 420px band on a 1080px
+frame**, reachable through the documented pipeline (D-126 permits a 256 KiB
+script, D-106 makes a `.txt` beside a recording a caption, and `cues()` bounds
+cue *count* by duration, so a short scene forces very long cues). 291.8 MB of
+RGBA for one cue, 49 s, times `--jobs`. This is **D-114 one layer down**. Clamped
+to the frame — not to `max_lines`, which would silently shorten captions in films
+that already exist. D-130's byte-identical assertions still pass.
+
+**D-140 — reordering re-renders the film, and the alternative is worse.** Found
+by *using* the tool: a pure reorder reports "0 segments reused", because
+`MotionSpec::seeded` puts the scene **index** in the seed, so a photo's move
+depends on where it sits. Moving one scene to the front of a 500-scene film
+re-encodes all 500 **and changes the motion on scenes nobody touched**. The
+obvious fix is refused for D-118's recorded reason. Also fixed there: the CLI
+printed `[  1/4] 004`, a completion counter that reads as film order — D-091's
+defect, in the surface D-091 calls permanent.
+
+**A hundred scenes, measured** (`ffmpeg-findings.md` §11). Everything in §10 was
+fixtures. 100 photos of seven sizes, each with its own recording: import 0.06 s,
+validate 5.7 s, cold render **59 s**, film 340.021 s against 340.000 expected —
+inside one frame across a hundred joins. Captioned, `--jobs 1` is 2m02 and
+`--jobs 8` is 1m02, **byte-identical**: gate 3 asserts that on four scenes, and
+it holds at a hundred where the pool saturates and every worker rasterizes text.
+
+**Still not done, and still the author's call:** **the licence (D-062)** —
+deliberately not taken, because releasing under an open licence is an
+irrevocable grant and the one thing here a commit cannot undo; renaming
+`vidio/`; pinning the installer one-liner's mutable `master` URL (it trades
+against D-133's six-row release page); a GUI smoke test (**check first whether
+`tauri-driver` supports macOS** — it may be Windows/Linux only, which would
+confine it to the runner); and M3 versus splitting one long narration on
+silence. `PROCESS.md` is done.
 
 ### State as of 2026-08-30 — an audit, worked through end to end
 
