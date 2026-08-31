@@ -3433,7 +3433,7 @@ dependencies = [
 
 [[package]]
 name = "spoonstill-app"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "csv",
  "serde",
@@ -3446,7 +3446,7 @@ dependencies = [
 
 [[package]]
 name = "spoonstill-cli"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "clap",
  "ctrlc",
@@ -3457,11 +3457,11 @@ dependencies = [
 
 [[package]]
 name = "spoonstill-core"
-version = "0.1.5"
+version = "0.1.6"
 
 [[package]]
 name = "spoonstill-desktop"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -3475,7 +3475,7 @@ dependencies = [
 
 [[package]]
 name = "spoonstill-media"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "fontdue",
  "serde",
@@ -3485,14 +3485,14 @@ dependencies = [
 
 [[package]]
 name = "spoonstill-state"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "spoonstill-core",
 ]
 
 [[package]]
 name = "spoonstill-tts"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "spoonstill-core",
  "spoonstill-media",

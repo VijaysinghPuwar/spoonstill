@@ -987,7 +987,22 @@ async function loadVoices() {
   } catch (error) {
     voicesLoaded = false;
     state.className = "state missing";
-    state.textContent = String(error);
+    // Same shape as a missing tool (D-105): one sentence and a button,
+    // never a wall of Python traceback with nothing to press. This is the
+    // network call `provider_status` above does not cover (D-094) — it can
+    // fail on a machine that has `edge-tts` and still has no route to the
+    // service right now, which reads exactly like a broken install unless
+    // there is something here to press (D-141).
+    state.textContent = "";
+    drawFix(
+      el("voice-fix"),
+      {
+        ready: false,
+        need: "Could not load the voice list.",
+        detail: String(error),
+      },
+      () => loadVoices(),
+    );
     return;
   }
 

@@ -602,6 +602,80 @@ fn classify(stderr: &str) -> Fault {
     Fault::Permanent
 }
 
+/// A sentence an operator can act on, for the reason `classify` already
+/// decided was worth retrying (D-141).
+///
+/// `classify` answers "should this run again"; this answers "what does the
+/// operator do while it does". A dropped websocket and a machine with no route
+/// to `speech.platform.bing.com` are both `Transient`, but they call for
+/// different action, and "the voice service failed 3 times: aiohttp.client_
+/// exceptions.ClientConnectorDNSError: ... ssl:<ssl.SSLContext object at
+/// 0x102ca4c40> [nodename nor servname provided, or not known]" — real stderr
+/// from an operator's machine — tells a non-Python-reading person neither.
+///
+/// Grouped on the same markers `classify`'s `TRANSIENT` list already matches,
+/// so a reason this misses was never going to be retried either. Anything
+/// that reaches the fallback is shown with no invented cause, which is the
+/// same restraint `classify`'s own default takes — guessing wrong here would
+/// send someone to check their Wi-Fi for a rate limit.
+///
+/// This build targets macOS and Windows both (D-071), and `edge-tts` is the
+/// same Python package on either — `ClientConnectorDNSError` and
+/// `socket.gaierror` are the exception's class name, unchanged by platform.
+/// Only the OS text *inside* `gaierror` differs (macOS: `nodename nor servname
+/// provided, or not known`; Windows: `getaddrinfo failed`), so both are listed
+/// as a second net under the class-name markers rather than the only signal.
+fn network_hint(reason: &str) -> &'static str {
+    // Never got a socket open: the DNS lookup failed, the route was refused,
+    // or there was nothing to route to. This is the bucket the reported
+    // failure above sits in, and the one "check your connection" actually
+    // answers.
+    const NO_ROUTE: &[&str] = &[
+        "ClientConnector",
+        "ClientProxyConnectionError",
+        "socket.gaierror",
+        "nodename nor servname provided",
+        "Temporary failure in name resolution",
+        "getaddrinfo failed",
+        "ConnectionRefusedError",
+    ];
+    // A socket opened and then stopped answering — a VPN or a captive portal
+    // changing its mind mid-request, not an address that was never reachable.
+    const DROPPED: &[&str] = &[
+        "ServerDisconnected",
+        "ConnectionResetError",
+        "WebSocketError",
+        "ssl.SSLError",
+        "websockets",
+    ];
+    const SLOW: &[&str] = &["TimeoutError"];
+    // The service answered and said no for now — a rate limit, or the
+    // anti-abuse token this module's own header comment says moves.
+    const BUSY: &[&str] = &[
+        "429",
+        "503",
+        "SkewAdjustmentError",
+        "UnexpectedResponse",
+        "UnknownResponse",
+    ];
+
+    if NO_ROUTE.iter().any(|marker| reason.contains(marker)) {
+        "this machine could not reach Microsoft's voice service — check your \
+         internet connection, then any VPN or firewall, and try again"
+    } else if DROPPED.iter().any(|marker| reason.contains(marker)) {
+        "the connection to the voice service dropped partway through — check \
+         your internet connection and try again"
+    } else if SLOW.iter().any(|marker| reason.contains(marker)) {
+        "the voice service did not answer in time — check your internet \
+         connection and try again"
+    } else if BUSY.iter().any(|marker| reason.contains(marker)) {
+        "the voice service turned this request down for now — waiting a \
+         moment and trying again usually clears this"
+    } else {
+        "the voice service could not be reached"
+    }
+}
+
 /// Turn one failed run into a shaped error, or into a reason to try again.
 ///
 /// The shaped errors are the point. `ValueError: Invalid voice 'en-GB-Ryan'.`
@@ -859,8 +933,9 @@ impl Edge {
                 provider: ID.to_owned(),
                 text: opening(text),
                 detail: format!(
-                    "the voice service failed {attempts} time{} in a row. \
+                    "{} — it failed {attempts} time{} in a row. \
                      The last attempt said: {reason}",
+                    network_hint(&reason),
                     if attempts == 1 { "" } else { "s" }
                 ),
             }),
@@ -1010,7 +1085,8 @@ impl Provider for Edge {
             Err((attempts, Failure::Transient(reason))) => Err(TtsError::Unavailable {
                 provider: ID.to_owned(),
                 detail: format!(
-                    "could not list its voices after {attempts} attempt{}: {reason}",
+                    "{} — could not list its voices after {attempts} attempt{}: {reason}",
+                    network_hint(&reason),
                     if attempts == 1 { "" } else { "s" }
                 ),
             }),
@@ -1663,6 +1739,14 @@ ValueError: Invalid voice 'not-a-voice'.
 aiohttp.client_exceptions.ClientProxyConnectionError: Cannot connect to host 127.0.0.1:9 ssl:<ssl.SSLContext object at 0x10b01b790> [Connect call failed ('127.0.0.1', 9)]
 ";
 
+    /// A machine with no route to the service at all — real stderr reported
+    /// from an operator's Mac on 2026-08-31 (D-141). `--list-voices` never got
+    /// a socket open, so this is what an offline or DNS-blocked machine
+    /// produces, not what a dropped mid-render connection produces.
+    const DNS_UNREACHABLE: &str = "\
+aiohttp.client_exceptions.ClientConnectorDNSError: Cannot connect to host speech.platform.bing.com:443 ssl:<ssl.SSLContext object at 0x102ca4c40> [nodename nor servname provided, or not known]
+";
+
     #[test]
     fn a_failure_the_service_will_repeat_is_not_retried() {
         assert_eq!(classify(NO_AUDIO), Fault::Permanent);
@@ -1685,6 +1769,51 @@ aiohttp.client_exceptions.ClientProxyConnectionError: Cannot connect to host 127
         assert_eq!(
             classify("edge_tts.exceptions.UnknownResponse: unexpected message"),
             Fault::Transient
+        );
+        assert_eq!(
+            classify(DNS_UNREACHABLE),
+            Fault::Transient,
+            "a machine offline right now may not be offline on the next attempt"
+        );
+    }
+
+    /// D-141: the reason a retry loop gives up is shown to an operator, not
+    /// only logged for one — so it has to say something a non-Python-reader
+    /// can act on, and it must not claim a cause the reason does not support.
+    #[test]
+    fn network_hint_names_a_cause_worth_acting_on() {
+        assert!(
+            network_hint(DNS_UNREACHABLE).contains("internet connection"),
+            "the exact failure this decision was written about"
+        );
+        assert!(
+            network_hint(NO_NETWORK).contains("internet connection"),
+            "a refused connection is the same bucket as a DNS failure — \
+             neither ever opened a socket"
+        );
+        assert!(
+            network_hint("edge_tts.exceptions.WebSocketError: Received 403")
+                .contains("dropped partway"),
+            "403 here means the anti-abuse token moved mid-session, not that \
+             the machine has no route"
+        );
+        assert!(network_hint("a TimeoutError occurred").contains("did not answer in time"));
+        assert!(network_hint("HTTP 429 Too Many Requests").contains("turned this request down"));
+        assert!(
+            network_hint(
+                "aiohttp.client_exceptions.ClientConnectorDNSError: Cannot connect to host \
+                 speech.platform.bing.com:443 ssl:None [getaddrinfo failed]"
+            )
+            .contains("internet connection"),
+            "D-071: this build targets Windows too, whose gaierror text \
+             differs from macOS's — the class name and the Windows text both \
+             have to reach the same bucket"
+        );
+        assert_eq!(
+            network_hint("something this build has never seen"),
+            "the voice service could not be reached",
+            "an unrecognised reason gets the honest generic sentence, never a \
+             guessed cause"
         );
     }
 

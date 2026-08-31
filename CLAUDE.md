@@ -1181,6 +1181,31 @@ the markup and every `invoke("cmd")` is registered: both fail **silently** in a
 webview — a listener on `null` throws and takes every listener after it, and
 the window opens looking correct with half its controls dead.
 
+**D-105's fix had a sibling gap, and it was the one an operator actually hit**
+(D-141). Reported 2026-08-31: a Voice screen with `edge-tts` installed and
+`provider_status` reporting Ready still showed a wall of Python — an
+`aiohttp.client_exceptions.ClientConnectorDNSError`, an `SSLContext` memory
+address, `[nodename nor servname provided, or not known]` — with no button
+under it. `speech.platform.bing.com` was confirmed reachable from a second
+machine at the same time (`dig`, `curl`, `python3 socket.getaddrinfo` all
+answered normally); the reported Mac had no route to it at that moment, which
+`classify()` already retries correctly as `Transient` (D-094). What was missing
+was everything *around* the correct retry: `voices()`'s exhausted message was
+the raw stderr line verbatim, and `loadVoices()`'s second `try` — around
+`invoke("voices", …)` — was the one branch on the whole screen that caught an
+error without calling `drawFix`, the exact defect D-105's own paragraph
+describes, in the one place D-105's fix did not reach. `network_hint()` now
+turns `classify()`'s own `TRANSIENT` markers into a sentence worth acting on —
+never got a socket open (DNS, a refusal) says "check your internet connection,
+then a VPN or firewall"; a socket that opened and stopped answering, or a
+timeout, says the same; a 429/503/token-skew answer says wait and retry — and
+refuses to guess for anything it does not recognise, same restraint as
+`classify`'s own default. The Voice screen's `voices()` catch now draws
+`voice-fix` too, so "Check again" is there instead of a dead end. **This does
+not and cannot make an offline Mac reach Microsoft's service** — `still voices`
+and the diagnostics bundle (D-016) read the friendlier sentence for the same
+reason a person does, because both go through the one `voices()` function.
+
 **A binary is located, never named** (D-103, D-104). "I open the application
 and open the project and it's not opening" was a folder of six photographs
 opening as **zero scenes**: a macOS app launched from Finder gets launchd's
@@ -1317,7 +1342,10 @@ D-102 before cutting a release, bumping a version, or writing a commit
 message, D-103/D-104 before spawning a program, touching `tools::locate`,
 the `MediaCheck::ready` pre-flight, or the window's empty-project screen, and
 **D-105 before touching `Remedy`, `spoonstill_app::tooling`, `drawFix`, or
-anything that reports a missing program to an operator**. D-054 through D-057 and D-075 through D-082 were added during M2 and
+anything that reports a missing program to an operator**, and **D-141 before
+touching `network_hint`, `classify`'s markers, or a failure path on the Voice
+screen** — the sibling of D-105 for a transient network error rather than a
+missing tool. D-054 through D-057 and D-075 through D-082 were added during M2 and
 are all Accepted — read D-056 before touching the import path, D-057 before
 touching concat or transitions, D-076/D-077 before touching the pool, D-078
 before changing what the finished film is asserted against, D-079 before

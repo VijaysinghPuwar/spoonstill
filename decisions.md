@@ -5018,6 +5018,101 @@ window, where logging completion order "read as a scrambled film", and the CLI
 kept the misreading because nobody had rendered a real project and read the
 output as a stranger would. It is `[  1/4 done]` now.
 
+### D-141 — A DNS failure reads as a Python exception, and the Voice screen had no button to press · Accepted
+
+Reported 2026-08-31: an operator's Voice screen, with `edge-tts` installed and
+`provider_status` reporting Ready, showed this in place of the catalogue:
+
+```
+the edge voice service is not usable: could not list its voices after 3 attempts: aiohttp.client_exceptions.ClientConnectorDNSError: Cannot connect to host speech.platform.bing.com:443 ssl:<ssl.SSLContext object at 0x102ca4c40> [nodename nor servname provided, or not known]
+```
+
+Checked from a second machine at the same time: `speech.platform.bing.com`
+resolved and answered — `dig`, `curl -I` and `python3 -c
+"socket.getaddrinfo(...)"` all succeeded, and a bare `curl` got the HTTP 400 the
+endpoint correctly returns to a request with no payload. The service was not
+down. The reported machine had no route to it at that moment — a fact about
+that Mac's network (no connection, a VPN, a firewall, a captive portal), and no
+more diagnosable from inside this repository than "check the network on that
+Mac" is.
+
+**What was actually a defect here, and it is two things, not one.**
+`classify()` already puts `ClientConnectorDNSError` in `TRANSIENT` through its
+`"ClientConnector"` marker (D-094), so the three retries and the eventual
+`Unavailable` were exactly correct. But:
+
+1. `voices()`'s exhausted-retry message is the raw last line of the Python
+   traceback, unmodified, in front of an operator who has never seen `aiohttp`.
+   `ssl:<ssl.SSLContext object at 0x102ca4c40>` and `nodename nor servname
+   provided` are true statements that tell a non-Python-reader nothing to do.
+2. `loadVoices()`'s second `try` block — around `invoke("voices", …)`, which is
+   the network call `provider_status` above it does not cover — caught the
+   error and printed it as the screen's only state text, with `voice-fix` left
+   untouched (hidden, from the fresh-tab default). This is the exact defect
+   D-105 was written about — *"the Voice screen shipped with the report and
+   without the button"* — recurring in the one branch of that same screen
+   D-105's own fix did not reach. `ui_contract.rs`'s
+   `every_screen_that_reports_a_missing_tool_can_also_fix_it` stayed green
+   throughout, because it asserts the button exists **on the screen**, not that
+   every failure path on it draws one — a gap worth naming for whoever
+   tightens that test next.
+
+**The fix.** `network_hint()` in `edge.rs` groups the same markers
+`classify()`'s `TRANSIENT` list already recognises into what an operator can
+do about each, and nothing more than that:
+
+- Never got a socket open — `ClientConnector*`, `ClientProxyConnectionError`,
+  `socket.gaierror`, `Temporary failure in name resolution`,
+  `ConnectionRefusedError` — "check your internet connection, then any VPN or
+  firewall, and try again". This is the reported failure's own bucket.
+- A socket opened and then stopped answering — `ServerDisconnected`,
+  `ConnectionResetError`, `WebSocketError`, `ssl.SSLError`, `websockets` — the
+  same check, a different frame: a VPN or captive portal changing its mind
+  mid-request, not an address that was never reachable.
+- `TimeoutError` — did not answer in time; same check.
+- `429`, `503`, `SkewAdjustmentError`, `UnexpectedResponse`, `UnknownResponse` —
+  the service answered and said no for now, which this module's own header
+  already explains is what a moved anti-abuse token looks like — wait a moment
+  and try again.
+- Anything else gets `classify`'s own default restraint: "the voice service
+  could not be reached", and no invented cause. Guessing wrong here would be
+  D-105's mistake with different words — sending someone to check their Wi-Fi
+  for what is actually a rate limit, say.
+
+This build targets macOS and Windows both (D-071), and both markers and hint
+are matched on the exception's **class name**, which `edge-tts` — one Python
+package, either platform — raises identically on both. Only the operating
+system's text *inside* `socket.gaierror` differs (macOS: `nodename nor servname
+provided, or not known`; Windows: `getaddrinfo failed`), so both strings are
+listed as a second net under the class-name markers rather than the only
+signal, and a test pins a Windows-shaped `ClientConnectorDNSError` to the same
+bucket as the macOS one that was actually reported.
+
+Both places that build a message from an exhausted `Failure::Transient` —
+`speak()`'s and `voices()`'s — now lead with this sentence before the raw
+reason, so `still voices`, a failed render, and the diagnostics bundle (D-016)
+all read it, not only the window. On the window, `loadVoices()`'s `voices()`
+catch now calls `drawFix(el("voice-fix"), …)` exactly as the first `try` block
+already does for a missing tool: a short `need` ("Could not load the voice
+list."), the full hint-led message behind the same "Technical details"
+disclosure a missing tool already uses, and a "Check again" button that reruns
+`loadVoices()` without leaving the tab.
+
+**What this does not and cannot fix.** No code change here gives a Mac a route
+to `speech.platform.bing.com` it does not have — that is the same honest limit
+`how_to_install()` already accepts for a missing binary, extended to a missing
+network path. What changed is what the operator is told while that is true, and
+what they can press.
+
+Proven by `network_hint_names_a_cause_worth_acting_on` in `edge.rs` — the exact
+reported stderr (kept as `DNS_UNREACHABLE`), a refused connection, a dropped
+websocket, a timeout, a rate limit, and an unrecognised reason, each checked
+against the sentence it should and should not produce — and by the existing
+`edge_retry.rs` assertions (`detail.contains("3 times")`,
+`detail.contains("Cannot connect to host")`) continuing to pass unchanged,
+which is what confirms the raw reason is still in the message and not replaced
+by the hint.
+
 ### D-074 — The `kenburns-batch` master brief does not exist on this machine · Accepted
 
 Searched 2026-08-26: no file matching `*kenburns*` anywhere under `~/Desktop`,
