@@ -5113,6 +5113,78 @@ against the sentence it should and should not produce — and by the existing
 which is what confirms the raw reason is still in the message and not replaced
 by the hint.
 
+### D-142 — Windows spells a path with a prefix FFmpeg cannot read, and the FFmpeg it names is not on the shim path · Accepted
+
+Reported 2026-08-31, from `still render` and the window's Settings screen run on
+a Windows machine that had `winget install Gyan.FFmpeg` done exactly as the
+missing-tool remedy tells an operator to. Two defects, one root each, both
+invisible from macOS and both invisible to a Windows runner that only compiles
+and runs `cargo test` (D-132) — because one needs a real project folder joined
+end to end and the other needs FFmpeg installed the way winget actually installs
+it.
+
+**One — `still render` could not finish. In any project folder.**
+
+Every segment encoded, then the join died at the concat demuxer:
+
+```
+still: ffmpeg exited -2
+  ... -i '\\?\C:\Users\...\.spoonstill\segments\.concat.txt.partial-...txt' ...
+  [in#0] Impossible to open '\\seg-0000-4fd68d806422a9bb.mp4'
+  Error opening input: No such file or directory
+```
+
+`std::fs::canonicalize` answers on Windows in extended-length form,
+`\\?\C:\Users\…`. Rust's own I/O accepts that happily, so the prefix travelled
+from `import::load` and `ingest::create_project` through the project model into
+the concat list's path without one layer objecting. The concat demuxer resolves
+each relative entry against **the list file's own directory**, computed with its
+own parser rather than Win32's; handed a `\\?\` path it does not recognise the
+prefix, and every `file 'seg-….mp4'` line resolved to `\\seg-….mp4` — a share on
+a host that does not exist.
+
+D-040 chose the concat demuxer for the join, so this was not a degraded render.
+It was no render, on every project folder, on the platform half the release
+table is addressed to. The same prefix was also the visible clue, printed for
+days without being read as a symptom: `still validate` announced an operator's
+own folder back to them as `\\?\C:\Users\…`.
+
+`path_safety::without_verbatim_prefix` strips the prefix at the four places
+`canonicalize` is called in `spoonstill-app` (`import::load`, `import`'s
+`RealPath` impl and unlisted-image scan, and `ingest::create_project`). It
+refuses to strip where the result would not round-trip — past `MAX_PATH` the
+prefix is the only reason the file opens, and a `\\?\Volume{…}` GUID has no
+second spelling — because a join that fails is a smaller loss than a project
+that cannot be read. On macOS and Linux it is the identity function.
+
+**Two — the FFmpeg search could not see the FFmpeg its own remedy names.**
+
+D-103 and D-104 added winget's shim directory, `WinGet\Links`, to the fallback
+search. But `winget install Gyan.FFmpeg` — the exact id `INSTALL_HINT` prints —
+publishes **no** shim. It unpacks a versioned build to
+`WinGet\Packages\Gyan.FFmpeg_<source>\ffmpeg-<version>-full_build\bin` and
+leaves `Links` empty. So an operator who ran precisely the command the error
+told them to run still had FFmpeg the search could not find, and Settings kept
+offering to install what was already installed.
+
+`tools::winget_ffmpeg_bins` reads `WinGet\Packages`, keeps the entries whose
+name starts with `Gyan.FFmpeg`, and offers each one's `<build>\bin` — two
+levels, filtered to the one package this project names, sorted, so it stays the
+set of directories a *named* install writes to and not a hunt across the disk.
+It is added to `package_manager_dirs` right after `WinGet\Links`.
+
+**Proof.** Both defects were reproduced on the current tree first: a six-scene
+render exited non-zero at the join with the `\\seg-0000-….mp4` error and wrote
+no film, and `still validate` on a machine with FFmpeg under `WinGet\Packages`
+reported it "not installed yet". With the fix, the same project renders to an
+identical 18.05 s film **both** with FFmpeg on `PATH` and with it only under
+`WinGet\Packages` — the second case exercises `winget_ffmpeg_bins` and the join
+together. Unit tests: `path_safety`'s `a_verbatim_disk_path_loses_its_prefix`
+and the UNC / volume-GUID / past-`MAX_PATH` / plain-path cases beside it, and
+`tools`' `a_winget_package_build_of_ffmpeg_is_found_without_a_shim`, which plants
+the real `Packages\Gyan.FFmpeg_…\ffmpeg-…\bin\ffmpeg.exe` layout plus one
+package that must be ignored.
+
 ### D-074 — The `kenburns-batch` master brief does not exist on this machine · Accepted
 
 Searched 2026-08-26: no file matching `*kenburns*` anywhere under `~/Desktop`,

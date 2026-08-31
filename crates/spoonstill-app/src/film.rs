@@ -1747,7 +1747,12 @@ mod tests {
             problems: Vec::new(),
         };
         let options = RenderProjectOptions::for_project(&root);
-        let real_root = std::fs::canonicalize(&root).unwrap();
+        // De-prefixed, because that is what `real_path` now hands back on
+        // Windows and what the operator sees written (D-142); the identity
+        // function elsewhere.
+        let real_root = spoonstill_core::path_safety::without_verbatim_prefix(
+            std::fs::canonicalize(&root).unwrap(),
+        );
 
         // The ordinary case, and a nested one that does not exist yet: a
         // destination is normally absent, which is exactly why it cannot use

@@ -35,7 +35,7 @@ pub mod settings;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use spoonstill_core::path_safety::{PathError, RealPath, resolve_within};
+use spoonstill_core::path_safety::{PathError, RealPath, resolve_within, without_verbatim_prefix};
 use spoonstill_core::project::{
     AudioSource, Problem, ProblemKind, SceneSpec, Validation, validate_drafts,
 };
@@ -261,7 +261,11 @@ pub(crate) struct StdFs;
 
 impl RealPath for StdFs {
     fn real_path(&self, path: &Path) -> Option<PathBuf> {
-        std::fs::canonicalize(path).ok()
+        // Spelled the way FFmpeg and the operator both read it, never in the
+        // `\\?\` extended-length form `canonicalize` returns on Windows (D-142).
+        std::fs::canonicalize(path)
+            .ok()
+            .map(without_verbatim_prefix)
     }
 }
 
@@ -273,9 +277,11 @@ impl RealPath for StdFs {
 /// check: no folder, an unparseable `project.yaml`, an unparseable manifest.
 /// Everything else is a [`Problem`] in the returned project.
 pub fn load(root: &Path, media: &dyn MediaCheck) -> Result<Project, ImportError> {
-    let root = std::fs::canonicalize(root).map_err(|_| ImportError::NoProject {
-        path: root.to_path_buf(),
-    })?;
+    let root = std::fs::canonicalize(root)
+        .map(without_verbatim_prefix)
+        .map_err(|_| ImportError::NoProject {
+            path: root.to_path_buf(),
+        })?;
     if !root.is_dir() {
         return Err(ImportError::NoProject { path: root });
     }
@@ -535,7 +541,9 @@ fn unlisted_images(
             // Compare canonically: the row may spell it `./001.PNG` on a
             // case-insensitive volume and mean this very file (D-054).
             let path = entry.path();
-            let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+            let canonical = std::fs::canonicalize(&path)
+                .map(without_verbatim_prefix)
+                .unwrap_or(path);
             (!used.contains(&canonical)).then_some(name)
         })
         .collect();

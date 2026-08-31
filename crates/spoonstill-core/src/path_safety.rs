@@ -270,6 +270,75 @@ fn lexical_join(anchor: &Path, rest: &[Component<'_>]) -> Option<PathBuf> {
     Some(out)
 }
 
+/// The same path, spelled the way the rest of Windows spells it (D-142).
+///
+/// `std::fs::canonicalize` answers on Windows in **extended-length** form:
+/// `\\?\C:\Users\…`. The prefix tells the Win32 layer to skip path parsing,
+/// and Rust's own I/O is perfectly happy with it — which is exactly why it
+/// survives all the way out to FFmpeg and to the operator without anything
+/// noticing it is there.
+///
+/// Two things break when it does.
+///
+/// The concat demuxer resolves each relative entry in its list against the
+/// **list file's own directory**, and it works that directory out with its own
+/// parsing rather than Win32's. Handed `\\?\C:\…\segments\concat.txt` it does
+/// not recognise the prefix, so every entry resolves to `\\seg-0000-….mp4` — a
+/// share on a host that does not exist. The segments encode, the join fails
+/// with `Impossible to open`, and D-040's stream copy never produces a film.
+/// On Windows `still render` could not finish, in any project folder.
+///
+/// The second is smaller, and was the visible clue: every path spoonstill
+/// prints wears the prefix too, so `still validate` announces an operator's own
+/// project back to them as `\\?\C:\Users\…`.
+///
+/// Stripping is refused where the result would not round-trip. A path at or
+/// past `MAX_PATH` needs the prefix to be openable at all, and shortening it
+/// would trade a broken join for a folder that cannot be read — the join is the
+/// lesser loss. A volume GUID (`\\?\Volume{…}`) has no other spelling, so it
+/// keeps the prefix as well.
+///
+/// On every other platform this is the identity function: there is no verbatim
+/// prefix on macOS or Linux and nothing here to strip.
+#[must_use]
+pub fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    #[cfg(not(windows))]
+    {
+        path
+    }
+
+    #[cfg(windows)]
+    {
+        /// Win32's classic path limit. At or past it, the prefix is load-bearing.
+        const MAX_PATH: usize = 260;
+
+        let Some(text) = path.to_str() else {
+            return path;
+        };
+
+        let shortened = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{rest}")
+        } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+            // Only a drive-letter path may lose the prefix: `\\?\C:\x` is also
+            // `C:\x`, but `\\?\Volume{…}` names a volume that has no second
+            // spelling, and handing it back shortened would be a lie.
+            let bytes = rest.as_bytes();
+            if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+                rest.to_owned()
+            } else {
+                return path;
+            }
+        } else {
+            return path;
+        };
+
+        if shortened.len() >= MAX_PATH {
+            return path;
+        }
+        PathBuf::from(shortened)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,6 +521,75 @@ mod tests {
         assert_eq!(
             resolve("../../../../../../nope.jpg"),
             Err(PathError::Outside)
+        );
+    }
+
+    /// D-142, the render blocker: the extended-length prefix `canonicalize`
+    /// hands back is not a spelling FFmpeg's concat demuxer can resolve relative
+    /// entries against, so it does not leave the app crate.
+    #[test]
+    #[cfg(windows)]
+    fn a_verbatim_disk_path_loses_its_prefix() {
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(r"\\?\C:\Users\vijay\film")),
+            PathBuf::from(r"C:\Users\vijay\film")
+        );
+    }
+
+    /// A share keeps being a share, spelled the way every other program on the
+    /// machine writes it.
+    #[test]
+    #[cfg(windows)]
+    fn a_verbatim_unc_path_becomes_the_share_it_names() {
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\film")),
+            PathBuf::from(r"\\server\share\film")
+        );
+    }
+
+    /// A volume GUID has no drive letter to fall back to. Shortening it would
+    /// produce a path that names nothing.
+    #[test]
+    #[cfg(windows)]
+    fn a_volume_guid_keeps_the_prefix_it_has_no_alternative_to() {
+        let guid = r"\\?\Volume{9f4a1b2c-0000-0000-0000-000000000000}\film";
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(guid)),
+            PathBuf::from(guid)
+        );
+    }
+
+    /// Past `MAX_PATH` the prefix is the only reason the file opens at all. A
+    /// join that fails is a smaller loss than a project that cannot be read.
+    #[test]
+    #[cfg(windows)]
+    fn a_path_past_the_win32_limit_keeps_the_prefix_it_needs() {
+        let long = format!(r"\\?\C:\{}", "a".repeat(300));
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(&long)),
+            PathBuf::from(&long)
+        );
+    }
+
+    /// An ordinary Windows path was never wearing a prefix and is not given one.
+    #[test]
+    #[cfg(windows)]
+    fn a_plain_windows_path_is_returned_unchanged() {
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(r"C:\Users\vijay\film")),
+            PathBuf::from(r"C:\Users\vijay\film")
+        );
+    }
+
+    /// Everywhere else there is nothing to strip, and this is the identity
+    /// function — the path out of `canonicalize` is already the one FFmpeg and
+    /// the operator both read.
+    #[test]
+    #[cfg(not(windows))]
+    fn a_unix_path_is_returned_unchanged() {
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from("/Users/vijay/film")),
+            PathBuf::from("/Users/vijay/film")
         );
     }
 }

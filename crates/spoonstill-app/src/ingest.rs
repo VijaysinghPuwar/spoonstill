@@ -52,6 +52,8 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use spoonstill_core::path_safety::without_verbatim_prefix;
+
 use crate::import::rows::{AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, TEXT_EXTENSIONS};
 
 /// The smallest number of digits a scene name gets: `001`, not `1`.
@@ -286,7 +288,11 @@ pub fn create_project(path: &Path) -> Result<PathBuf, IngestError> {
             detail: e.to_string(),
         })?;
     }
-    Ok(fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+    // Not the `\\?\` form `canonicalize` returns on Windows: the render reads
+    // this back as a project root, and the prefix breaks the concat join (D-142).
+    Ok(fs::canonicalize(path)
+        .map(without_verbatim_prefix)
+        .unwrap_or_else(|_| path.to_path_buf()))
 }
 
 /// Copy media into a project folder, numbered and paired.

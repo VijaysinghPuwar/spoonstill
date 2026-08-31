@@ -415,7 +415,17 @@ fn package_manager_dirs() -> Vec<PathBuf> {
         // the install will not have on its `PATH`.
         let mut dirs = Vec::new();
         if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-            dirs.push(PathBuf::from(&local).join(r"Microsoft\WinGet\Links"));
+            let winget = PathBuf::from(&local).join(r"Microsoft\WinGet");
+            // The shim directory first, where a package that publishes one puts
+            // a name that survives an upgrade.
+            dirs.push(winget.join("Links"));
+            // Then the package's own unpacked build, because `Gyan.FFmpeg` —
+            // the id `INSTALL_HINT` tells the operator to run — publishes **no**
+            // shim: it lands under `WinGet\Packages\Gyan.FFmpeg_<source>\
+            // ffmpeg-<version>-full_build\bin` and leaves `Links` empty, so the
+            // operator who ran exactly the command the error named still had no
+            // FFmpeg this search could see (D-142).
+            dirs.extend(winget_ffmpeg_bins(&winget.join("Packages")));
         }
         if let Some(data) = std::env::var_os("ProgramData") {
             dirs.push(PathBuf::from(&data).join(r"chocolatey\bin"));
@@ -482,6 +492,34 @@ fn subdirectories(parent: &Path, leaf: &str) -> Vec<PathBuf> {
         .flatten()
         .map(|entry| entry.path().join(leaf))
         .filter(|dir| dir.is_dir())
+        .collect();
+    found.sort();
+    found
+}
+
+/// Every `bin` directory belonging to a winget-installed `Gyan.FFmpeg`.
+///
+/// The layout is `Packages\Gyan.FFmpeg_<source>\<build>\bin`: two levels, the
+/// first filtered to the one package this project names so this stays the set
+/// of directories a *named* install writes to and not a hunt across the disk.
+///
+/// Newest build last for the same reason [`subdirectories`] sorts: a machine
+/// that upgraded but kept the old version has two, and searching them in a
+/// defined order beats an arbitrary one.
+#[cfg(target_os = "windows")]
+fn winget_ffmpeg_bins(packages: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(packages) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|package| {
+            package
+                .file_name()
+                .to_string_lossy()
+                .starts_with("Gyan.FFmpeg")
+        })
+        .flat_map(|package| subdirectories(&package.path(), "bin"))
         .collect();
     found.sort();
     found
@@ -556,6 +594,39 @@ mod tests {
         assert_eq!(locate_in([dir.clone()], "ffmpeg"), None);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D-142: `winget install Gyan.FFmpeg` — the exact command the missing-tool
+    /// remedy prints — unpacks to `Packages\Gyan.FFmpeg_<source>\<build>\bin`
+    /// and publishes no shim, so the operator who ran it still had a FFmpeg this
+    /// search could not see. The planted tree is that layout, plus one package
+    /// that must be ignored.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn a_winget_package_build_of_ffmpeg_is_found_without_a_shim() {
+        let root = std::env::temp_dir().join(format!("spoonstill-d142-{}", std::process::id()));
+        let packages = root.join("Packages");
+        let bin = packages
+            .join("Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe")
+            .join("ffmpeg-9.0.1-full_build")
+            .join("bin");
+        std::fs::create_dir_all(&bin).expect("planted build tree");
+        let planted = bin.join(executable_name("ffmpeg"));
+        std::fs::write(&planted, "not a real program").expect("plant ffmpeg.exe");
+
+        // A neighbour that is not this package is left out of the answer.
+        std::fs::create_dir_all(packages.join("Some.Other_x").join("v1").join("bin"))
+            .expect("planted decoy");
+
+        let bins = winget_ffmpeg_bins(&packages);
+        assert_eq!(bins, vec![bin.clone()], "only the Gyan.FFmpeg build");
+        assert_eq!(
+            locate_in(bins, "ffmpeg"),
+            Some(planted),
+            "and locate finds ffmpeg.exe inside it"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Whatever this machine has, `locate` answers with something the spawn can
