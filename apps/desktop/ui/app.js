@@ -77,6 +77,15 @@ let outDir = "";
 let outName = "";
 let outFull = "";
 let outError = "";
+// The shape and size for the next render (D-143). Both null means "whatever
+// `project.yaml` says", exactly like the voice and the subtitle theme above —
+// and, like them, neither is ever written into that file (D-013).
+let chosenAspect = null;
+let chosenSize = null;
+// The two lists the choosers are drawn from, fetched once. Every pixel
+// dimension in them was computed by Rust, because 4K portrait is 2160x3840 and
+// a page that worked that out itself would be a second OutputSpec (D-010).
+let formats = null;
 
 // The provider's catalogue, fetched once per project, and the voice it falls
 // back to when a project names none — so the window can say whose voice
@@ -386,6 +395,11 @@ async function load(path) {
   }
   show("app");
   draw();
+  // Not awaited, for the same reason the FFmpeg check below is not: the two
+  // lists are constants and the grid should not wait on an IPC round trip to
+  // appear. `drawFormats` returns early until they land, and is called again
+  // when they do.
+  loadFormats().then(drawFormats);
   if (project.scenes.length === 0) tab("scenes");
   // Not awaited: whether this machine has FFmpeg is one spawn, and the grid
   // should not wait on it to appear. It settles into the Render screen and
@@ -448,6 +462,7 @@ async function addMedia(files) {
 
 function draw() {
   el("s-geometry").textContent = project.geometry;
+  drawFormats();
   el("s-scenes").textContent = String(project.scenes.length);
   el("s-mode").textContent = project.mode;
   el("s-root").textContent = project.root;
@@ -506,8 +521,12 @@ function drawRows() {
   rows.innerHTML = "";
   el("grid-empty").hidden = shown.length > 0;
 
-  const shape = project.geometry.startsWith("1080x1920") ? "portrait"
-    : /^(\d+)x\1 /.test(project.geometry) ? "square" : "";
+  // The aspect this run will render in — the override if there is one, else
+  // the project's own. It used to be sniffed out of the geometry string by
+  // testing for a `1080x1920` prefix, which is one size of one aspect: a 4K
+  // Short showed landscape thumbnails (D-143).
+  const aspect = chosenAspect ?? project.aspect;
+  const shape = aspect === "9:16" ? "portrait" : aspect === "1:1" ? "square" : "";
 
   for (const scene of shown) {
     const tr = document.createElement("tr");
@@ -1218,7 +1237,85 @@ function updateRender() {
 function resetOutput() {
   el("out-dir").value = project?.output_dir ?? "";
   el("out-name").value = project?.output_name ?? "";
+  chosenAspect = null;
+  chosenSize = null;
+  drawFormats();
   return refreshOutput();
+}
+
+// ------------------------------------------------- shape and size (D-143)
+
+// Fetched once per window. The lists are the same for every project — what
+// changes per project is which entry is the project's own, and that comes from
+// `project.aspect` and `project.short_edge`.
+async function loadFormats() {
+  if (formats) return;
+  try {
+    formats = await invoke("output_formats");
+  } catch (error) {
+    note(String(error), true);
+  }
+}
+
+// Draw both choosers, selecting this run's answer — the override if the
+// operator picked one, otherwise the project's own.
+function drawFormats() {
+  if (!formats || !project) return;
+
+  const aspect = chosenAspect ?? project.aspect;
+  const aspects = el("out-aspect");
+  aspects.innerHTML = "";
+  for (const choice of formats.aspects) {
+    const option = document.createElement("option");
+    option.value = choice.id;
+    // The ratio and what it is for, because an operator making a Short is not
+    // thinking "9:16" (D-143).
+    option.textContent = `${choice.id} — ${choice.description}`;
+    aspects.appendChild(option);
+  }
+  aspects.value = aspect;
+
+  // The project's own size may have no name — `short_edge: 900` is legal — so
+  // the numbers stay available as an entry of their own rather than being
+  // silently rounded to the nearest name.
+  const named = formats.sizes.find((s) => s.short_edge === project.short_edge);
+  const sizes = el("out-size");
+  sizes.innerHTML = "";
+  if (!named) {
+    const option = document.createElement("option");
+    option.value = String(project.short_edge);
+    option.textContent = `${project.short_edge}px short edge — the project's own`;
+    sizes.appendChild(option);
+  }
+  for (const size of formats.sizes) {
+    const option = document.createElement("option");
+    option.value = size.id;
+    option.textContent = `${size.id} — ${size.dimensions[aspect] ?? ""}`;
+    sizes.appendChild(option);
+  }
+  sizes.value = chosenSize ?? (named ? named.id : String(project.short_edge));
+
+  const size = formats.sizes.find((s) => s.id === sizes.value);
+  el("out-dimensions").textContent = size
+    ? `${size.dimensions[aspect]} — ${size.description}`
+    : project.geometry;
+}
+
+function chooseFormat() {
+  if (!project) return;
+  const aspect = el("out-aspect").value;
+  const size = el("out-size").value;
+  // Null means "the project's own", which is what makes this an override
+  // rather than an edit: a run that changes nothing sends nothing (D-013).
+  chosenAspect = aspect === project.aspect ? null : aspect;
+  const named = formats?.sizes.find((s) => s.short_edge === project.short_edge);
+  chosenSize = size === (named ? named.id : String(project.short_edge)) ? null : size;
+  drawFormats();
+  // The scenes grid crops its thumbnails to the shape being rendered, and the
+  // subtitle preview is drawn in it.
+  drawRows();
+  drawPreview();
+  rememberChoices();
 }
 
 // The join and the validation both happen in Rust. This only shows the answer,
@@ -1263,6 +1360,7 @@ function rememberChoices() {
       "choices:" + project.root,
       JSON.stringify({
         chosenVoice, outDir, outName, chosenSubtitles, chosenTheme,
+        chosenAspect, chosenSize,
         subtitlePosition: el("subs-position").value,
       }),
     );
@@ -1273,6 +1371,8 @@ function restoreChoices() {
   chosenVoice = null;
   chosenSubtitles = null;
   chosenTheme = null;
+  chosenAspect = null;
+  chosenSize = null;
   let dir = project.output_dir ?? "";
   let name = project.output_name ?? "";
   try {
@@ -1285,6 +1385,8 @@ function restoreChoices() {
     }
     if (typeof saved.outDir === "string" && saved.outDir) dir = saved.outDir;
     if (typeof saved.outName === "string" && saved.outName) name = saved.outName;
+    if (typeof saved.chosenAspect === "string") chosenAspect = saved.chosenAspect;
+    if (typeof saved.chosenSize === "string") chosenSize = saved.chosenSize;
   } catch { /* nothing remembered, or storage is unavailable */ }
   el("out-dir").value = dir;
   el("out-name").value = name;
@@ -1372,6 +1474,12 @@ async function render() {
         // (D-091): the operator moves the caption off their artwork's own
         // lettering, renders, and it comes back exactly where it was.
         subtitlePosition: el("subs-position").value,
+        // D-143, and the same override rule again: null means "whatever
+        // project.yaml says". The window sends what its boxes say, which is
+        // D-106's own lesson about the position box — a control that only
+        // changed the preview.
+        aspect: chosenAspect,
+        resolution: chosenSize,
       },
       onProgress: progress,
     });
@@ -1537,6 +1645,8 @@ el("out-name").addEventListener("input", () => guard(refreshOutput()));
 el("out-dir").addEventListener("input", () => guard(refreshOutput()));
 el("out-browse").addEventListener("click", () => guard(browseOutput()));
 el("out-default").addEventListener("click", () => guard(resetOutput()));
+el("out-aspect").addEventListener("change", chooseFormat);
+el("out-size").addEventListener("change", chooseFormat);
 
 for (const button of [...el("tabs").children, el("go-voice"), el("go-output")]) {
   button.addEventListener("click", () => tab(button.dataset.tab));
@@ -1659,6 +1769,11 @@ async function drawPreview() {
       theme: subtitlesOn() ? effectiveTheme() : "",
       position: el("subs-position").value,
       shortEdge: 360,
+      // The shape this run will render in (D-143). Scale is free — the themes
+      // are fractions of the frame — but shape is not: the same sentence wraps
+      // to two lines at 16:9 and to four in a Short, and a landscape preview of
+      // a vertical film is wrong about the one thing this chooser is for.
+      aspect: chosenAspect ?? project?.aspect ?? "",
     });
   } catch (error) {
     el("subs-note").textContent = String(error);

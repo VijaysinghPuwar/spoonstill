@@ -52,6 +52,9 @@ enum Command {
     Voices(VoicesArgs),
     /// List the subtitle themes, and what each one is for (D-106).
     Subtitles,
+    /// List the sizes and aspects a film can be rendered at (D-143).
+    #[command(visible_alias = "formats")]
+    Resolutions,
     /// Check every program spoonstill needs, and offer to install what is
     /// missing (D-105).
     Doctor(DoctorArgs),
@@ -207,6 +210,30 @@ struct RenderArgs {
     /// bottom, which a burned-in caption would otherwise land on.
     #[arg(long, value_name = "EDGE", conflicts_with = "no_subtitles")]
     subtitle_position: Option<String>,
+
+    /// Render this run in a different shape: `16:9`, `9:16`, `1:1` (D-143).
+    ///
+    /// `shorts`, `reel`, `tiktok` and `story` all mean `9:16` — an operator
+    /// naming the destination gets the frame. An override, not an edit:
+    /// nothing here writes to `project.yaml` (D-013).
+    #[arg(long, value_name = "RATIO", value_parser = parse_aspect)]
+    aspect: Option<Aspect>,
+
+    /// Render this run at a named size: `720p`, `1080p`, `1440p` (2K),
+    /// `2160p` (4K).
+    ///
+    /// `still resolutions` lists them with the pixel dimensions each one
+    /// produces in each aspect. The same override rule applies.
+    #[arg(long, value_name = "SIZE", conflicts_with = "short_edge")]
+    resolution: Option<String>,
+
+    /// The same, as a short edge in pixels, for a size with no name.
+    #[arg(long, value_name = "PIXELS")]
+    short_edge: Option<u32>,
+
+    /// Render this run at a different frame rate.
+    #[arg(long, value_name = "FPS")]
+    fps: Option<u32>,
 }
 
 #[derive(Debug, Args)]
@@ -251,6 +278,13 @@ struct RenderSceneArgs {
     /// 1080x1080 depending on the aspect.
     #[arg(long, default_value_t = 1080, value_name = "PIXELS")]
     short_edge: u32,
+
+    /// The same, by name: `720p`, `1080p`, `1440p` (2K), `2160p` (4K).
+    ///
+    /// Two spellings of one setting, so clap refuses both at once rather than
+    /// letting one silently win (D-143).
+    #[arg(long, value_name = "SIZE", conflicts_with = "short_edge")]
+    resolution: Option<String>,
 
     /// Frame rate.
     #[arg(long, default_value_t = 30, value_name = "FPS")]
@@ -352,6 +386,7 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Validate(args) => validate(args),
         Command::Voices(args) => list_voices(&args),
         Command::Subtitles => list_subtitle_themes(),
+        Command::Resolutions => list_resolutions(),
         Command::Licences => show_licences(),
         Command::Doctor(args) => doctor(&args),
         Command::Render(args) => render_project(args),
@@ -753,6 +788,76 @@ fn list_subtitle_themes() -> Result<(), String> {
     Ok(())
 }
 
+/// `still resolutions` — every size and shape a film can come out at (D-143).
+///
+/// The pixel dimensions are printed per aspect rather than described, because
+/// "4K portrait" is 2160x3840 and an operator who expects 3840 wide has to be
+/// able to see that they do not get it.
+fn list_resolutions() -> Result<(), String> {
+    println!("Output sizes and shapes (D-143). An override for one run:\n");
+
+    let aspects = spoonstill_app::formats::aspects();
+    let width = aspects.iter().map(|a| a.id.len()).max().unwrap_or(4);
+    for aspect in &aspects {
+        let mark = if aspect.default { " (default)" } else { "" };
+        println!(
+            "  {id:<width$}  {description}{mark}",
+            id = aspect.id,
+            description = aspect.description,
+        );
+    }
+
+    println!("\nSizes, and what each one is in each shape:\n");
+    let parsed: Vec<Aspect> = aspects
+        .iter()
+        .map(|a| Aspect::parse(a.id).expect("a listed aspect parses"))
+        .collect();
+
+    let header: Vec<String> = parsed.iter().map(|a| a.as_str().to_owned()).collect();
+    println!(
+        "  {:<8}  {:<12}  {:<12}  {:<12}  what it is for",
+        "size", header[0], header[1], header[2]
+    );
+    for size in spoonstill_app::formats::sizes(parsed[0]) {
+        let cells: Vec<String> = parsed
+            .iter()
+            .map(|&aspect| {
+                spoonstill_app::formats::sizes(aspect)
+                    .into_iter()
+                    .find(|s| s.id == size.id)
+                    .map_or_else(|| "—".to_owned(), |s| s.dimensions())
+            })
+            .collect();
+        println!(
+            "  {:<8}  {:<12}  {:<12}  {:<12}  {}",
+            size.id, cells[0], cells[1], cells[2], size.description
+        );
+    }
+
+    println!(
+        "\nAliases: {}\n",
+        spoonstill_app::formats::sizes(parsed[0])
+            .iter()
+            .filter(|s| !s.aliases.is_empty())
+            .map(|s| format!("{} = {}", s.aliases.join(", "), s.id))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+
+    println!(
+        "A YouTube Short, a Reel, a TikTok and a Story are all 9:16, so all four\n\
+         words mean that shape:\n\
+         \n  still render DIR --aspect shorts --resolution 1080p\n  \
+         still render DIR --resolution 4k\n\
+         \nOr for the project, in project.yaml:\n\
+         \n  aspect: 9:16\n  resolution: 4k\n\
+         \n`resolution` and `short_edge` are two spellings of one setting — set one.\n\
+         4K is the largest this renders: past it the segment profile would have to\n\
+         declare an H.264 level no decoder honours (D-114)."
+    );
+    Ok(())
+}
+
 fn render_project(args: RenderArgs) -> Result<(), String> {
     // `--subtitles` with no value means "on, with the project's own theme";
     // with a value it also picks the theme. `--no-subtitles` is the other
@@ -792,6 +897,14 @@ fn render_project(args: RenderArgs) -> Result<(), String> {
         subtitles,
         subtitle_theme,
         subtitle_placement,
+        aspect: args.aspect,
+        // Two spellings, one setting: clap has already refused both at once,
+        // so there is no precedence to get wrong here (D-143).
+        short_edge: match &args.resolution {
+            Some(name) => Some(spoonstill_app::formats::parse_size(name)?),
+            None => args.short_edge,
+        },
+        fps: args.fps,
         ..defaults
     };
 
@@ -928,7 +1041,10 @@ fn render_scene(args: RenderSceneArgs) -> Result<(), String> {
         audio: args.audio,
         out: args.out,
         aspect: args.aspect,
-        short_edge: args.short_edge,
+        short_edge: match &args.resolution {
+            Some(name) => spoonstill_app::formats::parse_size(name)?,
+            None => args.short_edge,
+        },
         fps: args.fps,
         motion: args
             .motion
@@ -1107,6 +1223,86 @@ mod tests {
         assert_eq!((args.preset.as_str(), args.crf), ("medium", 18));
         // No `--motion` means seeded, which is what keeps re-renders stable.
         assert!(args.motion.is_none());
+    }
+
+    /// D-143. Both control surfaces have to be able to ask for 2K, 4K and a
+    /// Short, and `still render` had none of the three — geometry was
+    /// reachable only from `project.yaml` and from `render-scene`, which
+    /// renders one segment.
+    #[test]
+    fn a_whole_project_can_be_rendered_at_another_size_and_shape() {
+        let args = Cli::try_parse_from([
+            "still",
+            "render",
+            "proj",
+            "--aspect",
+            "shorts",
+            "--resolution",
+            "4k",
+        ])
+        .expect("parses");
+        let Command::Render(args) = args.command else {
+            panic!("not a render")
+        };
+        assert_eq!(args.aspect, Some(Aspect::Portrait9x16));
+        assert_eq!(args.resolution.as_deref(), Some("4k"));
+        assert_eq!(
+            spoonstill_app::formats::parse_size("4k"),
+            Ok(2160),
+            "a 4K Short is 2160x3840"
+        );
+    }
+
+    /// Two spellings of one setting, so clap refuses both rather than letting
+    /// one silently win — on both commands that take geometry.
+    #[test]
+    fn a_size_cannot_be_named_twice() {
+        for command in [
+            vec![
+                "still",
+                "render",
+                "proj",
+                "--resolution",
+                "4k",
+                "--short-edge",
+                "1080",
+            ],
+            vec![
+                "still",
+                "render-scene",
+                "--image",
+                "a.jpg",
+                "--audio",
+                "a.wav",
+                "--out",
+                "o.mp4",
+                "--resolution",
+                "4k",
+                "--short-edge",
+                "1080",
+            ],
+        ] {
+            let error = Cli::try_parse_from(command.clone()).expect_err("refused");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{command:?}"
+            );
+        }
+    }
+
+    /// A render with no geometry flags leaves the project's own answer alone —
+    /// this is an override, not a default that quietly overwrites (D-013).
+    #[test]
+    fn a_render_with_no_geometry_flags_overrides_nothing() {
+        let args = Cli::try_parse_from(["still", "render", "proj"]).expect("parses");
+        let Command::Render(args) = args.command else {
+            panic!("not a render")
+        };
+        assert_eq!(
+            (args.aspect, args.resolution, args.short_edge, args.fps),
+            (None, None, None, None)
+        );
     }
 
     /// D-070's default in practice: all three aspects are reachable from the

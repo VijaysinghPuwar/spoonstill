@@ -31,7 +31,7 @@ use serde::Deserialize;
 use spoonstill_core::captions::{Placement, SubtitleTheme};
 use spoonstill_core::motion::{DEFAULT_AMOUNT, MAX_AMOUNT, MIN_AMOUNT};
 use spoonstill_core::project::{MAX_SCENE_SECONDS, Problem, ProblemKind, ProviderId, VoiceId};
-use spoonstill_core::{Aspect, MANIFEST_FILE, OutputSpec};
+use spoonstill_core::{Aspect, MANIFEST_FILE, OutputSpec, Resolution};
 
 /// Default TTS provider (D-023, D-081).
 ///
@@ -154,6 +154,10 @@ impl Default for Settings {
 struct RawSettings {
     output: Option<String>,
     aspect: Option<String>,
+    /// A named size — `1080p`, `1440p`/`2k`, `2160p`/`4k` (D-143). The same
+    /// thing as `short_edge`, said in the words an operator uses; naming both
+    /// is a problem rather than a precedence rule.
+    resolution: Option<String>,
     short_edge: Option<u32>,
     fps: Option<u32>,
     manifest: Option<String>,
@@ -335,14 +339,48 @@ fn resolve(raw: RawSettings) -> (Settings, Vec<Problem>) {
             }
         },
     };
+    // `resolution` is `short_edge` with a name on it (D-143). Naming both is
+    // refused rather than resolved by precedence: whichever one lost would be
+    // an operator's stated intention silently discarded, which is the same
+    // failure D-055 refuses for a misspelled key.
+    let named = match non_empty(raw.resolution) {
+        None => None,
+        Some(text) => match Resolution::parse(&text) {
+            Some(resolution) if raw.short_edge.is_some() => {
+                problems.push(Problem::in_project(ProblemKind::UnusableSetting {
+                    field: "resolution",
+                    value: text,
+                    expected: "named on its own — `short_edge` says the same thing, \
+                               so set one or the other",
+                }));
+                let _ = resolution;
+                None
+            }
+            Some(resolution) => Some(resolution.short_edge()),
+            None => {
+                problems.push(Problem::in_project(ProblemKind::UnusableSetting {
+                    field: "resolution",
+                    value: text,
+                    expected: leak(format!("one of {}", Resolution::names())),
+                }));
+                None
+            }
+        },
+    };
+
     if let Some(aspect) = aspect {
-        let short_edge = raw.short_edge.unwrap_or(settings.output_spec.short_edge());
+        let short_edge = raw
+            .short_edge
+            .or(named)
+            .unwrap_or(settings.output_spec.short_edge());
         let fps = raw.fps.unwrap_or(settings.output_spec.fps());
         match OutputSpec::new(aspect, short_edge, fps) {
             Ok(spec) => settings.output_spec = spec,
             Err(error) => problems.push(Problem::in_project(ProblemKind::UnusableSetting {
                 field: if raw.fps.is_some() && short_edge == settings.output_spec.short_edge() {
                     "fps"
+                } else if named.is_some() {
+                    "resolution"
                 } else {
                     "short_edge"
                 },
@@ -597,6 +635,62 @@ mod tests {
         assert_eq!(problems("fps: 500\n").len(), 1);
         assert!(problems("short_edge: 720\n").is_empty());
         assert!(problems("aspect: square\nshort_edge: 1000\n").is_empty());
+    }
+
+    /// D-143. A named size is the same request as a short edge, and it has to
+    /// mean the same thing in every aspect.
+    #[test]
+    fn a_named_resolution_is_a_short_edge_with_a_name() {
+        let two_k = settings("resolution: 2k\n");
+        assert_eq!(
+            (two_k.output_spec.width(), two_k.output_spec.height()),
+            (2560, 1440)
+        );
+
+        let four_k = settings("resolution: 4k\n");
+        assert_eq!(
+            (four_k.output_spec.width(), four_k.output_spec.height()),
+            (3840, 2160)
+        );
+
+        // A Short, named as the thing it is for rather than as a ratio.
+        let short = settings("aspect: shorts\nresolution: 1080p\n");
+        assert_eq!(short.output_spec.aspect(), Aspect::Portrait9x16);
+        assert_eq!(
+            (short.output_spec.width(), short.output_spec.height()),
+            (1080, 1920)
+        );
+
+        // 4K vertical. The short edge is the one that stays put.
+        let short_4k = settings("aspect: 9:16\nresolution: 4k\n");
+        assert_eq!(
+            (short_4k.output_spec.width(), short_4k.output_spec.height()),
+            (2160, 3840)
+        );
+
+        // The same, spelled as a number, so the two doors reach one room.
+        assert_eq!(settings("short_edge: 2160\n"), settings("resolution: 4k\n"));
+    }
+
+    /// Naming both is refused rather than resolved by precedence: whichever
+    /// lost would be a stated intention silently discarded (D-055's rule).
+    #[test]
+    fn resolution_and_short_edge_together_are_a_problem_not_a_precedence() {
+        let found = problems("resolution: 4k\nshort_edge: 1080\n");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("resolution"), "{found:?}");
+        assert!(found[0].contains("short_edge"), "{found:?}");
+
+        // And the geometry falls back to the default rather than guessing.
+        let (settings, _) = parse("resolution: 4k\nshort_edge: 1080\n").expect("parses");
+        assert_eq!(settings.output_spec.short_edge(), 1080);
+    }
+
+    #[test]
+    fn an_unknown_resolution_names_the_ones_that_exist() {
+        let found = problems("resolution: 8k\n");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("2160p"), "{found:?}");
     }
 
     #[test]

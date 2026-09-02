@@ -298,7 +298,7 @@ own decisions. Where a slice is done, the exit gate it satisfies is named.
 |---|---|---|
 | **1. The pure domain** | `spoonstill_core::path_safety` + `spoonstill_core::project`: containment, the scene model, and every validation rule that needs no disk. D-054, D-055. | ✅ 2026-08-26 — satisfies `cargo test -p spoonstill-core path_safety` |
 | **2. Import and `still validate`** | `project.yaml` and the CSV manifest, convention-mode stem pairing, path resolution and media probing merged into one problem list, `still validate` printing it. D-056. | ✅ 2026-08-26 — satisfies `still validate fixtures/projects/mixed/` |
-| **3. The three audio sources, and `still render`** | `AudioSource::resolve()` → `(normalized_path, Duration)`: ingest normalization to 48 kHz stereo, `ffprobe` on the normalized artifact, generated silence. Then `still render DIR` over a whole project — **parallel**, with two bounded pools. D-075, D-076, D-077, D-078. | ✅ 2026-08-26 — `make gates-m2` is 13/13 |
+| **3. The three audio sources, and `still render`** | `AudioSource::resolve()` → `(normalized_path, Duration)`: ingest normalization to 48 kHz stereo, `ffprobe` on the normalized artifact, generated silence. Then `still render DIR` over a whole project — **parallel**, with two bounded pools. D-075, D-076, D-077, D-078. | ✅ 2026-08-26 — `make gates-m2` is 14/14 |
 | **4. Speech behind a trait** | `spoonstill-tts`: the `Provider` trait, typed settings and errors, and the `edge` implementation — `edge-tts` through the one process boundary, cached under `hash(text, provider, voice, settings, profile)`. `still voices`, `--voice`. D-081, D-082. ElevenLabs is deferred, not cancelled. | ✅ 2026-08-26 — gate 7 renders `mixed/` |
 | **+ Getting media in** | Not in the original four. `spoonstill_app::ingest`, `still new`, `still add`: the operator drops what they have and the program names and pairs it. D-080. | ✅ 2026-08-26 |
 
@@ -423,8 +423,8 @@ Slice 4 notes:
 
 ### Exit gates
 
-`make gates-m2` runs all of these. **13/13 pass as of 2026-08-29**, slice 4
-included.
+`make gates-m2` runs all of these. **14/14 pass as of 2026-09-02**, slice 4
+included, and D-143's size and shape gate with them.
 
 ```bash
 still validate fixtures/projects/mixed/     # 3 scenes, 3 sources, 0 warnings
@@ -463,6 +463,10 @@ shasum -a 256 a.mp4 b.mp4          # identical
 # 5. a second render of one project is refused, and says --force (D-077)
 # 6. odd dimensions and a Unicode filename survive the join (D-033, D-052)
 # 7. a script, a recording and a silent still become one film (D-020)
+
+# 7b. 2K, 4K and a vertical Short come out at the size asked for (D-143)
+still render P --out s.mp4 --aspect shorts --resolution 4k   # 2160x3840, not 3840x2160
+still render P --out s.mp4 --short-edge 4320                 # refused: past D-114's ceiling
 ```
 
 Secrets check — grep the run output, the manifest, the state DB, the cache
@@ -478,7 +482,9 @@ than an argument precisely because the command line is logged (D-081).
   from the start; the real key belongs in one integration test that is skipped
   by default.
 - **D-070 (9:16 in V1) must be answered before this closes.** It changes the
-  test matrix, not the code — but it changes it a lot.
+  test matrix, not the code — but it changes it a lot. *Answered: all three
+  aspects ship, and D-143 made every one of them reachable from `still render`
+  and from the window as a run override.*
 
 ---
 
@@ -748,7 +754,7 @@ Updated **2026-08-30**, after an external audit was worked through end to end.
 
 **The audit is closed.** Twenty-six decisions, D-107 through D-132 — the list
 is in `CLAUDE.md` under "State as of 2026-08-30", and each decision carries its
-own reproduction. `make gates` is 8/8, 8/8, 13/13; `cargo test --workspace` is
+own reproduction. `make gates` is 8/8, 8/8, 14/14; `cargo test --workspace` is
 462; `cargo audit --deny warnings` is new and green. Nothing it found changes
 M3's shape, and M3 has still not been started.
 

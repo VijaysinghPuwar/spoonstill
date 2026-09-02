@@ -37,14 +37,154 @@ impl Aspect {
     }
 
     /// Parse the command-line form. Case-insensitive, `x` accepted for `:`.
+    ///
+    /// The vertical aliases are deliberate (D-143): an operator making a
+    /// YouTube Short, an Instagram Reel or a TikTok is not thinking "9:16",
+    /// they are thinking of the place the film is going. All three are the
+    /// same frame, so all three are the same word here.
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
         match text.trim().to_ascii_lowercase().replace('x', ":").as_str() {
-            "16:9" | "landscape" => Some(Aspect::Landscape16x9),
-            "9:16" | "portrait" | "vertical" => Some(Aspect::Portrait9x16),
+            "16:9" | "landscape" | "wide" | "youtube" => Some(Aspect::Landscape16x9),
+            "9:16" | "portrait" | "vertical" | "shorts" | "short" | "youtube-shorts" | "reel"
+            | "reels" | "tiktok" | "story" | "stories" => Some(Aspect::Portrait9x16),
             "1:1" | "square" => Some(Aspect::Square1x1),
             _ => None,
         }
+    }
+
+    /// What this aspect is *for*, in the words an operator uses.
+    ///
+    /// Shown by `still resolutions` and in the window's chooser, so that the
+    /// person picking one does not have to know which ratio a Short is.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Aspect::Landscape16x9 => "landscape — YouTube, a television, a laptop",
+            Aspect::Portrait9x16 => "portrait — YouTube Shorts, Reels, TikTok, Stories",
+            Aspect::Square1x1 => "square — a feed post",
+        }
+    }
+}
+
+/// A named output size, which is a short edge with a name on it (D-143).
+///
+/// The short edge is still the parameter — [`OutputSpec::new`] takes one, and
+/// every rule about evenness and divisibility lives there. This is the layer
+/// above it, because "4K" is what an operator asks for and 2160 is what the
+/// renderer needs, and asking a person to know that 4K portrait is 2160 wide
+/// rather than 3840 wide is asking them to do arithmetic to get a common case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Resolution {
+    /// 720 short edge — 1280x720 landscape.
+    Hd720,
+    /// 1080 short edge — 1920x1080 landscape. The default.
+    Fhd1080,
+    /// 1440 short edge — 2560x1440 landscape. Commonly called 2K.
+    Qhd1440,
+    /// 2160 short edge — 3840x2160 landscape. 4K UHD, and the ceiling (D-114).
+    Uhd2160,
+}
+
+impl Resolution {
+    /// Every named size, smallest first.
+    pub const ALL: [Resolution; 4] = [
+        Resolution::Hd720,
+        Resolution::Fhd1080,
+        Resolution::Qhd1440,
+        Resolution::Uhd2160,
+    ];
+
+    /// The short edge in pixels — the number [`OutputSpec::new`] wants.
+    ///
+    /// Every one of these is even and divisible by 9, which is what 16:9 needs
+    /// to stay integer. A test asserts that, because a fifth entry that is not
+    /// would be a name that only works in two of the three aspects.
+    #[must_use]
+    pub const fn short_edge(self) -> u32 {
+        match self {
+            Resolution::Hd720 => 720,
+            Resolution::Fhd1080 => 1080,
+            Resolution::Qhd1440 => 1440,
+            Resolution::Uhd2160 => 2160,
+        }
+    }
+
+    /// The canonical name, as accepted on the command line and written back.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Resolution::Hd720 => "720p",
+            Resolution::Fhd1080 => "1080p",
+            Resolution::Qhd1440 => "1440p",
+            Resolution::Uhd2160 => "2160p",
+        }
+    }
+
+    /// The other spellings this size answers to, for help text and listings.
+    ///
+    /// `2k` means 2560x1440 here, which is the consumer usage. DCI 2K is
+    /// 2048x1080 and is a different number; it is not offered, and this
+    /// comment is the whole of the reason the alias is documented rather than
+    /// left for someone to discover.
+    #[must_use]
+    pub const fn aliases(self) -> &'static [&'static str] {
+        match self {
+            Resolution::Hd720 => &["720", "hd"],
+            Resolution::Fhd1080 => &["1080", "fhd", "full-hd"],
+            Resolution::Qhd1440 => &["1440", "2k", "qhd"],
+            Resolution::Uhd2160 => &["2160", "4k", "uhd"],
+        }
+    }
+
+    /// One line describing what this size is for.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Resolution::Hd720 => "small and quick — a draft, or a preview to send",
+            Resolution::Fhd1080 => "the default — what almost every screen shows",
+            Resolution::Qhd1440 => "2K — sharper than 1080p and about half the size of 4K",
+            Resolution::Uhd2160 => "4K — the largest this renders (D-114)",
+        }
+    }
+
+    /// Parse a name or one of its aliases. Case-insensitive.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim().to_ascii_lowercase();
+        Resolution::ALL
+            .iter()
+            .copied()
+            .find(|r| r.as_str() == text || r.aliases().contains(&text.as_str()))
+    }
+
+    /// The named size a short edge corresponds to, if it has a name.
+    ///
+    /// Used to *report* a project's geometry in the words it was chosen in.
+    /// A project that sets `short_edge: 900` has no name, and is shown as its
+    /// number — the numbers are not going away.
+    #[must_use]
+    pub fn from_short_edge(short_edge: u32) -> Option<Self> {
+        Resolution::ALL
+            .iter()
+            .copied()
+            .find(|r| r.short_edge() == short_edge)
+    }
+
+    /// Every canonical name, comma-separated, for an error message.
+    #[must_use]
+    pub fn names() -> String {
+        Resolution::ALL
+            .iter()
+            .map(|r| r.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+impl fmt::Display for Resolution {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -433,6 +573,131 @@ mod tests {
         let g = SourceGeometry::new(4000, 3000, 0, 1).unwrap();
         assert_eq!(g.sar(), (1, 1));
         assert!(g.has_square_pixels());
+    }
+
+    /// D-143. Every named size has to work in **all three** aspects, which
+    /// means every short edge here is even and divisible by 9 — 16:9's rule is
+    /// the strict one, and a name that only worked in portrait and square
+    /// would be a trap rather than a shortcut.
+    #[test]
+    fn every_named_resolution_renders_in_every_aspect() {
+        for resolution in Resolution::ALL {
+            for aspect in Aspect::ALL {
+                OutputSpec::new(aspect, resolution.short_edge(), 30)
+                    .unwrap_or_else(|e| panic!("{resolution} at {aspect} is not renderable: {e}"));
+            }
+        }
+    }
+
+    /// The four sizes, spelled out. These are the numbers an operator is
+    /// picturing when they type the name, and nothing else in the tree
+    /// asserts them.
+    #[test]
+    fn the_named_sizes_are_the_sizes_people_mean() {
+        let landscape = |r: Resolution| {
+            let s = OutputSpec::new(Aspect::Landscape16x9, r.short_edge(), 30).unwrap();
+            (s.width(), s.height())
+        };
+        assert_eq!(landscape(Resolution::Hd720), (1280, 720));
+        assert_eq!(landscape(Resolution::Fhd1080), (1920, 1080));
+        assert_eq!(landscape(Resolution::Qhd1440), (2560, 1440), "2K");
+        assert_eq!(landscape(Resolution::Uhd2160), (3840, 2160), "4K UHD");
+
+        // Portrait is the same short edge, not the same long edge: 4K vertical
+        // is 2160x3840. Getting this backwards is the arithmetic the name
+        // exists to remove.
+        let shorts = OutputSpec::new(Aspect::Portrait9x16, 1080, 30).unwrap();
+        assert_eq!((shorts.width(), shorts.height()), (1080, 1920));
+        let shorts_4k =
+            OutputSpec::new(Aspect::Portrait9x16, Resolution::Uhd2160.short_edge(), 30).unwrap();
+        assert_eq!((shorts_4k.width(), shorts_4k.height()), (2160, 3840));
+    }
+
+    #[test]
+    fn a_resolution_parses_by_name_and_by_alias() {
+        for (text, want) in [
+            ("720p", Resolution::Hd720),
+            ("720", Resolution::Hd720),
+            ("1080p", Resolution::Fhd1080),
+            ("1080", Resolution::Fhd1080),
+            ("2K", Resolution::Qhd1440),
+            ("1440p", Resolution::Qhd1440),
+            ("qhd", Resolution::Qhd1440),
+            ("4k", Resolution::Uhd2160),
+            (" 4K ", Resolution::Uhd2160),
+            ("2160p", Resolution::Uhd2160),
+            ("UHD", Resolution::Uhd2160),
+        ] {
+            assert_eq!(Resolution::parse(text), Some(want), "parsing {text:?}");
+        }
+        assert_eq!(Resolution::parse("8k"), None, "past the D-114 ceiling");
+        assert_eq!(Resolution::parse(""), None);
+        assert_eq!(Resolution::parse("1081p"), None);
+    }
+
+    /// Round trip: a name resolves to a short edge, and a short edge is
+    /// reported back under the same name. The window shows a project's
+    /// geometry through `from_short_edge`, so a mismatch here would display a
+    /// size the project does not have.
+    #[test]
+    fn a_named_size_round_trips_through_its_short_edge() {
+        for resolution in Resolution::ALL {
+            assert_eq!(
+                Resolution::from_short_edge(resolution.short_edge()),
+                Some(resolution)
+            );
+            assert_eq!(Resolution::parse(resolution.as_str()), Some(resolution));
+        }
+        assert_eq!(
+            Resolution::from_short_edge(900),
+            None,
+            "no name, still legal"
+        );
+    }
+
+    /// No two names may share an alias, and no alias may be another name —
+    /// `parse` returns the first match, so a duplicate would silently make one
+    /// of the two unreachable.
+    #[test]
+    fn no_two_resolutions_answer_to_the_same_word() {
+        let mut seen: Vec<String> = Vec::new();
+        for resolution in Resolution::ALL {
+            let mut words = vec![resolution.as_str().to_owned()];
+            words.extend(resolution.aliases().iter().map(|a| (*a).to_owned()));
+            for word in words {
+                assert!(!seen.contains(&word), "{word:?} is claimed twice");
+                assert_eq!(
+                    Resolution::parse(&word),
+                    Some(resolution),
+                    "{word:?} must reach {resolution}"
+                );
+                seen.push(word);
+            }
+        }
+    }
+
+    /// D-143. A YouTube Short, a Reel and a TikTok are one frame, so they are
+    /// one word here — an operator naming the destination gets the geometry.
+    #[test]
+    fn the_vertical_destinations_are_all_one_aspect() {
+        for text in [
+            "shorts",
+            "Shorts",
+            "youtube-shorts",
+            "reel",
+            "reels",
+            "tiktok",
+            "story",
+            "vertical",
+            "portrait",
+        ] {
+            assert_eq!(
+                Aspect::parse(text),
+                Some(Aspect::Portrait9x16),
+                "{text:?} is a vertical film"
+            );
+        }
+        assert_eq!(Aspect::parse("youtube"), Some(Aspect::Landscape16x9));
     }
 
     #[test]

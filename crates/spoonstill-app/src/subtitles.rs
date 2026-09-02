@@ -63,15 +63,23 @@ pub struct Preview {
 /// defined in fractions of the frame (see `ThemeStyle`), so a small preview is
 /// a faithful scale model of the real thing rather than a different design.
 ///
+/// `aspect` is **not** in that category and has to be the real one (D-143).
+/// Scale is what the fractions make free; shape is not. The same sentence that
+/// wraps to two lines at 16:9 wraps to four in a Short, and a preview drawn
+/// landscape while the film is vertical would be wrong about the only thing a
+/// subtitle chooser exists to show — whether the caption is readable and how
+/// much of the picture it covers. An empty string means the default.
+///
 /// # Errors
 ///
 /// The geometry, if `short_edge` is one `OutputSpec` will not accept — odd, or
-/// beyond the bounds of D-032.
+/// beyond the bounds of D-032 — or `aspect` if it is not a ratio we render.
 pub fn preview(
     text: &str,
     theme: &str,
     placement: &str,
     short_edge: u32,
+    aspect: &str,
 ) -> Result<Preview, String> {
     // An empty theme is "no subtitles" — one of the choices in the window's
     // list, and a chooser that answers it with a picture of a caption is
@@ -87,8 +95,12 @@ pub fn preview(
     let placement =
         Placement::parse(placement).ok_or_else(|| format!("{placement:?} is not bottom or top"))?;
 
-    let output =
-        OutputSpec::new(Aspect::Landscape16x9, short_edge, 30).map_err(|e| e.to_string())?;
+    let aspect = if aspect.trim().is_empty() {
+        Aspect::Landscape16x9
+    } else {
+        Aspect::parse(aspect).ok_or_else(|| format!("{aspect:?} is not one of 16:9, 9:16, 1:1"))?
+    };
+    let output = OutputSpec::new(aspect, short_edge, 30).map_err(|e| e.to_string())?;
     let text = if text.trim().is_empty() { SAMPLE } else { text };
 
     let canvas = match chosen {
@@ -125,7 +137,7 @@ mod tests {
     #[test]
     fn every_offered_theme_previews() {
         for choice in themes() {
-            let preview = preview(SAMPLE, choice.id, "bottom", 270)
+            let preview = preview(SAMPLE, choice.id, "bottom", 270, "")
                 .unwrap_or_else(|e| panic!("{}: {e}", choice.id));
             assert_eq!((preview.width, preview.height), (480, 270));
             assert_eq!(preview.rgba.len(), 480 * 270 * 4);
@@ -137,18 +149,37 @@ mod tests {
         }
     }
 
+    /// D-143. Scale is free; shape is not. A preview drawn landscape while the
+    /// film is a Short would be wrong about how much of the picture the
+    /// caption covers, which is the one thing this chooser is for.
+    #[test]
+    fn the_preview_is_drawn_in_the_shape_the_film_will_be() {
+        for (aspect, want) in [
+            ("", (480, 270)),
+            ("16:9", (480, 270)),
+            ("shorts", (270, 480)),
+            ("9:16", (270, 480)),
+            ("1:1", (270, 270)),
+        ] {
+            let drawn = preview(SAMPLE, "boxed", "bottom", 270, aspect)
+                .unwrap_or_else(|e| panic!("{aspect:?}: {e}"));
+            assert_eq!((drawn.width, drawn.height), want, "{aspect:?}");
+        }
+        assert!(preview(SAMPLE, "boxed", "bottom", 270, "4:3").is_err());
+    }
+
     /// D-055 in the window: a name that is not a theme is refused with the
     /// list, not substituted with the default.
     #[test]
     fn an_unknown_theme_is_refused_with_the_list() {
-        let error = preview(SAMPLE, "clasic", "bottom", 270).expect_err("not a theme");
+        let error = preview(SAMPLE, "clasic", "bottom", 270, "").expect_err("not a theme");
         assert!(error.contains("clasic"), "{error}");
         assert!(
             error.contains("classic"),
             "the message must list them: {error}"
         );
 
-        let error = preview(SAMPLE, "classic", "middle", 270).expect_err("not a placement");
+        let error = preview(SAMPLE, "classic", "middle", 270, "").expect_err("not a placement");
         assert!(error.contains("middle"), "{error}");
     }
 
@@ -156,8 +187,8 @@ mod tests {
     /// pictures — the bare frame, with nothing burned into it.
     #[test]
     fn no_theme_previews_the_bare_frame() {
-        let bare = preview(SAMPLE, "", "bottom", 270).expect("previews");
-        let boxed = preview(SAMPLE, "boxed", "bottom", 270).expect("previews");
+        let bare = preview(SAMPLE, "", "bottom", 270, "").expect("previews");
+        let boxed = preview(SAMPLE, "boxed", "bottom", 270, "").expect("previews");
         assert_eq!((bare.width, bare.height), (480, 270));
         assert!(
             bare.rgba.chunks_exact(4).all(|p| p[3] == 255),
@@ -178,8 +209,8 @@ mod tests {
     /// preview that makes the theme look broken.
     #[test]
     fn empty_text_falls_back_to_the_sample() {
-        let blank = preview("   ", "boxed", "bottom", 270).expect("previews");
-        let sample = preview(SAMPLE, "boxed", "bottom", 270).expect("previews");
+        let blank = preview("   ", "boxed", "bottom", 270, "").expect("previews");
+        let sample = preview(SAMPLE, "boxed", "bottom", 270, "").expect("previews");
         assert_eq!(blank.rgba, sample.rgba);
     }
 }

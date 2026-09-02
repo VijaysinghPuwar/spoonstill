@@ -14,6 +14,7 @@ pub mod arrange;
 pub mod audio;
 pub mod diagnostics;
 pub mod film;
+pub mod formats;
 pub mod import;
 pub mod ingest;
 pub mod pool;
@@ -23,6 +24,7 @@ pub mod tooling;
 
 pub use audio::{AudioCache, AudioError, ResolvedAudio};
 pub use film::{FilmError, FilmEvent, RenderProjectOptions, RenderedFilm, render_project};
+pub use formats::{AspectChoice, SizeChoice};
 pub use import::{ImportError, MediaCheck, Mode, ProbeCheck, Project, ResolvedScene, Role};
 pub use ingest::{IngestError, Ingested, add_media, create_project};
 pub use render::{RenderError, RenderSceneOptions, render_scene};

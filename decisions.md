@@ -5185,6 +5185,125 @@ and the UNC / volume-GUID / past-`MAX_PATH` / plain-path cases beside it, and
 the real `Packages\Gyan.FFmpeg_…\ffmpeg-…\bin\ffmpeg.exe` layout plus one
 package that must be ignored.
 
+### D-143 — A size is a name, and the one command that makes a film could not be told one · Accepted
+
+Asked for 2026-09-02: render at 2K and 4K, and render a vertical YouTube Short.
+Checking what was already there before building anything found that **most of it
+existed and none of it was reachable from the command that makes a film.**
+
+`Aspect` has had all three ratios since D-070, `OutputSpec` has taken any legal
+short edge since M1, and `MAX_MACROBLOCKS` (D-114) puts the ceiling at exactly
+4K — 32 400 macroblocks against a limit of 36 864, so 3840x2160 was always
+going to render and 8K was always going to be refused. The filter chain is
+aspect-agnostic by construction (D-034's cover-fit), and the caption rasterizer
+sizes every length as a fraction of the frame (D-106), so both scale for free.
+
+What was missing was the way in. `--aspect` and `--short-edge` were on
+**`still render-scene`**, which renders one segment; `still render`, the command
+an operator actually uses, had neither. Geometry for a film was reachable only
+by editing `project.yaml` — and the window, which cannot edit `project.yaml`
+(D-013), had no way to ask for it at all. So a person with a folder of
+photographs could render one 4K *segment* and no 4K *film*, and could make a
+Short only by hand-writing YAML.
+
+**Four things, and only the first is new capability.**
+
+**1. A named size (`Resolution`).** `720p`, `1080p`, `1440p`, `2160p`, with
+`2k`, `4k`, `qhd`, `uhd`, `hd`, `fhd` and the bare numbers as aliases. It
+resolves to a **short edge** and hands that to `OutputSpec::new`, which keeps
+every rule about evenness and 16:9's divisibility by 9 in the one place that has
+ever had them. All four named edges satisfy both rules, so every name works in
+every aspect — asserted, because a fifth name that did not would be a shortcut
+that silently only worked in portrait and square.
+
+The short edge is what gets named because it is the parameter that means one
+thing across aspects: "4K" is 3840x2160 lying down and **2160x3840** standing
+up, and an operator who has to work that out themselves will get it backwards
+once and post a film nobody can watch. `2k` is documented as 2560x1440, which is
+the consumer usage; DCI 2K is 2048x1080 and is a different number, so the alias
+says which one it is rather than leaving it to be discovered.
+
+**2. The destination is the shape.** `Aspect::parse` now accepts `shorts`,
+`short`, `youtube-shorts`, `reel`, `reels`, `tiktok`, `story` and `stories` as
+9:16. Nobody making a Short is thinking "nine by sixteen"; they are thinking
+about where it is going, and all of those places are one frame. Free, and it is
+the half of the request that a ratio flag alone would not have answered.
+
+**3. `still render` takes geometry, as an override.** `--aspect`,
+`--resolution`, `--short-edge`, `--fps` — and `--resolution` and `--short-edge`
+`conflicts_with` each other, because they are two spellings of one setting and
+letting one win silently is the thing D-055 refuses. `project.yaml` gains
+`resolution:` on the same terms: naming it *and* `short_edge:` is a `Problem`,
+not a precedence rule. Nothing writes to `project.yaml` (D-013), so the same
+folder is a landscape film and a 4K Short on two consecutive runs and the
+project is unchanged by either.
+
+The override is applied by **replacing `project.settings.output_spec`**, once,
+before anything reads it. The spec is read in five places — the segment cache
+key, the filter graph, the caption rasterizer, the per-segment profile
+assertion, and the film's own assertion — and threading a second one through
+would eventually mean a segment cached under one geometry and asserted against
+another.
+
+**4. The window can ask.** Two `<select>`s on the Output screen, filled from
+`output_formats()`, whose pixel dimensions are computed **in Rust per aspect**
+rather than multiplied in the webview — a page that worked out 4K portrait
+itself would be a second `OutputSpec` with nothing keeping the two honest
+(D-010). Both boxes send what they say, which is a `ui_contract` test, because
+D-106's position box drove only the preview for a whole release.
+
+**The cache is already right, and that is worth stating.** `segment_key`
+carries `{width}x{height}@{fps}` (D-107's field list), so switching to 4K misses
+every segment, switching back hits every one, and D-109's two spare generations
+mean flipping between two sizes costs nothing after the first pair of renders.
+Verified: a second 4K render of a six-scene project reused all six segments and
+produced a **byte-identical** film in 0.69 s.
+
+**One real defect, found by using it rather than by reading it.** The scenes
+grid decided its thumbnail crop with
+
+```js
+project.geometry.startsWith("1080x1920") ? "portrait" : …
+```
+
+— one size of one aspect. A 4K Short showed landscape thumbnails. `ProjectView`
+now carries `aspect` and `short_edge` as fields, the grid reads the aspect being
+rendered (override included, so choosing 9:16 re-crops the grid immediately),
+and a test forbids that pixel string from coming back.
+
+**A second defect, in the same shape as the first.** The Subtitles screen's
+preview was drawn at a hardcoded `Aspect::Landscape16x9`, on the reasoning that
+the themes are fractions of the frame so any size is a faithful scale model
+(D-106). That is true of **scale** and not of **shape**: the same sentence wraps
+to two lines at 16:9 and to four in a Short, and the caption covers a different
+share of the picture. A landscape preview of a vertical film would be wrong
+about legibility, which is the one thing D-106 says that preview exists to be
+right about. `subtitles::preview` takes the aspect now, the IPC command passes
+it, and choosing a shape redraws the preview.
+
+**Measured here, 2026-09-02**, six scenes, `--jobs 2`, from the `renderable`
+fixture — every film exactly 18.054667 s, because geometry changes the pixels
+and the narration decides the length (D-021):
+
+| | 16:9 | 9:16 |
+|---|---|---|
+| 1080p | 1.7 MB (at the fixture's 540) | 5.0 MB |
+| 1440p / 2K | 7.4 MB | — |
+| 2160p / 4K | 12 MB | 9.5 MB |
+
+A single-scene 4K vertical film with `punch` captions burned in rendered in
+4.5 s and the caption band scaled with the frame, as D-106's fractions promise.
+
+**Gate:** M2 gate 7b renders six combinations and probes each one, asserts every
+duration is identical, asserts 8K is refused and asserts the two spellings
+cannot both be given. M2 is 14 gates; `make gates` is 30.
+
+**Not done, deliberately.** No duration check against a platform's limits — a
+YouTube Short is capped at three minutes today and was one minute a year ago,
+and a gate that goes stale on someone else's product decision is a gate people
+learn to ignore. The aspect names are the ones that are stable: the *frame* is
+9:16 whatever the limit becomes.
+
 ### D-074 — The `kenburns-batch` master brief does not exist on this machine · Accepted
 
 Searched 2026-08-26: no file matching `*kenburns*` anywhere under `~/Desktop`,

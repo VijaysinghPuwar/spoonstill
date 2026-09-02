@@ -15,7 +15,7 @@ narration boundaries. It is **not a video editor** — no timeline, no scrubber.
   the same cache. There is also a **drop-in importer** (`still new` / `still
   add`, D-080) and a **Tauri window** in `apps/desktop`. There is still **no
   state database** (M3) and **no ElevenLabs provider**; if a document describes
-  those as existing, it is describing an intended system. Run `make gates`.
+  those as existing, it is describing an intended system. Run `make gates` — 30 checks, M2 now 14.
 - **Rust 1.94.0 is installed**, pinned by `rust-toolchain.toml`. Homebrew's
   rustup keeps its shims in `/opt/homebrew/opt/rustup/bin`, **not**
   `~/.cargo/bin` — that path is on `PATH` via `~/.zshrc` and is re-exported by
@@ -124,7 +124,7 @@ dependency, and the shipped FFmpeg binary needs its own LGPL build (D-062).
 what any document claims:
 
 ```bash
-make gates          # M0 8/8, M1 8/8, M2 13/13 = intact.
+make gates          # M0 8/8, M1 8/8, M2 14/14 = intact.
                     # Also: make gates-m1 | gates-m2 | test | lint | fixtures
                     #       | brand | tts-live | help
 git log --oneline   # planning corpus, then M0, then M1, then M2 slice by slice
@@ -167,6 +167,13 @@ cargo build --release -p spoonstill-cli
 ./target/release/still subtitles
 ./target/release/still render /tmp/demo --out /tmp/demo-subs.mp4 --subtitles boxed
 
+# Size and shape (D-143). The number is the SHORT edge, so 4K vertical is
+# 2160x3840 — `shorts`, `reel`, `tiktok` and `story` all mean 9:16.
+./target/release/still resolutions
+./target/release/still render /tmp/demo --out /tmp/demo-4k.mp4 --resolution 4k
+./target/release/still render /tmp/demo --out /tmp/short.mp4 \
+  --aspect shorts --resolution 1080p
+
 # Every external program this needs, and the offer to install what is missing.
 # The first thing to run against a report that says the app "won't open".
 ./target/release/still doctor
@@ -177,6 +184,83 @@ cargo build --release -p spoonstill-cli
 # The window. Three screens: make or open, fill, review.
 cargo run --release -p spoonstill-desktop
 ```
+
+### State as of 2026-09-02 — sizes, shapes, and the door that was never cut
+
+**D-143 — a size is a name, and the one command that makes a film could not be
+told one.** Asked for: render at 2K and 4K, and render a vertical YouTube Short.
+Checking what already existed before building anything is the whole reason this
+was small: `Aspect` has had all three ratios since D-070, `OutputSpec` has taken
+any legal short edge since M1, D-114's ceiling is *exactly* 4K (32 400
+macroblocks against 36 864), D-034's cover-fit is aspect-agnostic and D-106's
+captions are fractions of the frame. **Nothing about 4K or 9:16 needed
+inventing.**
+
+What was missing was the door. `--aspect` and `--short-edge` were on
+**`still render-scene`**, which renders one segment; `still render`, the command
+that makes a film, had neither, and the window — which cannot edit
+`project.yaml` (D-013) — could not ask at all. So you could render one 4K
+*segment* and no 4K *film*, and a Short meant hand-writing YAML.
+
+Four things now, and only the first is new capability:
+
+- **`Resolution`** in core — `720p`, `1080p`, `1440p`, `2160p`, with `2k`, `4k`,
+  `qhd`, `uhd` and the bare numbers as aliases. It resolves to a **short edge**
+  and hands it to `OutputSpec::new`; every rule about evenness and 16:9's
+  divisibility by 9 stays in the one place that has ever had them. The short
+  edge is what gets named because it means one thing across aspects: **4K
+  vertical is 2160x3840**, and an operator who has to work that out will get it
+  backwards once. `2k` is documented as 2560x1440 (the consumer usage); DCI 2K
+  is 2048x1080 and is a different number.
+- **The destination is the shape.** `shorts`, `youtube-shorts`, `reel`,
+  `tiktok`, `story` all parse as 9:16. Nobody making a Short is thinking "nine
+  by sixteen".
+- **`still render` takes geometry as an override** — `--aspect`,
+  `--resolution`, `--short-edge`, `--fps`, and `project.yaml` gains
+  `resolution:`. `--resolution` and `--short-edge` `conflicts_with` each other
+  and naming both in `project.yaml` is a `Problem`: two spellings of one
+  setting, so letting one win silently is what D-055 refuses. Applied by
+  replacing `project.settings.output_spec` **once**, because the spec is read in
+  five places and two of them disagreeing is a segment cached under one geometry
+  and asserted against another.
+- **The window can ask** — two `<select>`s on Output, filled from
+  `output_formats()`, whose pixel dimensions are computed **in Rust per aspect**
+  (D-010: a webview that multiplies them is a second `OutputSpec`).
+
+**The cache was already right and that is worth knowing:** `segment_key` carries
+`{w}x{h}@{fps}`, so 4K misses every segment, switching back hits every one, and
+D-109's two spare generations make flipping between two sizes free after the
+first pair. Measured: a second 4K render reused all six segments, **byte
+identical**, in 0.69 s.
+
+**One real defect, found by using it.** The scenes grid decided its thumbnail
+crop with `project.geometry.startsWith("1080x1920")` — one size of one aspect —
+so a 4K Short showed landscape thumbnails. `ProjectView` carries `aspect` and
+`short_edge` now, and a `ui_contract` test forbids that pixel string. Both
+halves of that test were run against the unfixed page and seen to fail.
+
+**A second defect, same shape.** The Subtitles preview was drawn at a hardcoded
+16:9 because the themes are fractions of the frame — true of **scale**, not of
+**shape**. The same sentence wraps to two lines landscape and four in a Short,
+so a landscape preview of a vertical film is wrong about legibility, which is
+the one thing D-106 says it exists to be right about. `subtitles::preview` takes
+an aspect now, and choosing a shape redraws it.
+
+**Measured 2026-09-02**, six scenes, `--jobs 2`: every geometry produced a film
+of exactly **18.054667 s** — geometry changes the pixels and the narration
+decides the length (D-021). 4K landscape 12 MB, 4K vertical 9.5 MB, 2K 7.4 MB.
+A one-scene 4K vertical film with `punch` captions burned in took 4.5 s and the
+band scaled with the frame.
+
+**M2 is 14 gates and `make gates` is 30.** Gate 7b renders six combinations,
+probes each, asserts every duration is identical, asserts 8K is refused, and
+asserts the two spellings cannot both be given. `README.md` gained a size table;
+`readme_claims.rs` keeps the counts honest.
+
+**Deliberately not done:** no check against a platform's duration limit. A
+YouTube Short is three minutes today and was one a year ago, and a gate that
+goes stale on someone else's product decision is a gate people learn to ignore.
+The *frame* is 9:16 whatever the limit becomes, and that is what is named.
 
 ### Later on 2026-08-30 — an outside read, and what running things found
 
@@ -414,9 +498,9 @@ exact thing the top of this file warns about.
 
 #### If you are checking this work
 
-Run `make gates` first: **M0 8/8, M1 8/8, M2 13/13**, plus `cargo fmt --check`,
+Run `make gates` first: **M0 8/8, M1 8/8, M2 14/14**, plus `cargo fmt --check`,
 `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test
---workspace` (462 tests). Then `cargo audit --deny warnings` (D-129), which is
+--workspace` (493 tests). Then `cargo audit --deny warnings` (D-129), which is
 new and is the one check that can fail without the code changing.
 
 Each decision names its own reproduction, and most can be re-run in a scratch
@@ -1342,7 +1426,9 @@ D-102 before cutting a release, bumping a version, or writing a commit
 message, D-103/D-104 before spawning a program, touching `tools::locate`,
 the `MediaCheck::ready` pre-flight, or the window's empty-project screen, and
 **D-105 before touching `Remedy`, `spoonstill_app::tooling`, `drawFix`, or
-anything that reports a missing program to an operator**, and **D-141 before
+anything that reports a missing program to an operator**, **D-143 before
+touching `Aspect`, `Resolution`, `spoonstill_app::formats`, the geometry
+override in `film.rs`, or the Output screen's choosers**, and **D-141 before
 touching `network_hint`, `classify`'s markers, or a failure path on the Voice
 screen** — the sibling of D-105 for a transient network error rather than a
 missing tool. D-054 through D-057 and D-075 through D-082 were added during M2 and

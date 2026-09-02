@@ -416,6 +416,63 @@ gate_tts() {
 }
 check "a script, a recording and a silent still become one film" gate_tts
 
+# --- gate 7b: 2K, 4K and a vertical Short all come out at the size asked for -
+# D-143. Geometry was reachable from `project.yaml` and from `render-scene`,
+# which renders one segment — so the one command that makes a film could not
+# be told what shape or size to make it. This asserts the whole path: the flag
+# reaches `OutputSpec`, the filter chain, the profile assertion and the join.
+#
+# The vertical case is the one worth having: a 4K Short is 2160x3840, not
+# 3840x2160, and a chooser that got that backwards would produce a film nobody
+# can post. The durations are asserted equal across all four because geometry
+# must change the pixels and nothing else — the narration decides the length
+# (D-021), and a resize that moved it would mean the frame count is being
+# derived from the wrong thing.
+gate_sizes() {
+  local proj="$WORK/sizes"
+  mkdir -p "$proj"
+  cp fixtures/generated/land.jpg "$proj/001.jpg" || return 1
+  "$FFMPEG" -y -loglevel error -f lavfi -i "sine=frequency=440:duration=2" \
+    -ar 48000 -ac 1 "$proj/001.wav" || return 1
+
+  local spec want base
+  base=""
+  for spec in "16:9 1080p 1920x1080" "16:9 2k 2560x1440" "16:9 4k 3840x2160" \
+              "shorts 1080p 1080x1920" "tiktok 4k 2160x3840" "1:1 1440p 1440x1440"; do
+    set -- $spec
+    local aspect="$1" size="$2" expected="$3"
+    "$STILL" render "$proj" --out "$WORK/s.mp4" --aspect "$aspect" \
+      --resolution "$size" >/dev/null 2>&1 || {
+        echo "--aspect $aspect --resolution $size failed to render"; return 1; }
+    local got
+    got=$("$FFPROBE" -v error -select_streams v:0 \
+      -show_entries stream=width,height -of csv=p=0 "$WORK/s.mp4" | tr ',' 'x')
+    [ "$got" = "$expected" ] || {
+      echo "--aspect $aspect --resolution $size gave $got, wanted $expected"; return 1; }
+
+    # The length is the narration's, whatever the frame is.
+    local seconds
+    seconds=$("$FFPROBE" -v error -show_entries format=duration -of csv=p=0 "$WORK/s.mp4")
+    if [ -z "$base" ]; then base="$seconds"; fi
+    [ "$seconds" = "$base" ] || {
+      echo "$aspect $size ran $seconds s against $base s — geometry moved the clock"
+      return 1; }
+  done
+
+  # 8K is refused rather than mislabelled: past 36864 macroblocks the segment
+  # profile would declare an H.264 level no decoder honours (D-114).
+  "$STILL" render "$proj" --out "$WORK/s.mp4" --short-edge 4320 >/dev/null 2>&1 \
+    && { echo "8K rendered"; return 1; }
+
+  # Two spellings of one setting are refused together rather than one winning.
+  "$STILL" render "$proj" --out "$WORK/s.mp4" --resolution 4k --short-edge 1080 \
+    >/dev/null 2>&1 && { echo "--resolution and --short-edge both accepted"; return 1; }
+
+  rm -rf "$proj/$STATE"
+  return 0
+}
+check "2K, 4K and a vertical Short each come out at the size asked for" gate_sizes
+
 # --- gates 8 and 9: the two cargo gates plan.md names -----------------------
 check "cargo test -p spoonstill-app validation" \
   cargo test --release -p spoonstill-app validation

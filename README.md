@@ -64,7 +64,7 @@ you have. The one-line installer below works that out for the command line too.
 > What has **not** happened is a person sitting at a Windows desktop and running
 > the packaged app. `spoonstill-Windows-Installer.exe` and the PowerShell
 > one-liner are built and shipped by CI but have never been executed by anyone,
-> here or in CI (D-128). The 29 `make gates` checks are macOS-only. Every
+> here or in CI (D-128). The 30 `make gates` checks are macOS-only. Every
 > performance number in [`ffmpeg-findings.md`](ffmpeg-findings.md) is macOS
 > arm64 and none of it has been measured on Windows.
 >
@@ -168,6 +168,40 @@ still render ~/holiday --out ~/holiday.mp4 --voice en-GB-RyanNeural
 Spoken lines and your own recordings are levelled to the same loudness, so a
 phone recording and a synthetic voice sit together in one film without you
 riding a fader.
+
+### Size and shape — 1080p, 2K, 4K, and YouTube Shorts
+
+```bash
+still resolutions                                   # every size, in every shape
+still render ~/holiday --out ~/holiday.mp4 --resolution 4k
+still render ~/holiday --out ~/short.mp4 --aspect shorts --resolution 1080p
+```
+
+| | 16:9 | 9:16 | 1:1 |
+|---|---|---|---|
+| `720p` | 1280x720 | 720x1280 | 720x720 |
+| `1080p` *(default)* | 1920x1080 | 1080x1920 | 1080x1080 |
+| `1440p` — also `2k` | 2560x1440 | 1440x2560 | 1440x1440 |
+| `2160p` — also `4k` | 3840x2160 | 2160x3840 | 2160x2160 |
+
+**A YouTube Short, an Instagram Reel, a TikTok and a Story are all 9:16**, so
+`--aspect shorts`, `--aspect reel`, `--aspect tiktok` and `--aspect story` all
+mean that frame. You do not have to know the ratio to ask for the thing.
+
+The number is the **short edge**, which is why 4K vertical is 2160x3840 rather
+than 3840x2160 — the same "4K" gives you the same detail whichever way up the
+film is.
+
+Both flags are an override for one run; they never touch `project.yaml`. To
+make it the project's own:
+
+```yaml
+aspect: 9:16
+resolution: 4k    # or `short_edge: 2160` — two spellings of one setting
+```
+
+4K is the ceiling. Past it, the file would have to claim an H.264 level that no
+player honours, so it is refused rather than written ([D-114](decisions.md)).
 
 ### Subtitles
 
@@ -279,7 +313,7 @@ make fixtures   # synthesize the test media
 make gates      # every milestone's exit gates — the real state of the build
 ```
 
-`make gates` is the honest answer to "does this work?". It runs 29 checks
+`make gates` is the honest answer to "does this work?". It runs 30 checks
 across M0, M1 and M2 and prints pass/fail for each.
 
 ---
@@ -304,8 +338,8 @@ holiday/
 ```yaml
 # project.yaml
 output: film.mp4
-aspect: 16:9        # or 9:16, or 1:1
-short_edge: 1080
+aspect: 16:9        # or 9:16 (Shorts, Reels, TikTok), or 1:1
+resolution: 1080p   # or 720p · 1440p (2k) · 2160p (4k)
 fps: 30
 defaults:
   duration: 4.0     # how long an unpaired still holds
@@ -316,7 +350,7 @@ subtitles:
 
 Full rules: [D-056](decisions.md) for what a project folder is and which file
 wins, [D-080](decisions.md) for how media gets in, [D-106](decisions.md) for
-subtitles.
+subtitles, [D-143](decisions.md) for sizes and shapes.
 
 ---
 
@@ -326,7 +360,7 @@ subtitles.
 |---|---|
 | **M0** scaffolding, architecture boundary | complete — 8/8 gates |
 | **M1** one scene, end to end | complete — 8/8 gates |
-| **M2** whole projects: import, validation, speech, parallel render | complete — 13/13 gates |
+| **M2** whole projects: import, validation, speech, parallel render | complete — 14/14 gates |
 | **M3** state database, resumable queue | next |
 | **M4** the Tauri window | shell exists, ahead of schedule |
 | **M5** signing, notarization, bundled FFmpeg, auto-update | not started |

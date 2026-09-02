@@ -369,7 +369,7 @@
             <code>project.yaml</code> is an input and nothing here writes to it.</p>
         </div>
         <div class="pane-tools">
-          <button id="out-default">Use the project default</button>
+          <button id="out-default">Use the project defaults</button>
         </div>
       </div>
 
@@ -393,6 +393,25 @@
               <span class="v mono wrap" id="out-full">—</span>
             </div>
             <p id="out-problem" class="state missing" hidden></p>
+          </section>
+
+          <section class="card">
+            <h3>Shape and size</h3>
+            <p class="whisper left">A YouTube Short, a Reel, a TikTok and a Story are
+              all 9:16. An override for the next render — nothing here writes to
+              <code>project.yaml</code>.</p>
+            <label class="field">
+              Shape
+              <select id="out-aspect" class="select"></select>
+            </label>
+            <label class="field">
+              Size
+              <select id="out-size" class="select"></select>
+            </label>
+            <div class="resolved-path">
+              <span class="k">Renders at</span>
+              <span class="v mono" id="out-dimensions">—</span>
+            </div>
           </section>
 
           <section class="card">

@@ -241,6 +241,46 @@ fn every_command_that_writes_names_the_project_it_means() {
     }
 }
 
+/// D-143. The Output screen's shape and size boxes *send* what they say.
+///
+/// This is D-106's own lesson, written down as a test: the subtitle position
+/// box drove only the preview for a whole release, so an operator moved the
+/// caption off their artwork, rendered, and it came back exactly where it was.
+/// A control that changes what is on screen and not what is rendered is the
+/// same defect as a wrong number, and a webview reports it as nothing at all.
+#[test]
+fn the_shape_and_size_boxes_reach_the_render() {
+    let js = code_only(&read("app.js"));
+
+    let at = js
+        .find("\"render_project\"")
+        .expect("the page does not render at all");
+    let request = &js[at..js.len().min(at + 1600)];
+    for field in ["aspect:", "resolution:"] {
+        assert!(
+            request.contains(field),
+            "the render request carries no {field} — the Output screen's \
+             chooser would change the preview and nothing else"
+        );
+    }
+
+    // And both boxes are wired to something, rather than being decoration.
+    for id in ["out-aspect", "out-size"] {
+        assert!(
+            js.contains(&format!("el(\"{id}\").addEventListener")),
+            "{id} has no listener, so choosing in it does nothing"
+        );
+    }
+
+    // The thumbnails follow the shape being rendered. This used to be sniffed
+    // out of the geometry *string* by testing for a `1080x1920` prefix — one
+    // size of one aspect — so a 4K Short showed landscape thumbnails.
+    assert!(
+        !js.contains("1080x1920"),
+        "the grid is deciding its shape by matching one size's pixel string"
+    );
+}
+
 /// The traffic-light reservation is macOS's, and it says so.
 ///
 /// `titleBarStyle: "Overlay"` is macOS-only — Tauri's `title_bar_style` is

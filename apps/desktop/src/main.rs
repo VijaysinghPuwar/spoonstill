@@ -118,6 +118,16 @@ struct ProjectView {
     /// The two of them, joined by Rust.
     output_path: String,
     geometry: String,
+    /// The project's own aspect, as `16:9` — the shape chooser opens on it,
+    /// and the scenes grid crops its thumbnails to it.
+    ///
+    /// Sent rather than derived from `geometry`: the grid used to decide
+    /// "portrait" by testing whether that string started with `1080x1920`,
+    /// which is one size of one aspect, so a 4K Short showed landscape
+    /// thumbnails (D-143).
+    aspect: String,
+    /// The project's own short edge, which the size chooser opens on.
+    short_edge: u32,
     /// Whether `project.yaml` asks for burned-in subtitles (D-106).
     subtitles: bool,
     /// Which theme it names, resolved to a real one.
@@ -683,6 +693,8 @@ async fn validate_project(
                 .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
             output_path: destination.display().to_string(),
             geometry: format!("{}x{} @ {} fps", spec.width(), spec.height(), spec.fps()),
+            aspect: spec.aspect().as_str().to_owned(),
+            short_edge: spec.short_edge(),
             subtitles: project.settings.subtitles,
             subtitle_theme: project.settings.subtitle_theme.as_str().to_owned(),
             subtitle_placement: project.settings.subtitle_placement.as_str().to_owned(),
@@ -1064,6 +1076,11 @@ struct RenderRequest {
     subtitle_theme: Option<String>,
     /// Which edge they sit against, for this run.
     subtitle_position: Option<String>,
+    /// Render this run in a different shape — `16:9`, `9:16`, `1:1` (D-143).
+    /// `None` leaves the project's own answer alone.
+    aspect: Option<String>,
+    /// The same, for the size: a name (`4k`) or a short edge in pixels.
+    resolution: Option<String>,
 }
 
 /// The subtitle themes, for the window's chooser (D-106).
@@ -1077,6 +1094,79 @@ fn subtitle_themes() -> Vec<ThemeView> {
             default: choice.default,
         })
         .collect()
+}
+
+/// Every shape and size the Output screen can offer (D-143).
+///
+/// The dimensions are computed per aspect in Rust rather than multiplied in
+/// the webview: 4K portrait is 2160x3840 and 4K landscape is 3840x2160, and a
+/// page that worked that out itself would be a second implementation of
+/// `OutputSpec` with nothing keeping the two honest (D-010).
+#[tauri::command]
+fn output_formats() -> FormatsView {
+    let aspects: Vec<spoonstill_app::AspectChoice> = spoonstill_app::formats::aspects();
+    let parsed: Vec<spoonstill_core::Aspect> = aspects
+        .iter()
+        .filter_map(|a| spoonstill_core::Aspect::parse(a.id))
+        .collect();
+
+    let sizes = spoonstill_app::formats::sizes(spoonstill_core::Aspect::Landscape16x9)
+        .into_iter()
+        .map(|size| SizeView {
+            dimensions: parsed
+                .iter()
+                .map(|&aspect| {
+                    let drawn = spoonstill_app::formats::sizes(aspect)
+                        .into_iter()
+                        .find(|s| s.id == size.id)
+                        .map_or_else(|| "—".to_owned(), |s| s.dimensions());
+                    (aspect.as_str().to_owned(), drawn)
+                })
+                .collect(),
+            id: size.id.to_owned(),
+            description: size.description.to_owned(),
+            short_edge: size.short_edge,
+            default: size.default,
+        })
+        .collect();
+
+    FormatsView {
+        aspects: aspects
+            .into_iter()
+            .map(|aspect| AspectView {
+                id: aspect.id.to_owned(),
+                description: aspect.description.to_owned(),
+                default: aspect.default,
+            })
+            .collect(),
+        sizes,
+    }
+}
+
+/// The two lists the Output screen's choosers are built from.
+#[derive(Debug, Clone, Serialize)]
+struct FormatsView {
+    aspects: Vec<AspectView>,
+    sizes: Vec<SizeView>,
+}
+
+/// One shape.
+#[derive(Debug, Clone, Serialize)]
+struct AspectView {
+    id: String,
+    description: String,
+    default: bool,
+}
+
+/// One size, with what it comes to in every shape.
+#[derive(Debug, Clone, Serialize)]
+struct SizeView {
+    id: String,
+    description: String,
+    short_edge: u32,
+    default: bool,
+    /// Keyed by aspect id — `{"16:9": "3840x2160", "9:16": "2160x3840"}`.
+    dimensions: std::collections::BTreeMap<String, String>,
 }
 
 /// One theme, drawn over a stand-in photograph, as raw RGBA.
@@ -1095,9 +1185,16 @@ async fn subtitle_preview(
     theme: String,
     position: String,
     short_edge: u32,
+    aspect: Option<String>,
 ) -> Result<tauri::ipc::Response, String> {
     let preview = tauri::async_runtime::spawn_blocking(move || {
-        spoonstill_app::subtitles::preview(&text, &theme, &position, short_edge)
+        spoonstill_app::subtitles::preview(
+            &text,
+            &theme,
+            &position,
+            short_edge,
+            aspect.as_deref().unwrap_or_default(),
+        )
     })
     .await
     .map_err(|e| format!("the preview thread failed: {e}"))??;
@@ -1136,6 +1233,8 @@ async fn render_project(
         subtitles,
         subtitle_theme,
         subtitle_position,
+        aspect,
+        resolution,
     } = request;
 
     // Refused here rather than deep in the render, for the same reason the
@@ -1158,6 +1257,22 @@ async fn render_project(
                 )
             })?,
         ),
+    };
+
+    // Refused here for the same reason the theme is: a shape the window should
+    // never have sent is a bug worth seeing. The render would refuse it too —
+    // `apply_geometry_override` calls the same `OutputSpec::new` — but it
+    // would do it after taking the lock and loading the project (D-143).
+    let aspect = match aspect.filter(|a| !a.is_empty()) {
+        None => None,
+        Some(text) => Some(
+            spoonstill_core::Aspect::parse(&text)
+                .ok_or_else(|| format!("{text:?} is not one of 16:9, 9:16, 1:1"))?,
+        ),
+    };
+    let short_edge = match resolution.filter(|r| !r.is_empty()) {
+        None => None,
+        Some(text) => Some(spoonstill_app::formats::parse_size(&text)?),
     };
 
     // Resolved and refused here, before the lock is taken and before a single
@@ -1189,6 +1304,8 @@ async fn render_project(
                 subtitles,
                 subtitle_theme,
                 subtitle_placement,
+                aspect,
+                short_edge,
                 ..defaults
             };
 
@@ -1429,6 +1546,7 @@ fn main() {
             remove_scene,
             move_scene,
             subtitle_themes,
+            output_formats,
             subtitle_preview,
             render_project,
             cancel_render,

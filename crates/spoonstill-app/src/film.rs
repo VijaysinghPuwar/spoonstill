@@ -42,7 +42,7 @@ use std::sync::Mutex;
 use spoonstill_core::captions::{self, Placement, SubtitleSpec, SubtitleTheme};
 use spoonstill_core::diagnostics::{Diagnostics, Event};
 use spoonstill_core::project::MotionRequest;
-use spoonstill_core::{MotionSpec, OutputSpec, STATE_DIR, hash, timing};
+use spoonstill_core::{Aspect, MotionSpec, OutputSpec, STATE_DIR, hash, timing};
 use spoonstill_media::scene::{Cancel, EncodeSettings, SceneRequest};
 use spoonstill_media::{MediaError, Tools, concat, profile};
 use spoonstill_state::FileLog;
@@ -101,6 +101,23 @@ pub struct RenderProjectOptions {
     /// dead generation per render and nothing ever removed them. On for an
     /// operator who would rather spend the disk than ever re-encode.
     pub keep_cache: bool,
+    /// Render this run in a different aspect than `project.yaml` asks for
+    /// (D-143).
+    ///
+    /// An override for one run, like [`Self::voice`] and for the same reason:
+    /// `project.yaml` is an input and the renderer never writes to it (D-013).
+    /// The same folder of photographs is a landscape film and a YouTube Short
+    /// on two consecutive runs, and neither run edits the project.
+    pub aspect: Option<Aspect>,
+    /// The same, for the output's short edge — 1440 for 2K, 2160 for 4K.
+    ///
+    /// A number rather than a [`spoonstill_core::Resolution`], because the
+    /// name is a surface convenience and this is the layer below it: both
+    /// control surfaces resolve a name to its short edge before they get here,
+    /// and a project that sets `short_edge: 900` is still overridable.
+    pub short_edge: Option<u32>,
+    /// The same, for the frame rate.
+    pub fps: Option<u32>,
 }
 
 impl RenderProjectOptions {
@@ -124,6 +141,9 @@ impl RenderProjectOptions {
             subtitle_theme: None,
             subtitle_placement: None,
             keep_cache: false,
+            aspect: None,
+            short_edge: None,
+            fps: None,
         }
     }
 }
@@ -251,6 +271,16 @@ pub enum FilmError {
         /// The setting, as written.
         value: String,
     },
+    /// A geometry override for this run is not one this renders (D-143).
+    ///
+    /// Its own variant rather than a [`Problem`](spoonstill_core::Problem),
+    /// because it is not a fact about the project: `project.yaml` may be
+    /// perfectly valid and the flag wrong, and blaming the folder for a
+    /// command-line typo sends the operator to the wrong file.
+    UnusableGeometry {
+        /// The refusal, already phrased as a sentence by `GeometryError`.
+        detail: String,
+    },
     /// The voice service is not usable, and scenes need it (D-002, D-094).
     ///
     /// Found before the pool starts, not at scene 340 of 500.
@@ -327,6 +357,11 @@ impl std::fmt::Display for FilmError {
                 f,
                 "the project's output setting {value:?} points outside the project folder \
                  (D-054). Pass --out to write somewhere else deliberately."
+            ),
+            FilmError::UnusableGeometry { detail } => write!(
+                f,
+                "this run asked for geometry that will not render: {detail}\n\
+                 `still resolutions` lists the sizes and aspects that will."
             ),
             FilmError::VoiceService {
                 provider,
@@ -412,6 +447,7 @@ pub fn render_project(
     let mut project =
         crate::import::load(&options.root, &ProbeCheck::from_env()).map_err(FilmError::Import)?;
     apply_voice_override(&mut project, options);
+    apply_geometry_override(&mut project, options)?;
 
     let errors = project.errors().count();
     if errors > 0 {
@@ -701,6 +737,38 @@ fn apply_voice_override(project: &mut crate::import::Project, options: &RenderPr
             }
         }
     }
+}
+
+/// Replace the project's geometry with this run's, if it named one (D-143).
+///
+/// Mutating `project.settings.output_spec` rather than threading a second spec
+/// through the render is deliberate: the spec is read in five places — the
+/// segment key, the filter graph, the caption rasterizer, the profile
+/// assertion, and the film's own assertion — and two of them disagreeing is a
+/// segment that is cached under one geometry and asserted against another.
+/// There is one spec, and this is where it is decided.
+///
+/// # Errors
+///
+/// [`FilmError::UnusableGeometry`] when the requested combination is not one
+/// [`OutputSpec::new`] accepts. Every rule is that constructor's; nothing is
+/// re-derived here (D-114).
+fn apply_geometry_override(
+    project: &mut crate::import::Project,
+    options: &RenderProjectOptions,
+) -> Result<(), FilmError> {
+    if options.aspect.is_none() && options.short_edge.is_none() && options.fps.is_none() {
+        return Ok(());
+    }
+    let current = project.settings.output_spec;
+    let aspect = options.aspect.unwrap_or_else(|| current.aspect());
+    let short_edge = options.short_edge.unwrap_or_else(|| current.short_edge());
+    let fps = options.fps.unwrap_or_else(|| current.fps());
+    project.settings.output_spec =
+        OutputSpec::new(aspect, short_edge, fps).map_err(|error| FilmError::UnusableGeometry {
+            detail: format!("{short_edge} at {aspect}, {fps} fps — {error}"),
+        })?;
+    Ok(())
 }
 
 /// Where this run's film will be written.
