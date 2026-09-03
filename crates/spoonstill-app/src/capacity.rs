@@ -21,7 +21,7 @@ use spoonstill_core::OutputSpec;
 /// its demuxers, the decoded still, and x264's fixed structures.
 ///
 /// The intercept of the fit in [`segment_memory_bytes`], rounded up.
-pub const SEGMENT_BASE_BYTES: u64 = 128 * 1024 * 1024;
+pub const SEGMENT_BASE_BYTES: u64 = 192 * 1024 * 1024;
 
 /// What one worker costs per pixel of the *prescale* canvas (D-032).
 ///
@@ -46,15 +46,21 @@ pub const BUDGET_PERCENT: u64 = 70;
 /// Measured on macOS arm64 2026-09-03, one scene per resolution, peak RSS of
 /// the FFmpeg child (`ffmpeg-findings.md` §12):
 ///
-/// | output | prescale | measured | this model |
-/// |---|---|---|---|
-/// | 1280x720 | 3840x2160 | 369 MB | 427 MB |
-/// | 1920x1080 | 5760x3240 | 768 MB | 800 MB |
-/// | 2560x1440 | 7680x4320 | 1219 MB | 1322 MB |
-/// | 3840x2160 | 11520x6480 | 2630 MB | 2815 MB |
+/// | output | prescale | measured | this model | headroom |
+/// |---|---|---|---|---|
+/// | 1280x720 | 3840x2160 | 369 MB | 477 MB | +29% |
+/// | 1920x1080 | 5760x3240 | 768 MB | 833 MB | +8% |
+/// | 2560x1440 | 7680x4320 | 1219 MB | 1331 MB | +9% |
+/// | 3840x2160 | 11520x6480 | 2630 MB | 2755 MB | +5% |
 ///
 /// The model is deliberately **above** every measurement. Over-estimating
 /// costs a worker; under-estimating costs the machine.
+///
+/// The base was 128 MB in the first draft, which put 1080p **0.7 MB** above
+/// its measurement — arithmetically above and practically equal, so a re-run
+/// that measured 769 MB would have made a liar of the sentence above. The
+/// headroom column exists so that a future measurement changes a number here
+/// rather than quietly inverting the rule.
 ///
 /// The 768 MB at 1080p is the same number `ffmpeg-findings.md` §10b recorded
 /// as 780 MB by a different method, which is the reason to trust the other
@@ -243,6 +249,15 @@ mod tests {
                 modelled >= measured,
                 "{resolution:?}: model says {modelled} MB, measurement was {measured} MB — \
                  under-estimating memory is the failure this module exists to prevent"
+            );
+            // Above by a margin that survives a re-measurement. The first
+            // draft cleared 1080p by 0.7 MB, which is arithmetically above and
+            // practically equal — the CI runner or a warm cache would have
+            // inverted it. 2% is not much; it is enough to be a decision.
+            assert!(
+                modelled >= measured + measured / 50,
+                "{resolution:?}: model {modelled} MB clears the measured {measured} MB \
+                 by less than 2%, which is noise rather than headroom"
             );
             // And not so far over that it strands capacity a machine has.
             assert!(

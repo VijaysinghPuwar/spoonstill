@@ -729,9 +729,20 @@ to trust the other three rows. And the cost tracks the **prescale canvas**
 3.4x 1080p's.
 
 A least-squares fit over the four is `107 MB + 33.8 bytes/pixel`. What is in
-the code is `128 MB + 36 bytes/pixel`, which is above every measurement by 4-16%
-— deliberately, per D-144: over-estimating costs a worker, under-estimating
-costs the machine.
+the code is `192 MB + 36 bytes/pixel`:
+
+| output | measured | model | headroom |
+|---|---|---|---|
+| 1280x720 | 369 MB | 477 MB | +29% |
+| 1920x1080 | 768 MB | 833 MB | +8% |
+| 2560x1440 | 1219 MB | 1331 MB | +9% |
+| 3840x2160 | 2630 MB | 2755 MB | +5% |
+
+Above every measurement, deliberately, per D-144: over-estimating costs a
+worker, under-estimating costs the machine. The base started at 128 MB, which
+cleared 1080p by **0.7 MB** — a margin inside the noise of the measurement
+itself, so the next re-measure would have flipped it. Headroom is now asserted
+at 2% rather than at ordering.
 
 ### 12b. Aggregate, and the 4K speedup curve
 

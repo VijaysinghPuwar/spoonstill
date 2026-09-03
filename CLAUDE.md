@@ -209,9 +209,10 @@ times 1080p's. Aggregate over eight scenes at `--jobs 4`: **2.9 GB at 1080p,
 6.6 GB at 4K**. On 24 GB both finish; on 8 GB the second one is the machine.
 
 `spoonstill_app::capacity` is the new module. A worker costs
-`128 MB + 36 bytes x prescale pixels` — a fit that sits deliberately **above**
-every measurement, because over-estimating costs a worker and under-estimating
-costs the machine. The pool is the lower of D-076's core rule and
+`192 MB + 36 bytes x prescale pixels` — a fit that sits **above** every
+measurement by 5-29%, because over-estimating costs a worker and
+under-estimating costs the machine. It was 128 MB first, clearing 1080p by
+**0.7 MB**, which is ordering rather than headroom; a test now demands 2%. The pool is the lower of D-076's core rule and
 `70% of RAM / that cost`, floored at one. **`RenderProjectOptions.jobs` is now
 `Option<usize>`**: a worker's cost depends on the geometry, and the geometry is
 not known until `apply_geometry_override` has run, so a number fixed in
@@ -233,8 +234,15 @@ the memory is the prescale canvas in the CPU filter graph.
 tuning: `plan_within`/`pressure_within` take it as an argument, because on this
 24 GB laptop every size affords four workers and a test calling `plan()` would
 assert the right property on an input that cannot exhibit the defect — D-116's
-trap. Gate 7c states an 8 GB machine. Run against the unfixed rule first: four
-unit tests and the gate fail. **M2 is 15 gates; `make gates` is 31.**
+trap. **CI then caught the same trap in the gate itself**: gate 7c first
+compared the two *automatic* worker counts, which passed on this ten-core
+laptop and failed on the macOS runner with *"4K got 1 workers against 1080p's
+1"* — a small runner derives one worker for every size, so it cannot express
+the difference. The budget can be stated; **the core count cannot**, so the gate
+now asserts the core-independent form: the same explicit `--jobs 4` fits at
+1080p and is warned about at 4K. Checked three ways — here, with
+`default_jobs()` forced to 1, and against the unfixed code. **M2 is 15 gates;
+`make gates` is 31.**
 
 ### State as of 2026-09-02 — sizes, shapes, and the door that was never cut
 

@@ -5338,9 +5338,13 @@ Aggregate, same eight-scene project, `--jobs 4`: **2.9 GB at 1080p, 6.6 GB at
 4K.** On a 24 GB laptop both finish. On 8 GB the second one is the machine.
 
 **The fix is `spoonstill_app::capacity`.** One worker costs
-`128 MB + 36 bytes x prescale pixels` — a fit over those four measurements that
-sits deliberately **above** every one of them, because over-estimating costs a
-worker and under-estimating costs the machine. The automatic pool is the lower
+`192 MB + 36 bytes x prescale pixels` — a fit over those four measurements that
+sits deliberately **above** every one of them by 5-29%, because over-estimating
+costs a worker and under-estimating costs the machine. The base was 128 MB in
+the first draft, which cleared 1080p by **0.7 MB**: arithmetically above and
+practically equal, so a re-measure at 769 MB would have inverted the rule the
+module is built on. A test now demands 2% of real headroom rather than mere
+ordering. The automatic pool is the lower
 of D-076's core rule and `70% of physical memory / that cost`, floored at one.
 `RenderProjectOptions.jobs` became `Option<usize>` to make this possible at all:
 the cost of a worker depends on the geometry, and the geometry is not known
@@ -5376,12 +5380,24 @@ by **zero**, because the memory is the prescale canvas inside the CPU filter
 graph. Hardware encode stays D-036's opt-in draft; it was never the cause and
 would not have prevented the freeze.
 
-**Gate:** M2 gate 7c states an 8 GB machine and asserts 4K gets fewer workers
-than 1080p *and* that 1080p is unchanged, that a machine too small for one 4K
-worker still renders rather than refusing, and that `--jobs 4` over budget is
-obeyed, warned, and told a smaller number. Run against the unfixed rule first:
-four unit tests and the gate fail, the gate saying *"4K got 4 workers against
-1080p's 4 — the pool is still frame-blind"*. M2 is 15 gates; `make gates` is 31.
+**Gate:** M2 gate 7c states an 8 GB machine and asserts that **four workers fit
+at 1080p and are warned about at 4K** — obeyed at four, told to try two — plus
+that the automatic count never rises with the frame and that a machine too small
+for one 4K worker still renders rather than refusing.
+
+**The first version of that gate was wrong, and CI caught it.** It compared the
+two *automatic* counts and demanded 4K be strictly lower. That passed on this
+ten-core laptop and failed on the macOS runner with
+*"4K got 1 workers against 1080p's 1"* — a small runner's core rule yields one
+worker for every size, so the machine cannot express the difference and the gate
+was failing a fix that worked. **The core count cannot be stated the way the
+budget can**, so what is asserted instead is core-independent: the same
+*explicit* `--jobs 4` fits at 1080p (3.3 GB) and does not at 4K (11 GB), which is
+the defect itself rather than a proxy for it. Verified three ways — it passes
+here, it passes with `default_jobs()` forced to 1, and it fails against the
+unfixed code with *"four 4K workers on an 8 GB machine did not warn"*.
+
+M2 is 15 gates; `make gates` is 31.
 
 **Not done, deliberately.** The audio pool is untouched — ingest normalization
 is short, I/O-bound and holds no canvas, and D-023 says its real ceiling is the

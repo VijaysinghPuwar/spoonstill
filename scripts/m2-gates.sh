@@ -476,8 +476,15 @@ check "2K, 4K and a vertical Short each come out at the size asked for" gate_siz
 # --- gate 7c: the pool is sized against the frame, not just the cores -------
 # D-144. Four 4K workers froze an 8 GB Windows machine hard enough to need the
 # power button, because the pool had only ever been sized from the core count
-# and D-076's whole table is 1080p. The budget is stated rather than measured
-# so this asserts the rule and not whatever RAM the runner happens to have.
+# and D-076's whole table is 1080p.
+#
+# The budget is stated rather than measured, so this asserts the rule and not
+# whatever RAM the runner happens to have. The *core* count cannot be stated,
+# though, and that is what the first version of this gate got wrong: a small CI
+# runner derives one worker for every size, so comparing the two automatic
+# counts compared 1 against 1 and failed on a fix that was working. What is
+# asserted instead is core-independent — the same explicit job count that fits
+# at 1080p does not fit at 4K, which is the defect itself.
 gate_capacity() {
   local proj="$WORK/capacity"
   mkdir -p "$proj"
@@ -485,43 +492,54 @@ gate_capacity() {
   "$FFMPEG" -y -loglevel error -f lavfi -i "sine=frequency=440:duration=1" \
     -ar 48000 -ac 1 "$proj/001.wav" || return 1
 
-  # "N at a time" as this run reported it.
-  jobs_for() {
-    SPOONSTILL_MEMORY_BUDGET_MB="$1" "$STILL" render "$proj" --out "$WORK/c.mp4" \
-      --resolution "$2" 2>&1 | sed -n 's/.*scenes\{0,1\}, \([0-9]*\) at a time.*/\1/p' | head -1
+  render_at() {  # budget_mb resolution [extra args...]
+    local budget="$1" size="$2"; shift 2
+    SPOONSTILL_MEMORY_BUDGET_MB="$budget" "$STILL" render "$proj" \
+      --out "$WORK/c.mp4" --resolution "$size" "$@" 2>&1
   }
 
-  # An 8 GB machine: 1080p is unchanged, 4K is not. Both halves matter — a rule
-  # that slowed every render down would be a worse defect than the one it fixes.
-  local hd uhd
-  hd=$(jobs_for 5600 1080p)
-  uhd=$(jobs_for 5600 4k)
-  [ -n "$hd" ] && [ -n "$uhd" ] || { echo "no worker count reported"; return 1; }
-  [ "$uhd" -lt "$hd" ] || {
-    echo "4K got $uhd workers against 1080p's $hd — the pool is still frame-blind"
+  # An 8 GB machine, four workers asked for explicitly. 1080p fits and must say
+  # nothing new — a rule that slowed every render down would be a worse defect
+  # than the one it fixes.
+  local hd
+  hd=$(render_at 5600 1080p --jobs 4) || { echo "1080p --jobs 4 failed"; return 1; }
+  printf '%s' "$hd" | grep -q "4 at a time" || {
+    echo "1080p --jobs 4 did not run four at a time"; return 1; }
+  printf '%s' "$hd" | grep -q "warning:" && {
+    echo "1080p at 8 GB warned; four 1080p workers fit and must not"; return 1; }
+
+  # The same request at 4K does not fit, and that difference is the whole fix.
+  local uhd
+  uhd=$(render_at 5600 4k --jobs 4) || { echo "4k --jobs 4 failed"; return 1; }
+  printf '%s' "$uhd" | grep -q "warning:" || {
+    echo "four 4K workers on an 8 GB machine did not warn — the pool is frame-blind"
     return 1; }
-
-  # A machine too small for one 4K worker still renders, rather than refusing.
-  local tiny
-  tiny=$(jobs_for 512 4k)
-  [ "$tiny" = "1" ] || { echo "a small machine got '$tiny' workers, wanted 1"; return 1; }
-
-  # An operator who names a number is obeyed and warned, never overruled
-  # (D-076: --jobs is not capped in either direction).
-  local out
-  out=$(SPOONSTILL_MEMORY_BUDGET_MB=5600 "$STILL" render "$proj" \
-    --out "$WORK/c.mp4" --resolution 4k --jobs 4 2>&1)
-  printf '%s' "$out" | grep -q "4 at a time" || {
+  # Obeyed, not overruled: D-076 says --jobs is not capped in either direction.
+  printf '%s' "$uhd" | grep -q "4 at a time" || {
     echo "--jobs 4 was overruled; D-076 says it is obeyed"; return 1; }
-  printf '%s' "$out" | grep -q "warning:" || {
-    echo "--jobs 4 over budget rendered with no warning"; return 1; }
-  printf '%s' "$out" | grep -q "try --jobs" || {
-    echo "the warning named no number to use instead"; return 1; }
+  printf '%s' "$uhd" | grep -q "try --jobs 2" || {
+    echo "the warning named no smaller number to use"; return 1; }
+
+  # The automatic count never rises with the frame. Weak on a runner whose core
+  # rule already says one — which is why it is not the only thing asserted.
+  jobs_of() { printf '%s' "$1" | sed -n 's/.*scenes\{0,1\}, \([0-9]*\) at a time.*/\1/p' | head -1; }
+  local auto_hd auto_uhd
+  auto_hd=$(jobs_of "$(render_at 5600 1080p)")
+  auto_uhd=$(jobs_of "$(render_at 5600 4k)")
+  [ -n "$auto_hd" ] && [ -n "$auto_uhd" ] || { echo "no worker count reported"; return 1; }
+  [ "$auto_uhd" -le "$auto_hd" ] || {
+    echo "4K chose $auto_uhd workers against 1080p's $auto_hd"; return 1; }
+
+  # A machine too small for even one 4K worker still renders, rather than
+  # refusing: the operator may have closed everything else.
+  local tiny
+  tiny=$(jobs_of "$(render_at 256 4k)")
+  [ "$tiny" = "1" ] || { echo "a tiny machine got '$tiny' workers, wanted 1"; return 1; }
 
   rm -rf "$proj/$STATE"
   return 0
 }
-check "a 4K pool is smaller than a 1080p one on the same machine" gate_capacity
+check "four workers fit at 1080p and are warned about at 4K" gate_capacity
 
 # --- gates 8 and 9: the two cargo gates plan.md names -----------------------
 check "cargo test -p spoonstill-app validation" \

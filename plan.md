@@ -468,13 +468,14 @@ shasum -a 256 a.mp4 b.mp4          # identical
 still render P --out s.mp4 --aspect shorts --resolution 4k   # 2160x3840, not 3840x2160
 still render P --out s.mp4 --short-edge 4320                 # refused: past D-114's ceiling
 
-# 7c. a 4K pool is smaller than a 1080p one on the same machine (D-144)
-# The budget is stated, not measured, so this asserts the rule rather than
-# whatever RAM the runner happens to have.
-SPOONSTILL_MEMORY_BUDGET_MB=5600 still render P --resolution 1080p  # 4 at a time
-SPOONSTILL_MEMORY_BUDGET_MB=5600 still render P --resolution 4k     # 2 at a time
+# 7c. four workers fit at 1080p and are warned about at 4K (D-144)
+# The budget is stated, not measured. The core count cannot be stated, so the
+# assertion is on an *explicit* --jobs: a small runner derives one worker for
+# every size and cannot express a difference between automatic counts.
+SPOONSTILL_MEMORY_BUDGET_MB=5600 still render P --resolution 1080p --jobs 4
+                                   # 3.3 GB — runs four, says nothing new
 SPOONSTILL_MEMORY_BUDGET_MB=5600 still render P --resolution 4k --jobs 4
-                                   # obeyed, warned, and told "try --jobs 2"
+                                   # 11 GB — obeyed, warned, told "try --jobs 2"
 ```
 
 Secrets check — grep the run output, the manifest, the state DB, the cache
