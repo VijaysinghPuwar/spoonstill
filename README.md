@@ -203,6 +203,23 @@ resolution: 4k    # or `short_edge: 2160` — two spellings of one setting
 4K is the ceiling. Past it, the file would have to claim an H.264 level that no
 player honours, so it is refused rather than written ([D-114](decisions.md)).
 
+**A bigger frame renders fewer scenes at once, and that is on purpose.** One
+scene at 4K needs about 2.6 GB while one at 1080p needs about 0.77 GB, so
+spoonstill checks how much memory your machine has and picks a number that fits
+— on an 8 GB machine that is four scenes at a time at 1080p and two at 4K. It
+tells you when memory rather than your CPU chose the number.
+
+You can override it with `--jobs N`, and spoonstill will do as it is told:
+
+```bash
+still render ~/holiday --out ~/holiday.mp4 --resolution 4k --jobs 1
+```
+
+If the number you ask for does not fit, it renders anyway and warns you first,
+naming one that does. Asking for more than fits is how you freeze a machine, so
+if a large render ever locks yours up, `--jobs 1` is the answer
+([D-144](decisions.md)).
+
 ### Subtitles
 
 Off unless you ask — text burned into the picture cannot be taken out again
@@ -313,7 +330,7 @@ make fixtures   # synthesize the test media
 make gates      # every milestone's exit gates — the real state of the build
 ```
 
-`make gates` is the honest answer to "does this work?". It runs 30 checks
+`make gates` is the honest answer to "does this work?". It runs 31 checks
 across M0, M1 and M2 and prints pass/fail for each.
 
 ---
@@ -360,7 +377,7 @@ subtitles, [D-143](decisions.md) for sizes and shapes.
 |---|---|
 | **M0** scaffolding, architecture boundary | complete — 8/8 gates |
 | **M1** one scene, end to end | complete — 8/8 gates |
-| **M2** whole projects: import, validation, speech, parallel render | complete — 14/14 gates |
+| **M2** whole projects: import, validation, speech, parallel render | complete — 15/15 gates |
 | **M3** state database, resumable queue | next |
 | **M4** the Tauri window | shell exists, ahead of schedule |
 | **M5** signing, notarization, bundled FFmpeg, auto-update | not started |

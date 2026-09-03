@@ -48,6 +48,7 @@ use spoonstill_media::{MediaError, Tools, concat, profile};
 use spoonstill_state::FileLog;
 
 use crate::audio::{AudioCache, AudioError, ResolvedAudio};
+use crate::capacity;
 use crate::import::{ImportError, ProbeCheck, Project, ResolvedScene};
 use crate::pool::{self, Outcome};
 
@@ -64,9 +65,20 @@ pub struct RenderProjectOptions {
     pub root: PathBuf,
     /// Where the film goes. `None` means the project's own `output` setting.
     pub out: Option<PathBuf>,
-    /// Segments rendered at once (D-044).
-    pub jobs: usize,
+    /// Segments rendered at once (D-044). `None` derives it from the machine
+    /// and this run's geometry (D-144).
+    ///
+    /// An override, like [`Self::aspect`] and for a sharper reason: the cost of
+    /// a worker is decided by the output size, and the output size is not known
+    /// until [`apply_geometry_override`] has run. A number fixed at
+    /// construction is a number chosen before the question was asked — which is
+    /// how four 4K workers came to be the default on a machine that could
+    /// afford two.
+    pub jobs: Option<usize>,
     /// Narrations resolved at once (D-044).
+    ///
+    /// Not geometry-derived: ingest normalization is short and I/O-bound, and
+    /// holds no canvas. D-144 is about the segment pool only.
     pub audio_jobs: usize,
     /// Take the lock even if another run appears to hold it.
     pub force: bool,
@@ -128,7 +140,9 @@ impl RenderProjectOptions {
         RenderProjectOptions {
             root: root.into(),
             out: None,
-            jobs: pool::default_jobs(),
+            // Left undecided here on purpose: `render_project` resolves it
+            // once the geometry override has been applied (D-144).
+            jobs: None,
             // Ingest normalization is a short, I/O-bound FFmpeg run, so it can
             // afford more workers than the encoder can. At slice 4 the TTS
             // provider's own rate limit becomes the binding constraint on this
@@ -159,7 +173,21 @@ pub enum FilmEvent {
         jobs: usize,
         /// Audio workers.
         audio_jobs: usize,
+        /// Estimated memory for one segment worker at this geometry (D-144).
+        per_worker: u64,
+        /// Whether memory, rather than the core count, chose `jobs`.
+        ///
+        /// Only ever true when the operator did not name a number themselves:
+        /// an explicit `--jobs` is obeyed and warned about, never quietly
+        /// lowered (D-076 — the flag is not capped in either direction).
+        limited_by_memory: bool,
     },
+    /// This run is planning to use more memory than the machine should give it
+    /// (D-144).
+    ///
+    /// Emitted before any worker starts, and only when the operator asked for
+    /// the count themselves — the automatic count already respects the budget.
+    MemoryPressure(crate::capacity::Pressure),
     /// One scene's narration is resolved.
     Audio {
         /// Position in render order.
@@ -457,6 +485,14 @@ pub fn render_project(
         return Err(FilmError::NoScenes);
     }
 
+    // The geometry is final, so the cost of a worker is knowable and the pool
+    // can be sized against it (D-144). This is the earliest point it could be:
+    // `apply_geometry_override` decided the output spec four lines up.
+    let capacity = capacity::plan(project.settings.output_spec);
+    let jobs = options.jobs.map_or(capacity.jobs, |asked| asked.max(1));
+    let audio_jobs = options.audio_jobs.max(1);
+    let pressure = capacity::pressure(project.settings.output_spec, jobs);
+
     let out = destination(&project, options)?;
 
     // The log is opened before the work, not after a failure (D-016). Two
@@ -485,15 +521,41 @@ pub fn render_project(
             .with("root", project.root.display().to_string())
             .with("out", out.display().to_string())
             .with("scenes", project.scenes.len().to_string())
-            .with("jobs", options.jobs.to_string())
-            .with("audio_jobs", options.audio_jobs.to_string()),
+            .with("jobs", jobs.to_string())
+            .with("audio_jobs", audio_jobs.to_string())
+            .with(
+                "geometry",
+                format!(
+                    "{}x{}@{}",
+                    project.settings.output_spec.width(),
+                    project.settings.output_spec.height(),
+                    project.settings.output_spec.fps()
+                ),
+            )
+            .with("worker_memory", capacity::gigabytes(capacity.per_worker)),
     );
 
     on_event(FilmEvent::Planned {
         scenes: project.scenes.len(),
-        jobs: options.jobs,
-        audio_jobs: options.audio_jobs,
+        jobs,
+        audio_jobs,
+        per_worker: capacity.per_worker,
+        limited_by_memory: options.jobs.is_none() && capacity.limited_by_memory(),
     });
+
+    // Said before the pool starts, because the thing it warns about is a
+    // machine that stops responding — an operator cannot read a warning that
+    // arrives after their machine has frozen (D-144).
+    if let Some(pressure) = pressure {
+        sink.record(
+            &Event::warn("render", "this render may exhaust memory")
+                .with("jobs", pressure.jobs.to_string())
+                .with("needed", capacity::gigabytes(pressure.needed))
+                .with("budget", capacity::gigabytes(pressure.budget))
+                .with("fits", pressure.fits.to_string()),
+        );
+        on_event(FilmEvent::MemoryPressure(pressure));
+    }
 
     let tools = Tools::from_env();
     let output = project.settings.output_spec;
@@ -503,7 +565,7 @@ pub fn render_project(
     };
 
     // Phase one: every narration, N at a time.
-    let audio = resolve_audio(&project, options, &tools, cancel, sink, on_event)?;
+    let audio = resolve_audio(&project, audio_jobs, &tools, cancel, sink, on_event)?;
 
     // Phase two: every segment, N at a time. A different N.
     let segments_dir = project.root.join(STATE_DIR).join(SEGMENTS_DIR);
@@ -517,6 +579,7 @@ pub fn render_project(
         &project,
         &audio,
         options,
+        jobs,
         &segments_dir,
         output,
         &encode,
@@ -863,7 +926,7 @@ fn check_voice_service(
 /// Phase one: resolve every scene's narration, `audio_jobs` at a time.
 fn resolve_audio(
     project: &Project,
-    options: &RenderProjectOptions,
+    audio_jobs: usize,
     tools: &Tools,
     cancel: &Cancel,
     log: &dyn Diagnostics,
@@ -887,7 +950,7 @@ fn resolve_audio(
 
     let outcomes = pool::run(
         &project.scenes,
-        options.audio_jobs,
+        audio_jobs,
         cancel,
         |index, scene: &ResolvedScene| -> Result<ResolvedAudio, AudioError> {
             let resolved = crate::audio::resolve(
@@ -933,6 +996,7 @@ fn render_segments(
     project: &Project,
     audio: &[ResolvedAudio],
     options: &RenderProjectOptions,
+    jobs: usize,
     segments_dir: &Path,
     output: OutputSpec,
     encode: &EncodeSettings,
@@ -986,7 +1050,7 @@ fn render_segments(
         });
     }
 
-    let outcomes = pool::run(&plans, options.jobs, cancel, |index, plan: &Plan| {
+    let outcomes = pool::run(&plans, jobs, cancel, |index, plan: &Plan| {
         let result = render_one(tools, plan, cancel, log);
         match &result {
             Ok(segment) => on_event(FilmEvent::Segment {
@@ -1968,12 +2032,23 @@ mod tests {
     }
 
     /// D-044's two pools have two defaults, and neither is zero.
+    ///
+    /// Since D-144 only one of them is a number at construction: the segment
+    /// pool cannot be sized until the geometry is known, so it is `None` here
+    /// and resolved inside `render_project`.
     #[test]
     fn the_two_pools_are_sized_independently() {
         let options = RenderProjectOptions::for_project("/projects/demo");
-        assert!(options.jobs >= 1);
+        assert_eq!(
+            options.jobs, None,
+            "the segment pool is sized against the output geometry, which this \
+             constructor has not seen (D-144)"
+        );
+        let hd = OutputSpec::new(Aspect::Landscape16x9, 1080, 30).expect("1080p");
+        let resolved = capacity::plan(hd).jobs;
+        assert!(resolved >= 1);
         assert!(
-            options.audio_jobs >= options.jobs,
+            options.audio_jobs >= resolved,
             "ingest is I/O-bound and should not be capped by the encoder's pool"
         );
         assert!(options.out.is_none() && !options.force);

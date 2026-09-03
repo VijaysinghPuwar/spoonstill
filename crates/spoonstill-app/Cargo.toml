@@ -21,6 +21,7 @@ serde         = { version = "1", features = ["derive"] }
 serde_yaml_ng = "0.10"
 # Unlicense/MIT.
 csv           = "1"
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 
 [lints]
 workspace = true

@@ -1423,7 +1423,27 @@ async function render() {
   progress.onmessage = (event) => {
     if (event.kind === "planned") {
       note(`${event.scenes} scenes, ${event.jobs} at a time, ${event.audio_jobs} narrations at a time`);
+      // Why the pool is smaller than the machine's cores, said once, where the
+      // operator is already looking (D-144).
+      if (event.limited_by_memory) {
+        note(`${event.per_worker} per scene at this size, so fewer run at once`);
+      }
       el("progress-line").textContent = `0 of ${event.scenes}`;
+      return;
+    }
+    if (event.kind === "memoryPressure") {
+      // Arrives before any worker starts. What it warns about is a machine
+      // that stops responding, and a message drawn afterwards is one nobody
+      // gets to read (D-144).
+      const fix =
+        event.fits >= 1
+          ? `Try ${event.fits} at a time.`
+          : "Try a smaller output size, or close other applications.";
+      note(
+        `warning: ${event.jobs} scenes at once need about ${event.needed}, ` +
+          `and this machine should spare about ${event.budget}. ${fix}`,
+        true,
+      );
       return;
     }
     if (event.kind === "joining") {

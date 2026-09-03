@@ -694,3 +694,88 @@ worker is rasterizing text.
 render of an unchanged project is **0.58 s** against 5.2 s cold. Editing one
 narration re-speaks and re-renders **that scene only** — three reused, one not
 (D-107). A pure reorder reuses **nothing**, and that is D-140.
+
+## 12. What a worker costs at each size, measured 2026-09-03
+
+The reason for this section is D-144: a Windows machine froze hard at 4K, and
+the pool that started four workers had only ever been sized against 1080p.
+§10b measured one resolution and inferred the aggregate; this measures four
+resolutions and then measures the aggregate directly.
+
+Same machine as every other number here — macOS arm64, 10 cores, 24 GB.
+
+### 12a. Per worker, by output size
+
+One scene, `still render-scene`, peak RSS of the FFmpeg child via
+`/usr/bin/time -l`:
+
+```bash
+/usr/bin/time -l ./target/release/still render-scene \
+  --image fixtures/generated/land.jpg --audio fixtures/generated/n.wav \
+  --out /tmp/s.mp4 --resolution 4k
+```
+
+| output | prescale canvas | canvas pixels | peak RSS |
+|---|---|---|---|
+| 1280x720 | 3840x2160 | 8.3 M | 369 MB |
+| 1920x1080 | 5760x3240 | 18.7 M | **768 MB** |
+| 2560x1440 | 7680x4320 | 33.2 M | 1219 MB |
+| 3840x2160 | 11520x6480 | 74.6 M | **2630 MB** |
+
+Two things to take from it. The 768 MB at 1080p is §10b's 780 MB by a different
+method, so the method agrees with the existing measurement — which is the reason
+to trust the other three rows. And the cost tracks the **prescale canvas**
+(D-032), not the output frame: 4K's canvas is 4x 1080p's, and 4K's memory is
+3.4x 1080p's.
+
+A least-squares fit over the four is `107 MB + 33.8 bytes/pixel`. What is in
+the code is `128 MB + 36 bytes/pixel`, which is above every measurement by 4-16%
+— deliberately, per D-144: over-estimating costs a worker, under-estimating
+costs the machine.
+
+### 12b. Aggregate, and the 4K speedup curve
+
+Eight scenes, one still each, cold every time (`rm -rf .spoonstill/segments`).
+Aggregate is the peak sum of all live `ffmpeg` RSS, sampled at 5 Hz — which is
+the direct measurement §10b could not make:
+
+```bash
+( while :; do ps -Ao rss,comm | awk '/ffmpeg/{s+=$1} END{if(s>0) print s/1024}'; \
+  sleep 0.2; done ) > rss.txt &
+```
+
+**4K (3840x2160):**
+
+| `--jobs` | wall clock | speedup | peak aggregate |
+|---|---|---|---|
+| 1 | 31.7 s | 1.00x | 2.6 GB |
+| 2 | 22.7 s | 1.39x | 4.8 GB |
+| 3 | 20.2 s | 1.57x | 6.0 GB |
+| 4 | 18.7 s | 1.70x | **6.6 GB** |
+
+The same eight scenes at 1080p, `--jobs 4`: **2.9 GB** — which reproduces
+D-076's inferred ~3.1 GB, again by a different method.
+
+**The trade D-144 acts on:** at 4K, going from two workers to four buys 22% of
+wall clock for 1.8 GB. On a 24 GB machine that is free. On 8 GB it is the
+machine, and the failure is not a slow render — it is a freeze that survives
+until the power button.
+
+### 12c. The encoder is 14% of a 4K scene, so a GPU would not have helped
+
+D-036 recorded "filter-bound, not encoder-bound" at 1080p. Re-checked at 4K on
+the shipped filter chain, 174 frames:
+
+| | wall |
+|---|---|
+| filter only, `-f null -` | 3.59 s |
+| filter + `libx264 -preset medium` (shipped) | 4.19 s |
+| filter + `libx264 -preset ultrafast` | 3.64 s |
+
+Making the encoder nearly free saves **0.55 s of 4.19 s**. So the ceiling on
+*any* encoder change — NVENC, VideoToolbox, QSV — is about **1.17x**, and it
+reduces memory by **zero**, because the memory is the 11520x6480 prescale canvas
+inside the CPU filter graph. D-036 holds at 4K and holds harder than at 1080p.
+
+Recorded because "the machine has a GPU and nothing uses it" is the obvious
+first suspicion when a 4K render fails, and it is the wrong one.

@@ -15,7 +15,7 @@ narration boundaries. It is **not a video editor** — no timeline, no scrubber.
   the same cache. There is also a **drop-in importer** (`still new` / `still
   add`, D-080) and a **Tauri window** in `apps/desktop`. There is still **no
   state database** (M3) and **no ElevenLabs provider**; if a document describes
-  those as existing, it is describing an intended system. Run `make gates` — 30 checks, M2 now 14.
+  those as existing, it is describing an intended system. Run `make gates` — 31 checks, M2 now 15.
 - **Rust 1.94.0 is installed**, pinned by `rust-toolchain.toml`. Homebrew's
   rustup keeps its shims in `/opt/homebrew/opt/rustup/bin`, **not**
   `~/.cargo/bin` — that path is on `PATH` via `~/.zshrc` and is re-exported by
@@ -124,7 +124,7 @@ dependency, and the shipped FFmpeg binary needs its own LGPL build (D-062).
 what any document claims:
 
 ```bash
-make gates          # M0 8/8, M1 8/8, M2 14/14 = intact.
+make gates          # M0 8/8, M1 8/8, M2 15/15 = intact.
                     # Also: make gates-m1 | gates-m2 | test | lint | fixtures
                     #       | brand | tts-live | help
 git log --oneline   # planning corpus, then M0, then M1, then M2 slice by slice
@@ -184,6 +184,57 @@ cargo build --release -p spoonstill-cli
 # The window. Three screens: make or open, fill, review.
 cargo run --release -p spoonstill-desktop
 ```
+
+### State as of 2026-09-03 — the pool learned what a 4K frame costs
+
+**D-144 — the render pool is sized against the frame, not just the cores.**
+Reported from a Windows machine with a GPU: a *small* project at 4K did not
+fail, it **froze the machine** hard enough to need the power button.
+`runs.csv` ends mid-render with four `ffmpeg` children started 17 ms apart and
+then nothing — no completion, no error, no stderr. **That silence is the
+evidence**: this code logs a non-zero FFmpeg exit (it does so six times earlier
+in the same file), so a missing error line means the process never lived to
+write one.
+
+D-076 sized the pool from the core count and **its whole table is 1080p**.
+D-143 made 4K reachable from `still render` the night before and nothing
+revisited the pool, so `--resolution 4k` kept four workers while asking each for
+2.3x the memory. D-044 required RAM-derived capacity and deferred it to M3; a
+frozen machine moved it forward.
+
+**Measured** (`ffmpeg-findings.md` §12), peak RSS of one FFmpeg child: 720p
+369 MB, 1080p **768 MB**, 1440p 1219 MB, 4K **2630 MB**. The cost tracks the
+**prescale canvas** (D-032), not the output frame — 4K's is 11520x6480, four
+times 1080p's. Aggregate over eight scenes at `--jobs 4`: **2.9 GB at 1080p,
+6.6 GB at 4K**. On 24 GB both finish; on 8 GB the second one is the machine.
+
+`spoonstill_app::capacity` is the new module. A worker costs
+`128 MB + 36 bytes x prescale pixels` — a fit that sits deliberately **above**
+every measurement, because over-estimating costs a worker and under-estimating
+costs the machine. The pool is the lower of D-076's core rule and
+`70% of RAM / that cost`, floored at one. **`RenderProjectOptions.jobs` is now
+`Option<usize>`**: a worker's cost depends on the geometry, and the geometry is
+not known until `apply_geometry_override` has run, so a number fixed in
+`for_project` was chosen before the question was asked.
+
+**It narrows and never widens.** 8 GB at 1080p still gets four workers and
+prints nothing new; only 4K drops, to two. An explicit `--jobs` is **obeyed and
+warned about, never overruled** (D-076), the warning names the number to use
+instead, and it is printed **before the pool starts** — nothing printed after a
+machine freezes gets read.
+
+**The GPU was the reported suspicion and it is the wrong fix.** At 4K: filter
+alone 3.59 s, filter + x264 `medium` 4.19 s, filter + x264 `ultrafast` 3.64 s.
+The encoder is **14%** of the work, so D-036's "filter-bound" holds at 4K and
+holds *harder*. NVENC's ceiling is 1.17x and it would cut memory by **zero** —
+the memory is the prescale canvas in the CPU filter graph.
+
+**`SPOONSTILL_MEMORY_BUDGET_MB`** overrides the budget, as much for testing as
+tuning: `plan_within`/`pressure_within` take it as an argument, because on this
+24 GB laptop every size affords four workers and a test calling `plan()` would
+assert the right property on an input that cannot exhibit the defect — D-116's
+trap. Gate 7c states an 8 GB machine. Run against the unfixed rule first: four
+unit tests and the gate fail. **M2 is 15 gates; `make gates` is 31.**
 
 ### State as of 2026-09-02 — sizes, shapes, and the door that was never cut
 
@@ -498,7 +549,7 @@ exact thing the top of this file warns about.
 
 #### If you are checking this work
 
-Run `make gates` first: **M0 8/8, M1 8/8, M2 14/14**, plus `cargo fmt --check`,
+Run `make gates` first: **M0 8/8, M1 8/8, M2 15/15**, plus `cargo fmt --check`,
 `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test
 --workspace` (493 tests). Then `cargo audit --deny warnings` (D-129), which is
 new and is the one check that can fail without the code changing.
@@ -1428,7 +1479,9 @@ the `MediaCheck::ready` pre-flight, or the window's empty-project screen, and
 **D-105 before touching `Remedy`, `spoonstill_app::tooling`, `drawFix`, or
 anything that reports a missing program to an operator**, **D-143 before
 touching `Aspect`, `Resolution`, `spoonstill_app::formats`, the geometry
-override in `film.rs`, or the Output screen's choosers**, and **D-141 before
+override in `film.rs`, or the Output screen's choosers**, **D-144 before
+touching `spoonstill_app::capacity`, `pool::default_jobs`, `RenderProjectOptions.jobs`,
+or anything that decides how many scenes render at once**, and **D-141 before
 touching `network_hint`, `classify`'s markers, or a failure path on the Voice
 screen** — the sibling of D-105 for a transient network error rather than a
 missing tool. D-054 through D-057 and D-075 through D-082 were added during M2 and

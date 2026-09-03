@@ -888,7 +888,10 @@ fn render_project(args: RenderArgs) -> Result<(), String> {
     let defaults = spoonstill_app::RenderProjectOptions::for_project(&args.project);
     let options = spoonstill_app::RenderProjectOptions {
         out: args.out,
-        jobs: args.jobs.unwrap_or(defaults.jobs).max(1),
+        // Passed through rather than resolved here: only `render_project`
+        // knows this run's geometry, and the geometry decides what a worker
+        // costs (D-144). `None` means "you decide".
+        jobs: args.jobs.map(|jobs| jobs.max(1)),
         audio_jobs: args.audio_jobs.unwrap_or(defaults.audio_jobs).max(1),
         force: args.force,
         keep_cache: args.keep_cache,
@@ -923,6 +926,8 @@ fn render_project(args: RenderArgs) -> Result<(), String> {
             scenes,
             jobs,
             audio_jobs,
+            per_worker,
+            limited_by_memory,
         } => {
             total.set(scenes);
             done.set(0);
@@ -930,6 +935,35 @@ fn render_project(args: RenderArgs) -> Result<(), String> {
                 "  {scenes} scene{}, {jobs} at a time ({audio_jobs} for audio)",
                 if scenes == 1 { "" } else { "s" }
             );
+            // Only when memory, not the core count, chose the number — an
+            // operator who gets fewer workers than their machine has cores
+            // deserves to know it was deliberate (D-144).
+            if limited_by_memory {
+                println!(
+                    "  {} per worker at this size, so the pool is smaller than this machine's cores",
+                    spoonstill_app::capacity::gigabytes(per_worker)
+                );
+            }
+        }
+        FilmEvent::MemoryPressure(pressure) => {
+            // Before any worker starts. The failure this warns about is a
+            // machine that stops responding, and nothing printed afterwards
+            // would be read (D-144).
+            eprintln!(
+                "  warning: {} workers at this size need about {}, and this machine \
+                 should spare about {}.",
+                pressure.jobs,
+                spoonstill_app::capacity::gigabytes(pressure.needed),
+                spoonstill_app::capacity::gigabytes(pressure.budget)
+            );
+            if pressure.fits >= 1 {
+                eprintln!("  try --jobs {} instead.", pressure.fits);
+            } else {
+                eprintln!(
+                    "  even one worker exceeds it — render at a smaller \
+                     --resolution, or close other applications."
+                );
+            }
         }
         FilmEvent::Audio {
             id,

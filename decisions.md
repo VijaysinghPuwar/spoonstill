@@ -5296,13 +5296,98 @@ A single-scene 4K vertical film with `punch` captions burned in rendered in
 
 **Gate:** M2 gate 7b renders six combinations and probes each one, asserts every
 duration is identical, asserts 8K is refused and asserts the two spellings
-cannot both be given. M2 is 14 gates; `make gates` is 30.
+cannot both be given. M2 is 15 gates; `make gates` is 31.
 
 **Not done, deliberately.** No duration check against a platform's limits — a
 YouTube Short is capped at three minutes today and was one minute a year ago,
 and a gate that goes stale on someone else's product decision is a gate people
 learn to ignore. The aspect names are the ones that are stable: the *frame* is
 9:16 whatever the limit becomes.
+
+### D-144 — The render pool is sized against the frame, not just the cores · Accepted
+
+Reported 2026-09-03, from a Windows machine with a GPU: a **small** project at
+4K did not fail — it **froze the whole machine**, hard enough that the operator
+had to hold the power button. `runs.csv` ends mid-render with four `ffmpeg`
+children started 17 ms apart and then nothing: no completion, no error, no
+FFmpeg stderr. That silence is the evidence. This code logs a non-zero FFmpeg
+exit (it does so six times earlier in the same file), so a missing error line
+means the process never got to write one.
+
+**D-076 sized the pool from the core count and its whole table is 1080p.**
+D-143 then made 4K reachable from `still render` last night, and nothing
+revisited the pool — so `--resolution 4k` kept four workers while asking each
+for 2.3x the memory. D-044 required RAM-derived capacity and deferred it to M3.
+A frozen machine moved it forward.
+
+**Measured 2026-09-03**, macOS arm64, peak RSS of one FFmpeg child, one scene:
+
+| output | prescale canvas | per worker |
+|---|---|---|
+| 1280x720 | 3840x2160 | 369 MB |
+| 1920x1080 | 5760x3240 | **768 MB** |
+| 2560x1440 | 7680x4320 | 1219 MB |
+| 3840x2160 | 11520x6480 | **2630 MB** |
+
+The 768 MB is `ffmpeg-findings.md` §10b's 780 MB arrived at by a different
+method, which is the reason to believe the other three rows. The cost tracks the
+**prescale canvas** (D-032), not the output frame: 4K's canvas is 11520x6480,
+four times 1080p's, and that is the whole story.
+
+Aggregate, same eight-scene project, `--jobs 4`: **2.9 GB at 1080p, 6.6 GB at
+4K.** On a 24 GB laptop both finish. On 8 GB the second one is the machine.
+
+**The fix is `spoonstill_app::capacity`.** One worker costs
+`128 MB + 36 bytes x prescale pixels` — a fit over those four measurements that
+sits deliberately **above** every one of them, because over-estimating costs a
+worker and under-estimating costs the machine. The automatic pool is the lower
+of D-076's core rule and `70% of physical memory / that cost`, floored at one.
+`RenderProjectOptions.jobs` became `Option<usize>` to make this possible at all:
+the cost of a worker depends on the geometry, and the geometry is not known
+until `apply_geometry_override` has run, so a number fixed in `for_project` is a
+number chosen before the question was asked.
+
+**It narrows a pool and never widens one.** On an 8 GB machine 1080p still gets
+four workers and prints nothing new; only 4K drops, to two. A rule that slowed
+every render down would be a worse defect than the one it fixes, so both halves
+are asserted.
+
+**An explicit `--jobs` is obeyed and warned about, never overruled** — D-076 says
+the flag is not capped in either direction, and an operator who has closed
+everything else knows something this rule does not. The warning names the number
+to use instead (`try --jobs 2`), and it is emitted **before the pool starts**,
+because what it warns about is a machine that stops responding and nothing
+printed afterwards would be read.
+
+**`SPOONSTILL_MEMORY_BUDGET_MB` overrides the budget**, and the reason is as
+much testing as tuning: `plan_within` and `pressure_within` take the budget as
+an argument so the rule can be checked at a size other than the runner's. On
+this 24 GB laptop every resolution affords four workers, so a test that called
+`plan()` would assert the right property on an input that cannot exhibit the
+defect and pass forever — D-116's trap exactly. `a_bigger_frame_never_gets_more_workers`
+additionally asserts that the counts it saw were **not all equal**.
+
+**The GPU was the reported suspicion and it is the wrong fix.** Measured at 4K
+on the shipped filter chain: filter alone 3.59 s, filter + x264 `medium` 4.19 s,
+filter + x264 `ultrafast` 3.64 s. The encoder is **0.6 s of 4.19 s — 14%**, so
+D-036's "filter-bound, not encoder-bound" holds at 4K and holds harder than it
+did at 1080p. NVENC's ceiling here is a 1.17x speedup and it would reduce memory
+by **zero**, because the memory is the prescale canvas inside the CPU filter
+graph. Hardware encode stays D-036's opt-in draft; it was never the cause and
+would not have prevented the freeze.
+
+**Gate:** M2 gate 7c states an 8 GB machine and asserts 4K gets fewer workers
+than 1080p *and* that 1080p is unchanged, that a machine too small for one 4K
+worker still renders rather than refusing, and that `--jobs 4` over budget is
+obeyed, warned, and told a smaller number. Run against the unfixed rule first:
+four unit tests and the gate fail, the gate saying *"4K got 4 workers against
+1080p's 4 — the pool is still frame-blind"*. M2 is 15 gates; `make gates` is 31.
+
+**Not done, deliberately.** The audio pool is untouched — ingest normalization
+is short, I/O-bound and holds no canvas, and D-023 says its real ceiling is the
+provider's rate limit. And the budget is **total** memory rather than
+*available*: available fluctuates second to second, so two runs of one project
+would pick different worker counts for reasons the operator cannot see.
 
 ### D-074 — The `kenburns-batch` master brief does not exist on this machine · Accepted
 

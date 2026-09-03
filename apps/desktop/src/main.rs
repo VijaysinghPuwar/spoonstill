@@ -459,6 +459,18 @@ enum ProgressView {
         scenes: usize,
         jobs: usize,
         audio_jobs: usize,
+        /// Estimated memory for one worker at this geometry, already worded
+        /// for a person (D-144).
+        per_worker: String,
+        /// Whether memory rather than the core count chose `jobs`.
+        limited_by_memory: bool,
+    },
+    /// This run plans to use more memory than the machine should give it.
+    MemoryPressure {
+        jobs: usize,
+        needed: String,
+        budget: String,
+        fits: usize,
     },
     Audio {
         index: usize,
@@ -1294,7 +1306,9 @@ async fn render_project(
         move || {
             let defaults = RenderProjectOptions::for_project(&path);
             let options = RenderProjectOptions {
-                jobs: jobs.unwrap_or(defaults.jobs).max(1),
+                // `None` lets `render_project` size the pool against this
+                // run's geometry, which the window can change (D-143, D-144).
+                jobs: jobs.map(|jobs| jobs.max(1)),
                 audio_jobs: audio_jobs.unwrap_or(defaults.audio_jobs).max(1),
                 force,
                 // An override for this run. Nothing here writes to
@@ -1451,10 +1465,22 @@ fn view_of(event: FilmEvent) -> ProgressView {
             scenes,
             jobs,
             audio_jobs,
+            per_worker,
+            limited_by_memory,
         } => ProgressView::Planned {
             scenes,
             jobs,
             audio_jobs,
+            // Worded in Rust, not the webview: a page that divides bytes is a
+            // second answer to a question this crate already answers (D-010).
+            per_worker: spoonstill_app::capacity::gigabytes(per_worker),
+            limited_by_memory,
+        },
+        FilmEvent::MemoryPressure(pressure) => ProgressView::MemoryPressure {
+            jobs: pressure.jobs,
+            needed: spoonstill_app::capacity::gigabytes(pressure.needed),
+            budget: spoonstill_app::capacity::gigabytes(pressure.budget),
+            fits: pressure.fits,
         },
         FilmEvent::Audio {
             index,

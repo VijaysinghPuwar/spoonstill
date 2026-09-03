@@ -6,7 +6,7 @@ resolver = "3"
 members  = ["crates/*", "apps/desktop"]
 
 [workspace.package]
-version      = "0.1.7"
+version      = "0.1.8"
 edition      = "2024"
 rust-version = "1.94"
 authors      = ["Vijay Puwar <vpuwar199@gmail.com>"]
