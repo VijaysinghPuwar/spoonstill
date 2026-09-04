@@ -190,6 +190,34 @@ cargo build --release -p spoonstill-cli
 cargo run --release -p spoonstill-desktop
 ```
 
+### State as of 2026-09-04 — `master` was red, and only the Windows runner could say so
+
+**D-155 — a test's stand-in child is a program, and a program is not a portable
+name.** The CI leg that runs on the other platform D-071 puts in scope failed
+on two tests written the session before, in D-149's poll-interval work: they
+spawned **`/bin/echo`** and **`/bin/sleep`**, and Windows has neither — no
+`echo` or `sleep` binary exists there at all, both are `cmd` builtins. 104
+passed, 2 failed, and nothing about `wait_until` itself is wrong on Windows.
+
+**The obvious repair is a shell, which is the one thing `no_shell_strings.rs`
+refuses** (D-011). `ping -n 31` and `Start-Sleep` each swap one unstated
+assumption about the machine for another, and `timeout.exe` refuses to run when
+stdin is redirected — which is how every child here is spawned.
+
+**The stand-in is the test binary itself**: `current_exe()` re-run with
+`--exact` against one of two `#[ignore]`d helpers in the same module, one that
+prints a marker and one that sleeps. No shell, no installed tool, arguments
+still a vector. **A filter that matches nothing runs no tests and exits 0** —
+measured — so the fast half asserts the *marker*, not the exit status, and a
+renamed helper fails loudly instead of passing.
+
+**Where the platform rule reaches is the lesson.** D-128 fixed the product's
+quoting and D-132's cross-compile catches Windows lints and type errors;
+neither can see a path that only exists at run time inside `#[cfg(test)]`.
+**Wait for the Windows leg before calling a session finished** — D-132 says it
+for a tag, and it is the same sentence for `master`. **`make gates` is still
+37.**
+
 ### State as of 2026-09-04 — M3's goal is already met, and not by a database
 
 **D-154 — before writing a schema, M3's own exit gates were run.** A 500-scene
@@ -1950,7 +1978,8 @@ the FFmpeg version line in this file**, **D-152 before touching
 `TEXT_EXTENSIONS`, `POSITIONAL_TEXT_EXTENSIONS` or `ingest::assign`**, **D-153
 before touching `MotionSeed`, `MotionSpec::seeded`, the segment filename,
 `occurrences_of`, or what `create_project` writes**, and **D-154 before starting
-M3, writing `state.db`, or assuming resume needs one**, **D-144 before
+M3, writing `state.db`, or assuming resume needs one**, **D-155 before writing
+a test that spawns a program, or naming a binary a `/bin/` path**, **D-144 before
 touching `spoonstill_app::capacity`, `pool::default_jobs`, `RenderProjectOptions.jobs`,
 or anything that decides how many scenes render at once**, and **D-142 before touching
 `without_verbatim_prefix`, a `canonicalize` call site, or where the Windows

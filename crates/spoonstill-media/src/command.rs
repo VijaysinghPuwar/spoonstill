@@ -900,28 +900,77 @@ mod tests {
         assert_eq!(backoff.next(), MAX_POLL);
     }
 
+    /// Printed by the stand-in child and looked for by its parent. Distinctive
+    /// enough that the test harness's own chatter around it cannot supply it.
+    const STAND_IN_MARK: &str = "stand-in-child-spoke";
+
+    /// A child to wait on, that exists on every platform this project targets.
+    ///
+    /// `/bin/echo` and `/bin/sleep` were the obvious choice and are wrong:
+    /// Windows has neither, and has no `echo` or `sleep` *binary* at all —
+    /// both are `cmd` builtins, and reaching for a shell to get at them is the
+    /// one thing `no_shell_strings.rs` forbids. D-155, and D-128's rule
+    /// arriving in the test module: Windows is a different platform, not a
+    /// different spelling.
+    ///
+    /// So the stand-in is **this test binary**, re-run with `--exact` against
+    /// one of the two ignored helpers below. It is the one program guaranteed
+    /// to be there wherever these tests run, it needs no shell, and its
+    /// arguments stay a vector like every other invocation here.
+    ///
+    /// A helper renamed out from under this still fails loudly rather than
+    /// passing: a filter that matches nothing runs no tests and exits 0, so
+    /// the marker below is what is asserted, and the sleeping child would exit
+    /// at once instead of outliving the wait.
+    fn stand_in(helper: &str) -> FfmpegCommand {
+        let exe = std::env::current_exe().expect("the test binary knows its own path");
+        let mut command = FfmpegCommand::new(exe);
+        command
+            .arg("--exact")
+            .arg(helper)
+            .arg("--ignored")
+            .arg("--nocapture");
+        command
+    }
+
+    /// Not a test: the fast child of the first test below, selected by name.
+    #[test]
+    #[ignore = "spawned as a stand-in child by a_child_that_exits_at_once_is_still_reported_exactly"]
+    fn stand_in_child_prints_and_exits() {
+        println!("{STAND_IN_MARK}");
+    }
+
+    /// Not a test: the endless child of the second test below, selected by name.
+    #[test]
+    #[ignore = "spawned as a stand-in child by a_child_that_never_exits_still_times_out"]
+    fn stand_in_child_outlives_its_parents_patience() {
+        std::thread::sleep(Duration::from_secs(30));
+    }
+
     /// A fast child is still waited on correctly — the backoff changed when we
     /// look, not what we conclude.
     #[test]
     fn a_child_that_exits_at_once_is_still_reported_exactly() {
-        let finished = FfmpegCommand::new("/bin/echo")
-            .arg("hello")
+        let finished = stand_in("command::tests::stand_in_child_prints_and_exits")
             .spawn()
-            .expect("/bin/echo starts")
+            .expect("the stand-in child starts")
             .wait_until(Duration::from_secs(30))
             .expect("it exits");
         assert!(finished.status.success());
-        assert_eq!(String::from_utf8_lossy(&finished.stdout).trim(), "hello");
+        let spoken = String::from_utf8_lossy(&finished.stdout);
+        assert!(
+            spoken.contains(STAND_IN_MARK),
+            "a child that had already exited was reported with no output: {spoken:?}"
+        );
     }
 
     /// And a child that never exits still times out and is killed, which is the
     /// property the loop exists for (D-045).
     #[test]
     fn a_child_that_never_exits_still_times_out() {
-        let error = FfmpegCommand::new("/bin/sleep")
-            .arg("30")
+        let error = stand_in("command::tests::stand_in_child_outlives_its_parents_patience")
             .spawn()
-            .expect("/bin/sleep starts")
+            .expect("the stand-in child starts")
             .wait_until(Duration::from_millis(250))
             .expect_err("it must not be waited on forever");
         assert!(matches!(error, MediaError::Timeout { .. }), "{error:?}");

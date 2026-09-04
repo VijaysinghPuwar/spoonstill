@@ -6232,6 +6232,62 @@ actually read.
 **M3's RAM-derived pool sizing was already delivered by D-144**, early, because
 a machine froze.
 
+### D-155 — A test's stand-in child is a program, and a program is not a portable name · Accepted
+
+`master` was red. The Windows CI leg — the only leg that runs on the other
+platform D-071 puts in scope — failed on two tests added the session before,
+in D-149's work on the poll interval:
+
+```
+thread 'command::tests::a_child_that_exits_at_once_is_still_reported_exactly' panicked:
+/bin/echo starts: BinaryMissing { tool: "ffmpeg", tried: "/bin/echo",
+  source: Os { code: 3, kind: NotFound, message: "The system cannot find the path specified." } }
+thread 'command::tests::a_child_that_never_exits_still_times_out' panicked:
+/bin/sleep starts: BinaryMissing { tool: "ffmpeg", tried: "/bin/sleep", … }
+```
+
+104 passed, 2 failed. Nothing about the code under test is wrong on Windows:
+`wait_until`'s schedule, the retention threads and the kill path are all fine
+there. What is wrong is that the tests named their child `/bin/echo` and
+`/bin/sleep`, which is D-128's rule — **Windows is a different platform, not a
+different spelling** — arriving in the test module, where it had not been
+looked for.
+
+**Windows has no `echo` or `sleep` binary at all.** Both are `cmd` builtins, so
+the obvious repair is to spawn a shell — and reaching for a shell is the one
+thing `no_shell_strings.rs` exists to refuse (D-011). `ping -n 31` and
+`Start-Sleep` are the usual workarounds and both trade one unstated assumption
+about the machine for another; `timeout.exe` is worse than either, because it
+refuses to run at all when stdin is redirected, which is exactly how every
+child here is spawned.
+
+**The stand-in is this test binary.** `std::env::current_exe()` re-run with
+`--exact` against one of two `#[ignore]`d helpers in the same module: one
+prints a marker and exits, one sleeps for thirty seconds. It is the one program
+guaranteed to exist wherever these tests run, it needs no shell, its arguments
+stay a vector like every other invocation in this crate, and it needs nothing
+installed — the tests keep running on a machine with no FFmpeg, which
+`tools::tests` already has to skip for.
+
+**A filter that matches nothing runs no tests and exits 0** — measured, not
+assumed — so a helper renamed out from under this would leave a "successful"
+child with no output. That is why the fast half asserts the **marker** rather
+than the exit status alone; the slow half needs no such care, since a child
+that exits at once cannot outlive a 250 ms wait.
+
+The properties both tests were written for are unchanged: a child that has
+already exited is still reported with its status and its output, and a child
+that never exits is timed out and killed (D-045). They now assert those on both
+platforms instead of one.
+
+**The lesson is about where the platform rule reaches.** D-128 fixed the
+product's quoting and D-132 added a Windows cross-compile that catches lints and
+type errors — neither can see a path that only exists at run time inside a
+`#[cfg(test)]` module. Only the Windows runner finds those, which is what it
+found, one commit after the code was written. **Wait for the Windows leg before
+calling a session finished** — D-132 already says this for a tag, and it is the
+same sentence for `master`.
+
 ### D-074 — The `kenburns-batch` master brief does not exist on this machine · Accepted
 
 Searched 2026-08-26: no file matching `*kenburns*` anywhere under `~/Desktop`,
