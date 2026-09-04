@@ -238,6 +238,36 @@ impl AudioCache {
         self.directory
             .join(format!("spoken-{key:016x}.{SPOKEN_EXT}"))
     }
+
+    /// Is this the name of a **derived** artifact — one this machine can make
+    /// again from what is still on disk (D-147)?
+    ///
+    /// True for exactly what [`AudioCache::path_for`] writes: a source kind,
+    /// a dash, sixteen hex digits, and [`NORMALIZED_EXT`]. That is the layer a
+    /// sweep may take, because recreating it is one local FFmpeg pass.
+    ///
+    /// **False for `spoken-`**, which is a provider's raw output and therefore
+    /// a network call and, under D-014, the operator's money. The extension
+    /// already separates them; the prefix is refused as well, because the rule
+    /// is about *what a file is*, not about how it happens to be spelled today.
+    ///
+    /// False for anything else, including a file an operator put here
+    /// themselves: a cache is not a licence to delete a stranger's file — the
+    /// same rule `is_our_segment` follows (D-109).
+    #[must_use]
+    pub fn is_derived_name(name: &str) -> bool {
+        let Some(rest) = name.strip_suffix(&format!(".{NORMALIZED_EXT}")) else {
+            return false;
+        };
+        let Some((kind, key)) = rest.split_once('-') else {
+            return false;
+        };
+        kind != "spoken"
+            && !kind.is_empty()
+            && kind.bytes().all(|b| b.is_ascii_lowercase())
+            && key.len() == 16
+            && key.bytes().all(|b| b.is_ascii_hexdigit())
+    }
 }
 
 /// The sample line a voice audition speaks when the operator has not written
@@ -295,12 +325,10 @@ pub fn preview(
 
     // The log is opened before the work, like a render's is (D-016): an
     // audition that fails is exactly as diagnosable as a scene that fails.
-    let log = spoonstill_state::FileLog::open(root).ok();
-    let sink: &dyn Diagnostics = log
-        .as_ref()
-        .map_or(&spoonstill_core::diagnostics::Noop, |l| {
-            l as &dyn Diagnostics
-        });
+    // Both sinks (D-148). An audition that fails is exactly the kind of thing
+    // an operator reports, and D-141 was reported from this screen.
+    let journal = spoonstill_state::Journal::for_project(root);
+    let sink: &dyn Diagnostics = &journal;
 
     resolve(
         &AudioCache::in_project(root),
@@ -485,7 +513,10 @@ pub fn resolve(
                 log.record(
                     &spoonstill_core::diagnostics::Event::info("tts", "spoke one line")
                         .with("provider", provider)
-                        .with("voice", voice)
+                        // The voice that spoke, not the one asked for: D-086
+                        // already ruled that `default` is not a voice, and the
+                        // log was the last surface still saying it (D-151).
+                        .with("voice", said.voice.clone())
                         .with("bytes", said.bytes.to_string())
                         // The command, not the words: the script is the
                         // operator's content and never enters a bundle (D-016).
@@ -748,6 +779,73 @@ mod tests {
             .into_owned();
         assert!(name.is_ascii(), "{name}");
         assert_eq!(name, "file-ffffffffffffffff.wav");
+    }
+
+    /// D-147, the whole of it in one test: every name this cache writes for a
+    /// **derived** artifact is sweepable, and the **spoken** one never is.
+    ///
+    /// The kinds are read off real `AudioSource` values rather than typed in,
+    /// so a fourth source added tomorrow either passes this or fails it — it
+    /// cannot quietly become unsweepable.
+    #[test]
+    fn every_derived_name_is_sweepable_and_the_spoken_one_is_not() {
+        let cache = cache();
+        let sources = [
+            spoken("a line", "edge", "en-US-AvaNeural"),
+            AudioSource::File {
+                original_path: PathBuf::from("001.wav"),
+            },
+            AudioSource::Silent { seconds: 3.0 },
+        ];
+        for source in &sources {
+            let name = cache
+                .path_for(source.kind(), 0x1234_5678_9abc_def0)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            assert!(
+                AudioCache::is_derived_name(&name),
+                "{name} is derived and the sweep cannot see it"
+            );
+        }
+
+        let spoken_name = cache
+            .spoken_path(0x1234_5678_9abc_def0)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            !AudioCache::is_derived_name(&spoken_name),
+            "{spoken_name} cost a network call and would have been swept"
+        );
+    }
+
+    /// A cache is not a licence to delete a stranger's file (D-109's rule,
+    /// applied to the other cache). Nothing here is a name this code writes.
+    #[test]
+    fn nothing_the_cache_did_not_write_is_sweepable() {
+        for name in [
+            "holiday.wav",
+            "spoken-123456789abcdef0.wav",
+            "spoken-123456789abcdef0.spoken",
+            "file-123456789abcdef.wav",
+            "file-123456789abcdef01.wav",
+            "file-123456789abcdefg.wav",
+            "file-123456789abcdef0.mp3",
+            "FILE-123456789abcdef0.wav",
+            "-123456789abcdef0.wav",
+            "file123456789abcdef0.wav",
+            ".file-123456789abcdef0.partial-99-0.wav",
+            "notes.txt",
+            "",
+        ] {
+            assert!(
+                !AudioCache::is_derived_name(name),
+                "{name:?} is not ours and the sweep would have taken it"
+            );
+        }
     }
 
     fn spoken(text: &str, provider: &str, voice: &str) -> AudioSource {

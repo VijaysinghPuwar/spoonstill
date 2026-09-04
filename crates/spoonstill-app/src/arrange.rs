@@ -1,4 +1,4 @@
-//! Removing a scene, and moving one somewhere else (D-099).
+//! Removing a scene, and moving one somewhere else (D-100).
 //!
 //! The window could make a project and fill it, and then could do nothing to it
 //! but render. A photo imported twice stayed twice; a scene that belonged third
@@ -250,7 +250,7 @@ pub fn remove(root: &Path, id: &str) -> Result<Removed, ArrangeError> {
 ///
 /// [`ArrangeError`] — an unnumbered project, an id that is not there, or the
 /// filesystem refusing.
-pub fn move_to(root: &Path, id: &str, to: usize) -> Result<Vec<Scene>, ArrangeError> {
+pub fn move_to(root: &Path, id: &str, to: usize) -> Result<Moved, ArrangeError> {
     let all = scenes(root)?;
     let from = position_of(&all, id)?;
 
@@ -261,10 +261,46 @@ pub fn move_to(root: &Path, id: &str, to: usize) -> Result<Vec<Scene>, ArrangeEr
 
     let mut order = all.clone();
     let moving = order.remove(from);
+    let was = moving.id.clone();
     order.insert(target, moving);
 
     renumber(root, &order)?;
-    scenes(root)
+    let after = scenes(root)?;
+
+    // The scene the operator moved, under whatever number it now has. Named by
+    // *position* rather than by id, because the renumber is what makes the id
+    // meaningless as an answer to "where did it go" (D-150).
+    let landed = after.get(target);
+    Ok(Moved {
+        was,
+        now: landed.map_or_else(String::new, |scene| scene.id.clone()),
+        from: from + 1,
+        to: target + 1,
+        files: landed.map(|scene| scene.files.clone()).unwrap_or_default(),
+        scenes: after,
+    })
+}
+
+/// Where a scene went, and what travelled with it (D-150).
+///
+/// `move_to` used to return only the scene list, and after a renumber every row
+/// of that list reads `00N  00N.jpg` — so the one thing the operator wanted
+/// confirmed, that the move happened, was the one thing it could not show.
+/// `still remove`'s summary, by contrast, names what it did.
+#[derive(Debug, Clone)]
+pub struct Moved {
+    /// The number the scene had before the move.
+    pub was: String,
+    /// The number it has now.
+    pub now: String,
+    /// Its position before, counting from one.
+    pub from: usize,
+    /// Its position after, counting from one.
+    pub to: usize,
+    /// Its files, under their new names — the whole scene travels together.
+    pub files: Vec<PathBuf>,
+    /// Every scene after the move, in film order.
+    pub scenes: Vec<Scene>,
 }
 
 /// Where in the list a scene id sits.
@@ -649,6 +685,54 @@ mod tests {
             "and it is the right script"
         );
         assert_eq!(all[1].files.len(), 1);
+    }
+
+    /// F-07. A move renumbers, so the scene list it used to print read
+    /// `001  001.jpeg`, `002  002.jpeg`, … — the one thing an operator wanted
+    /// confirmed was the one thing it could not show. `Moved` says which scene
+    /// went where, and what travelled with it.
+    #[test]
+    fn a_move_reports_which_scene_went_where_and_what_went_with_it() {
+        let project = Project::new(
+            "reported",
+            &[
+                ("001", &["jpeg"]),
+                ("002", &["jpeg"]),
+                ("003", &["jpeg", "txt"]),
+                ("004", &["jpeg"]),
+            ],
+        );
+
+        let moved = move_to(project.path(), "003", 1).expect("to the front");
+
+        assert_eq!(moved.was, "003", "the number it had");
+        assert_eq!(moved.now, "001", "the number it has");
+        assert_eq!((moved.from, moved.to), (3, 1), "counting from one");
+        assert_eq!(moved.scenes.len(), 4);
+        assert_eq!(moved.files.len(), 2, "the whole scene travelled");
+        assert!(
+            moved.files.iter().all(|f| f
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("001."))),
+            "the files are named for where it landed: {:?}",
+            moved.files
+        );
+        // And it is the right scene, not a different one that happens to be
+        // first now: 003 was the only one with a script.
+        assert_eq!(
+            fs::read_to_string(&moved.files[1]).expect("readable"),
+            "003.txt"
+        );
+    }
+
+    /// Moving to the end reports the end, not the position that was asked for.
+    #[test]
+    fn a_move_past_the_end_reports_where_it_actually_landed() {
+        let project = three();
+        let moved = move_to(project.path(), "001", 99).expect("clamped");
+        assert_eq!((moved.from, moved.to), (1, 3));
+        assert_eq!(moved.was, "001");
+        assert_eq!(moved.now, "003");
     }
 
     #[test]

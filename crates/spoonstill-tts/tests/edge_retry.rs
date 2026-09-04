@@ -115,6 +115,48 @@ fn say(edge: &Edge, destination: &Path) -> Result<u64, TtsError> {
     .map(|spoken| spoken.bytes)
 }
 
+/// D-151. `default` is not a voice (D-086), and a provider resolves it before
+/// it speaks — so a caller that logs what it *asked for* records `default` on a
+/// row whose own argv says `--voice en-US-AvaNeural`. The resolution belongs to
+/// the provider, so the provider reports it.
+#[test]
+fn the_voice_reported_is_the_one_that_spoke_not_the_one_asked_for() {
+    let directory = scratch("resolved-voice");
+    let script = fake_edge_tts(&directory, "plain", 0, "");
+    let edge = Edge::at(&script);
+
+    let asked = edge
+        .speak(
+            &Request {
+                text: "A line, in whichever voice this provider defaults to.",
+                voice: "default",
+                settings: &[],
+            },
+            &directory.join("default.mp3"),
+        )
+        .expect("it speaks");
+    assert_ne!(
+        asked.voice, "default",
+        "`default` reached the log as a voice"
+    );
+    assert_eq!(asked.voice, edge.default_voice());
+
+    // And a voice that *is* a voice comes back untouched.
+    let named = edge
+        .speak(
+            &Request {
+                text: "The same line, named.",
+                voice: "en-GB-RyanNeural",
+                settings: &[],
+            },
+            &directory.join("named.mp3"),
+        )
+        .expect("it speaks");
+    assert_eq!(named.voice, "en-GB-RyanNeural");
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 /// The whole point: a dropped connection costs a pause, not a render.
 #[test]
 fn two_dropped_connections_and_the_third_attempt_delivers_the_line() {

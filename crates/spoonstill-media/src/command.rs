@@ -37,13 +37,70 @@ use std::time::{Duration, Instant};
 
 use crate::error::MediaError;
 
-/// How often a wait loop checks on a child.
+/// The first gap between two looks at a child (D-149).
 ///
-/// `std::process::Child` has no portable timed wait, so waiting is a poll. The
-/// interval is irrelevant against a multi-second encode and keeps the loop off
-/// the CPU; it is deliberately not configurable, because tuning it would mean
-/// someone was using it as a scheduler.
-const POLL_INTERVAL: Duration = Duration::from_millis(20);
+/// `std::process::Child` has no portable timed wait, so waiting is a poll —
+/// and a poll interval is a **floor under every child this program starts**.
+/// The old constant's own comment said the interval *"is irrelevant against a
+/// multi-second encode"*, which is true of an encode and false of everything
+/// else: `still validate` spawns two `ffprobe` calls per scene and touches no
+/// encoder at all, so a probe that finishes in 23 ms was noticed at 40.
+const FIRST_POLL: Duration = Duration::from_millis(1);
+
+/// The longest gap, which is what a long encode settles at.
+///
+/// The 20 ms is kept, because the original reasoning for it is still right:
+/// against a four-second segment the interval buys nothing and a tight loop
+/// would spend a core watching. What changed is that a child now has to *last*
+/// before it pays that price.
+const MAX_POLL: Duration = Duration::from_millis(20);
+
+/// How much of a child's life we are willing to spend not noticing it ended.
+///
+/// One eighth: a look is never further from the last one than an eighth of how
+/// long this child has already run. That makes the *latency* proportional to
+/// the wait rather than fixed, which is the actual shape of the problem — a
+/// 25 ms probe and a four-second encode want completely different intervals and
+/// neither wants a constant.
+const POLL_SHARE: u32 = 8;
+
+/// The gap before the next look at a child (D-149).
+///
+/// `clamp(waited / 8, 1 ms, 20 ms)`, and `waited` is the time this loop has
+/// **slept**, not the clock — so the schedule is a function of how many times
+/// it has been asked and can be asserted exactly. A test that read the clock
+/// would fail on a shared runner for reasons that are not defects.
+///
+/// A plain doubling from 1 ms was tried first and is not enough: 1, 2, 4, 8,
+/// 16 reaches the 20 ms ceiling after **31 ms of cumulative wait**, which is
+/// exactly where a probe lives, so it gives most of the win back. Measured
+/// numbers for all three schedules are in D-149.
+///
+/// Deliberately not configurable, for the reason the old constant gave: tuning
+/// it would mean someone was using it as a scheduler.
+#[derive(Debug, Clone, Copy)]
+struct Backoff {
+    waited: Duration,
+}
+
+impl Backoff {
+    const fn new() -> Self {
+        Backoff {
+            waited: Duration::ZERO,
+        }
+    }
+
+    /// The gap this look will wait, and the state for the one after it.
+    fn next(&mut self) -> Duration {
+        let gap = (self.waited / POLL_SHARE).clamp(FIRST_POLL, MAX_POLL);
+        self.waited += gap;
+        gap
+    }
+
+    fn sleep(&mut self) {
+        std::thread::sleep(self.next());
+    }
+}
 
 /// Cap on retained stderr per child.
 ///
@@ -193,6 +250,7 @@ impl FfmpegCommand {
 
         Ok(FfmpegChild {
             child,
+            program: program_name(&self.program),
             display,
             stderr,
             stdout,
@@ -200,6 +258,22 @@ impl FfmpegCommand {
             progress_thread,
         })
     }
+}
+
+/// A program's own name, for a message that has to say which one failed
+/// (D-150).
+///
+/// The file name of the path we actually launched. `tools::locate` resolves a
+/// bare name to an absolute path (D-103), so the whole path is the wrong thing
+/// to put in a sentence and the last component is the right one.
+fn program_name(program: &Path) -> String {
+    program
+        .file_stem()
+        .or_else(|| program.file_name())
+        .map_or_else(
+            || program.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
 }
 
 /// A running child, retained rather than waited on immediately.
@@ -210,6 +284,8 @@ impl FfmpegCommand {
 #[derive(Debug)]
 pub struct FfmpegChild {
     child: Child,
+    /// The program's own name — `ffmpeg`, `ffprobe`, `edge-tts` (D-150).
+    program: String,
     display: String,
     stderr: Option<JoinHandle<String>>,
     stdout: Option<JoinHandle<Vec<u8>>>,
@@ -241,6 +317,11 @@ pub struct Finished {
     pub stderr: String,
     /// The paste-ready command, carried so callers can report it.
     pub command: String,
+    /// Which program this was — `ffmpeg`, `ffprobe`, `edge-tts` (D-150).
+    ///
+    /// Carried rather than parsed back out of [`Self::command`], which is
+    /// shell-quoted and would have to be un-quoted to be read.
+    pub program: String,
 }
 
 impl FfmpegChild {
@@ -313,6 +394,7 @@ impl FfmpegChild {
     /// [`MediaError::Timeout`] if `limit` expires first.
     pub fn wait_until(mut self, limit: Duration) -> Result<Finished, MediaError> {
         let deadline = Instant::now() + limit;
+        let mut backoff = Backoff::new();
         loop {
             match self.child.try_wait() {
                 Ok(Some(status)) => return Ok(self.finish(status)),
@@ -332,7 +414,7 @@ impl FfmpegChild {
                     waited: limit,
                 });
             }
-            std::thread::sleep(POLL_INTERVAL);
+            backoff.sleep();
         }
     }
 
@@ -344,6 +426,7 @@ impl FfmpegChild {
     pub fn cancel(mut self, grace: Duration) -> Finished {
         let _ = self.quit();
         let deadline = Instant::now() + grace;
+        let mut backoff = Backoff::new();
         loop {
             match self.child.try_wait() {
                 Ok(Some(status)) => return self.finish(status),
@@ -353,7 +436,7 @@ impl FfmpegChild {
             if Instant::now() >= deadline {
                 break;
             }
-            std::thread::sleep(POLL_INTERVAL);
+            backoff.sleep();
         }
         let _ = self.kill();
         let status = self.child.wait().ok();
@@ -368,6 +451,7 @@ impl FfmpegChild {
                     stdout,
                     stderr,
                     command: self.display.clone(),
+                    program: self.program.clone(),
                 }
             }
         }
@@ -380,6 +464,7 @@ impl FfmpegChild {
             stdout,
             stderr,
             command: self.display.clone(),
+            program: self.program.clone(),
         }
     }
 
@@ -414,6 +499,7 @@ impl Finished {
             Ok(self)
         } else {
             Err(MediaError::Exit {
+                program: self.program,
                 command: self.command,
                 code: self.status.code(),
                 stderr: self.stderr,
@@ -750,5 +836,94 @@ mod tests {
         // An empty argument is still an argument.
         assert_eq!(posix_quote(""), "''");
         assert_eq!(windows_quote(""), "''");
+    }
+
+    /// D-149. The claim is the **schedule**, not a wall-clock number: a timing
+    /// assertion on a shared runner fails for reasons that are not defects.
+    ///
+    /// A child that exits inside one shipped interval is therefore noticed
+    /// inside one shipped interval, because the first five looks all happen
+    /// before 20 ms have passed at all.
+    #[test]
+    fn the_wait_between_looks_starts_short_and_settles_long() {
+        let mut backoff = Backoff::new();
+        let waits: Vec<u128> = (0..12).map(|_| backoff.next().as_millis()).collect();
+        assert_eq!(waits, vec![1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
+
+        // The number that matters: how many times a child is looked at inside
+        // one of the old fixed intervals. Once, before this — at the end of it.
+        let mut backoff = Backoff::new();
+        let mut waited = Duration::ZERO;
+        let mut looks = 0;
+        while waited < MAX_POLL {
+            waited += backoff.next();
+            looks += 1;
+        }
+        assert!(
+            looks >= 15,
+            "only {looks} looks inside one old interval — a probe that finishes \
+             early is still not noticed early"
+        );
+    }
+
+    /// The ceiling is reached, and only after the child has proved it is long.
+    #[test]
+    fn a_long_child_settles_at_the_ceiling_and_a_short_one_never_gets_there() {
+        let mut backoff = Backoff::new();
+        let mut waited = Duration::ZERO;
+        let mut looks_to_ceiling = 0;
+        while backoff.next() < MAX_POLL {
+            waited = backoff.waited;
+            looks_to_ceiling += 1;
+            assert!(looks_to_ceiling < 1000, "the gap never reached the ceiling");
+        }
+        // A four-second encode spends nearly all of its wait at 20 ms, which is
+        // the original constant's reasoning and is still right.
+        assert!(
+            waited >= Duration::from_millis(100),
+            "the ceiling arrived after only {waited:?} — that is a probe, not an encode"
+        );
+        assert!(
+            waited < Duration::from_millis(500),
+            "a child had to run {waited:?} before the loop stopped busy-looking"
+        );
+    }
+
+    /// It settles and stays there. A schedule that kept doubling would turn a
+    /// long encode's last look into a wait measured in minutes.
+    #[test]
+    fn the_wait_never_grows_past_the_ceiling() {
+        let mut backoff = Backoff::new();
+        for _ in 0..64 {
+            assert!(backoff.next() <= MAX_POLL);
+        }
+        assert_eq!(backoff.next(), MAX_POLL);
+    }
+
+    /// A fast child is still waited on correctly — the backoff changed when we
+    /// look, not what we conclude.
+    #[test]
+    fn a_child_that_exits_at_once_is_still_reported_exactly() {
+        let finished = FfmpegCommand::new("/bin/echo")
+            .arg("hello")
+            .spawn()
+            .expect("/bin/echo starts")
+            .wait_until(Duration::from_secs(30))
+            .expect("it exits");
+        assert!(finished.status.success());
+        assert_eq!(String::from_utf8_lossy(&finished.stdout).trim(), "hello");
+    }
+
+    /// And a child that never exits still times out and is killed, which is the
+    /// property the loop exists for (D-045).
+    #[test]
+    fn a_child_that_never_exits_still_times_out() {
+        let error = FfmpegCommand::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("/bin/sleep starts")
+            .wait_until(Duration::from_millis(250))
+            .expect_err("it must not be waited on forever");
+        assert!(matches!(error, MediaError::Timeout { .. }), "{error:?}");
     }
 }

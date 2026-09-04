@@ -39,6 +39,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use spoonstill_app::film::{FilmEvent, RenderProjectOptions};
 use spoonstill_app::surface::Cancel;
+use spoonstill_core::diagnostics::{Diagnostics, Event};
 use tauri::ipc::Channel;
 use tauri::{Manager, State};
 use tauri_plugin_opener::OpenerExt;
@@ -224,6 +225,17 @@ fn app_settings(app: tauri::AppHandle) -> AppSettings {
 /// Set the fallback voice, or clear it by passing nothing.
 #[tauri::command]
 fn set_default_voice(app: tauri::AppHandle, voice: Option<String>) -> Result<AppSettings, String> {
+    journalled(
+        "set_default_voice",
+        None,
+        set_default_voice_inner(app, voice),
+    )
+}
+
+fn set_default_voice_inner(
+    app: tauri::AppHandle,
+    voice: Option<String>,
+) -> Result<AppSettings, String> {
     let mut settings = app_settings(app.clone());
     settings.default_voice = voice.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
 
@@ -231,6 +243,37 @@ fn set_default_voice(app: tauri::AppHandle, voice: Option<String>) -> Result<App
     let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     std::fs::write(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))?;
     Ok(settings)
+}
+
+/// Write down what a window command did (D-148).
+///
+/// **The window recorded nothing at all** — this file held no `record` call,
+/// so `runs.csv` covered renders started from the terminal and nothing an
+/// operator did in the app. The failure the author actually reported (D-141: a
+/// Voice screen full of Python, from a Mac that had lost its route to the
+/// service) left no trace in the one file D-093 says to open when the question
+/// is "what went wrong just now".
+///
+/// One row per command, carrying its outcome. Not the CLI's invoked/finished
+/// **pair**: a terminal command can run for an hour and be killed, and the
+/// `invoked` row is what says so afterwards, whereas a window command that
+/// never returns leaves an operator looking at a spinner they will describe in
+/// words. The row that was missing here is the failure.
+///
+/// Silent on failure, by design (D-093): a window command must never fail
+/// because a log could not be written.
+fn journalled<T>(
+    scope: &'static str,
+    root: Option<&std::path::Path>,
+    outcome: Result<T, String>,
+) -> Result<T, String> {
+    let journal = spoonstill_app::Journal::for_surface(root);
+    match &outcome {
+        Ok(_) => journal.record(&Event::info(scope, "window command finished")),
+        Err(detail) => journal
+            .record(&Event::error(scope, "window command failed").with("detail", detail.clone())),
+    }
+    outcome
 }
 
 /// Install whichever tool the window was asked about, and say what was run.
@@ -248,6 +291,10 @@ fn set_default_voice(app: tauri::AppHandle, voice: Option<String>) -> Result<App
 /// a third command.
 #[tauri::command]
 async fn install_tool(tool: String) -> Result<String, String> {
+    journalled("install_tool", None, install_tool_inner(tool).await)
+}
+
+async fn install_tool_inner(tool: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         // D-010: the shell asks spoonstill-app and stops there. Which
         // subsystem owns which binary is `tooling`'s business, not a
@@ -267,6 +314,10 @@ async fn install_tool(tool: String) -> Result<String, String> {
 /// per-file probe failures, which is D-103's original report.
 #[tauri::command]
 async fn ffmpeg_status() -> Result<ProviderStatus, String> {
+    journalled("ffmpeg_status", None, ffmpeg_status_inner().await)
+}
+
+async fn ffmpeg_status_inner() -> Result<ProviderStatus, String> {
     tauri::async_runtime::spawn_blocking(|| status_of(spoonstill_app::tooling::ffmpeg()))
         .await
         .map_err(|e| format!("the check failed: {e}"))
@@ -472,6 +523,10 @@ enum ProgressView {
         budget: String,
         fits: usize,
     },
+    /// Something validation found that does not stop the render (F-13).
+    Warned {
+        detail: String,
+    },
     Audio {
         index: usize,
         id: String,
@@ -593,6 +648,16 @@ struct Session {
 /// `still validate` makes.
 #[tauri::command]
 async fn validate_project(
+    path: String,
+    app: tauri::AppHandle,
+    session: State<'_, Session>,
+) -> Result<ProjectView, String> {
+    let root = PathBuf::from(&path);
+    let outcome = validate_project_inner(path, app, session).await;
+    journalled("validate_project", Some(&root), outcome)
+}
+
+async fn validate_project_inner(
     path: String,
     app: tauri::AppHandle,
     session: State<'_, Session>,
@@ -768,6 +833,17 @@ async fn set_narration(
     scene: String,
     text: String,
 ) -> Result<(), String> {
+    let named = PathBuf::from(&root);
+    let outcome = set_narration_inner(session, root, scene, text).await;
+    journalled("set_narration", Some(&named), outcome)
+}
+
+async fn set_narration_inner(
+    session: State<'_, Session>,
+    root: String,
+    scene: String,
+    text: String,
+) -> Result<(), String> {
     let root = project_root(&session, &root)?;
     // The id came from a row we produced, but it reaches us as a string from a
     // webview, so it is checked like any other untrusted input (D-052, D-054).
@@ -815,6 +891,14 @@ async fn set_narration(
 /// scene 340 of 500.
 #[tauri::command]
 async fn provider_status(provider: String) -> Result<ProviderStatus, String> {
+    journalled(
+        "provider_status",
+        None,
+        provider_status_inner(provider).await,
+    )
+}
+
+async fn provider_status_inner(provider: String) -> Result<ProviderStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut status = status_of(spoonstill_app::tooling::provider(&provider));
         // The one field a voice service has and FFmpeg does not: whose voice
@@ -836,6 +920,15 @@ async fn provider_status(provider: String) -> Result<ProviderStatus, String> {
 /// gets back the one true path — it never joins a name onto a parent itself.
 #[tauri::command]
 async fn create_project(path: String) -> Result<String, String> {
+    let root = PathBuf::from(&path);
+    journalled(
+        "create_project",
+        Some(&root),
+        create_project_inner(path).await,
+    )
+}
+
+async fn create_project_inner(path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         spoonstill_app::create_project(std::path::Path::new(&path))
             .map(|root| root.display().to_string())
@@ -852,6 +945,16 @@ async fn create_project(path: String) -> Result<String, String> {
 /// exactly which of their files became which scene.
 #[tauri::command]
 async fn add_media(
+    session: State<'_, Session>,
+    root: String,
+    files: Vec<String>,
+) -> Result<IngestView, String> {
+    let named = PathBuf::from(&root);
+    let outcome = add_media_inner(session, root, files).await;
+    journalled("add_media", Some(&named), outcome)
+}
+
+async fn add_media_inner(
     session: State<'_, Session>,
     root: String,
     files: Vec<String>,
@@ -891,13 +994,23 @@ async fn add_media(
     .map_err(|e| format!("the copy failed: {e}"))?
 }
 
-/// Take a scene out of the project (D-099).
+/// Take a scene out of the project (D-100).
 ///
 /// The files are moved, never deleted — `removed/` inside the project holds
 /// them, and the window says so, because "delete" in a tool that owns the
 /// operator's only copy of a photograph has to be a promise it can keep.
 #[tauri::command]
 async fn remove_scene(
+    session: State<'_, Session>,
+    root: String,
+    scene: String,
+) -> Result<String, String> {
+    let named = PathBuf::from(&root);
+    let outcome = remove_scene_inner(session, root, scene).await;
+    journalled("remove_scene", Some(&named), outcome)
+}
+
+async fn remove_scene_inner(
     session: State<'_, Session>,
     root: String,
     scene: String,
@@ -918,7 +1031,7 @@ async fn remove_scene(
     .map_err(|e| format!("the removal failed: {e}"))?
 }
 
-/// Move a scene to another position in the film (D-099).
+/// Move a scene to another position in the film (D-100).
 ///
 /// `to` counts from 1 and is clamped, so the last row's "move down" is a no-op
 /// rather than an error.
@@ -929,12 +1042,30 @@ async fn move_scene(
     scene: String,
     to: usize,
 ) -> Result<String, String> {
+    let named = PathBuf::from(&root);
+    let outcome = move_scene_inner(session, root, scene, to).await;
+    journalled("move_scene", Some(&named), outcome)
+}
+
+async fn move_scene_inner(
+    session: State<'_, Session>,
+    root: String,
+    scene: String,
+    to: usize,
+) -> Result<String, String> {
     let root = project_root(&session, &root)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let after = spoonstill_app::arrange::move_to(std::path::Path::new(&root), &scene, to)
+        let moved = spoonstill_app::arrange::move_to(std::path::Path::new(&root), &scene, to)
             .map_err(|e| e.to_string())?;
-        let landed = to.max(1).min(after.len().max(1));
-        Ok(format!("Scene moved to {landed} of {}.", after.len()))
+        // The numbers the operator can check against the grid they are looking
+        // at: which scene, and where it went (D-150).
+        Ok(format!(
+            "Scene {} is now {} — position {} of {}.",
+            moved.was,
+            moved.now,
+            moved.to,
+            moved.scenes.len()
+        ))
     })
     .await
     .map_err(|e| format!("the move failed: {e}"))?
@@ -943,6 +1074,10 @@ async fn move_scene(
 /// Every voice a provider offers, or the sentence that says why there are none.
 #[tauri::command]
 async fn voices(provider: String) -> Result<Vec<VoiceView>, String> {
+    journalled("voices", None, voices_inner(provider).await)
+}
+
+async fn voices_inner(provider: String) -> Result<Vec<VoiceView>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let engine = spoonstill_app::tts::provider(&provider).map_err(|e| e.to_string())?;
         if let spoonstill_app::tts::Availability::Missing(remedy) = engine.availability() {
@@ -1023,6 +1158,19 @@ fn resolve_output(dir: String, name: String) -> Result<String, String> {
 /// own state directory, not a path the frontend named.
 #[tauri::command]
 async fn preview_voice(
+    session: State<'_, Session>,
+    root: String,
+    provider: String,
+    voice: String,
+    text: String,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let named = PathBuf::from(&root);
+    let outcome = preview_voice_inner(session, root, provider, voice, text, app).await;
+    journalled("preview_voice", Some(&named), outcome)
+}
+
+async fn preview_voice_inner(
     session: State<'_, Session>,
     root: String,
     provider: String,
@@ -1234,6 +1382,20 @@ async fn render_project(
     active: State<'_, Active>,
     session: State<'_, Session>,
 ) -> Result<FilmView, String> {
+    // The render's own events already reach both sinks (D-093); what was
+    // missing is the **top-level outcome** — the sentence the operator is
+    // looking at when they say "it did not work".
+    let named = PathBuf::from(&request.path);
+    let outcome = render_project_inner(request, on_progress, active, session).await;
+    journalled("render_project", Some(&named), outcome)
+}
+
+async fn render_project_inner(
+    request: RenderRequest,
+    on_progress: Channel<ProgressView>,
+    active: State<'_, Active>,
+    session: State<'_, Session>,
+) -> Result<FilmView, String> {
     let RenderRequest {
         path,
         jobs,
@@ -1355,6 +1517,10 @@ async fn render_project(
 /// filesystem scope at all: there is no argument here to point somewhere else.
 #[tauri::command]
 fn open_film(app: tauri::AppHandle, session: State<'_, Session>) -> Result<(), String> {
+    journalled("open_film", None, open_film_inner(app, session))
+}
+
+fn open_film_inner(app: tauri::AppHandle, session: State<'_, Session>) -> Result<(), String> {
     let film = session
         .film
         .lock()
@@ -1395,6 +1561,14 @@ fn activity_log() -> Result<ActivityView, String> {
 /// somewhere else (D-085's rule, applied again).
 #[tauri::command]
 fn open_activity_log(app: tauri::AppHandle, reveal: bool) -> Result<(), String> {
+    journalled(
+        "open_activity_log",
+        None,
+        open_activity_log_inner(app, reveal),
+    )
+}
+
+fn open_activity_log_inner(app: tauri::AppHandle, reveal: bool) -> Result<(), String> {
     let path = spoonstill_app::runs_index_path()
         .ok_or("this machine will not say where its config directory is")?;
     if !path.exists() {
@@ -1413,6 +1587,10 @@ fn open_activity_log(app: tauri::AppHandle, reveal: bool) -> Result<(), String> 
 /// Show the open project in the system file manager. Also takes no path.
 #[tauri::command]
 fn reveal_project(app: tauri::AppHandle, session: State<'_, Session>) -> Result<(), String> {
+    journalled("reveal_project", None, reveal_project_inner(app, session))
+}
+
+fn reveal_project_inner(app: tauri::AppHandle, session: State<'_, Session>) -> Result<(), String> {
     let root = session
         .root
         .lock()
@@ -1482,6 +1660,7 @@ fn view_of(event: FilmEvent) -> ProgressView {
             budget: spoonstill_app::capacity::gigabytes(pressure.budget),
             fits: pressure.fits,
         },
+        FilmEvent::Warned { detail } => ProgressView::Warned { detail },
         FilmEvent::Audio {
             index,
             id,

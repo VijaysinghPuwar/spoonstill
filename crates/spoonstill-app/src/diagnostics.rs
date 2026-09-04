@@ -9,11 +9,8 @@
 
 use std::path::{Path, PathBuf};
 
-use spoonstill_media::{Tools, command::FfmpegCommand};
+use spoonstill_media::Tools;
 use spoonstill_state::{BundleReport, EnvironmentLine, write_bundle};
-
-/// How long to wait for a version probe before giving up on it.
-const VERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Collect the environment facts a remote diagnosis actually turns on.
 #[must_use]
@@ -27,9 +24,15 @@ pub fn environment() -> Vec<EnvironmentLine> {
 
     let tools = Tools::from_env();
     lines.push(line("ffmpeg path", tools.ffmpeg().display().to_string()));
-    lines.push(line("ffmpeg", first_line(&version_of(tools.ffmpeg()))));
+    lines.push(line(
+        "ffmpeg",
+        spoonstill_media::tools::version_line(tools.ffmpeg()),
+    ));
     lines.push(line("ffprobe path", tools.ffprobe().display().to_string()));
-    lines.push(line("ffprobe", first_line(&version_of(tools.ffprobe()))));
+    lines.push(line(
+        "ffprobe",
+        spoonstill_media::tools::version_line(tools.ffprobe()),
+    ));
 
     // The build configuration, not just the version: a missing libx264 or a
     // GPL-vs-LGPL difference (D-062) explains a whole class of report.
@@ -73,30 +76,9 @@ fn line(key: &str, value: impl Into<String>) -> EnvironmentLine {
     }
 }
 
-/// Ask a binary for its version, tolerating its absence.
-///
-/// A missing FFmpeg is itself the most useful line the bundle can carry, so
-/// this reports the failure rather than omitting the field.
-fn version_of(program: &Path) -> String {
-    let mut command = FfmpegCommand::new(program);
-    command.args(["-hide_banner", "-version"]);
-    match command.spawn().and_then(|c| c.wait_until(VERSION_TIMEOUT)) {
-        Ok(finished) => String::from_utf8_lossy(&finished.stdout).into_owned(),
-        Err(error) => format!("<could not be run: {error}>"),
-    }
-}
-
-fn first_line(text: &str) -> String {
-    text.lines()
-        .next()
-        .unwrap_or("<no output>")
-        .trim()
-        .to_string()
-}
-
 /// The `configuration:` line from `ffmpeg -version`, condensed.
 fn configuration_of(program: &Path) -> String {
-    let text = version_of(program);
+    let text = spoonstill_media::tools::version_output(program);
     let Some(configuration) = text
         .lines()
         .find(|l| l.trim_start().starts_with("configuration:"))
@@ -174,7 +156,8 @@ mod tests {
     /// be reported rather than omitted.
     #[test]
     fn a_missing_binary_is_reported_not_skipped() {
-        let text = version_of(Path::new("/nonexistent/spoonstill/ffmpeg"));
+        let text =
+            spoonstill_media::tools::version_output(Path::new("/nonexistent/spoonstill/ffmpeg"));
         assert!(text.contains("could not be run"), "{text}");
         assert!(text.contains("/nonexistent/spoonstill/ffmpeg"), "{text}");
     }

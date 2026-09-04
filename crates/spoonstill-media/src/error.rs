@@ -36,6 +36,12 @@ pub enum MediaError {
     },
     /// The child ran and exited non-zero.
     Exit {
+        /// Which program it was — `ffmpeg`, `ffprobe`, `edge-tts` (D-150).
+        ///
+        /// Carried, because this message used to say *"ffmpeg exited 1"* over
+        /// an `ffprobe` command line on the very next line: a sentence
+        /// contradicted by its own evidence.
+        program: String,
         /// A paste-ready form of the command.
         command: String,
         /// Exit status as reported by the OS, or `None` if killed by a signal.
@@ -114,12 +120,17 @@ impl fmt::Display for MediaError {
                 )
             }
             MediaError::Exit {
+                program,
                 command,
                 code,
                 stderr,
             } => {
                 let code = code.map_or_else(|| "killed by signal".to_string(), |c| c.to_string());
-                write!(f, "ffmpeg exited {code}\n  {command}\n{}", indent(stderr))
+                write!(
+                    f,
+                    "{program} exited {code}\n  {command}\n{}",
+                    indent(stderr)
+                )
             }
             MediaError::Timeout { command, waited } => write!(
                 f,

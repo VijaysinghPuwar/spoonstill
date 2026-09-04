@@ -15,7 +15,7 @@ narration boundaries. It is **not a video editor** — no timeline, no scrubber.
   the same cache. There is also a **drop-in importer** (`still new` / `still
   add`, D-080) and a **Tauri window** in `apps/desktop`. There is still **no
   state database** (M3) and **no ElevenLabs provider**; if a document describes
-  those as existing, it is describing an intended system. Run `make gates` — 31 checks, M2 now 15.
+  those as existing, it is describing an intended system. Run `make gates` — 37 checks, M2 now 21.
 - **Rust 1.94.0 is installed**, pinned by `rust-toolchain.toml`. Homebrew's
   rustup keeps its shims in `/opt/homebrew/opt/rustup/bin`, **not**
   `~/.cargo/bin` — that path is on `PATH` via `~/.zshrc` and is re-exported by
@@ -27,7 +27,12 @@ narration boundaries. It is **not a video editor** — no timeline, no scrubber.
 - `plan/` holds **10 read-only reference checkouts** (~1.7 GB) plus three
   retired planning documents. Do not build in there and do not edit them.
   It is gitignored; pinned commits are in `refergit.md` §2.
-- FFmpeg 8.0.1 is installed (Homebrew, **GPL build** — dev only, see D-062).
+- **FFmpeg 9.0.1** is installed (Homebrew, **GPL build** — dev only, see D-062).
+  This said 8.0.1 until 2026-09-04: the major version moved underneath the
+  project and nothing noticed (D-151). `ffmpeg-findings.md`'s 8.0.1 is correct
+  **as provenance** — those numbers were measured on that build — and must not
+  be changed. `still doctor` prints the version now, and every render records
+  it.
 - **The code targets macOS and Windows both** (D-071, decided 2026-08-26).
   Nothing has been *run* on Windows yet, and every number in
   `ffmpeg-findings.md` is macOS arm64. Do not claim otherwise.
@@ -124,7 +129,7 @@ dependency, and the shipped FFmpeg binary needs its own LGPL build (D-062).
 what any document claims:
 
 ```bash
-make gates          # M0 8/8, M1 8/8, M2 15/15 = intact.
+make gates          # M0 8/8, M1 8/8, M2 21/21 = intact.
                     # Also: make gates-m1 | gates-m2 | test | lint | fixtures
                     #       | brand | tts-live | help
 git log --oneline   # planning corpus, then M0, then M1, then M2 slice by slice
@@ -184,6 +189,447 @@ cargo build --release -p spoonstill-cli
 # The window. Three screens: make or open, fill, review.
 cargo run --release -p spoonstill-desktop
 ```
+
+### State as of 2026-09-04 — M3's goal is already met, and not by a database
+
+**D-154 — before writing a schema, M3's own exit gates were run.** A 500-scene
+1080p fixture was built for it. The milestone's *goal* is met; its *deliverable
+list* is not, and those are different things.
+
+| gate | measured |
+|---|---|
+| 1 clean run | **161 / 151 / 154 s**, peak RSS **2873 MB**, 30 000 frames, 1000.021 s against 1000.000 |
+| 2 kill and resume | killed at 60 s with **167 of 500** done → resume **reused exactly 167**, film identical to a clean run, 4 `.partial-` files swept to 0 |
+| 3 determinism | **three** cold runs, all byte-identical |
+| 4 single-scene invalidation | one narration edited → **499 of 500 reused** |
+| 5, 6 | exist as tests under other names (`profile.rs` per-field; `cancellation_leaves_no_valid_looking_stub`) |
+
+**Resume works because the cache is content-addressed, not because anything
+remembers.** A killed run leaves finished segments that the next run finds by
+asking the same question again — nothing to reconcile, nothing to migrate, and
+`.spoonstill/` stays deletable at any point *because it holds no authority*.
+
+**The first attempt at gate 2 was vacuous and that is the lesson.** It ran with
+a warm cache, so the render finished in 14 s and the `kill -9` at 45 s hit a
+process that had already exited — then reported a clean resume. It looked like a
+pass. **A resume gate must start cold, or it measures nothing.** Gate 1's first
+number was wrong more dully: an RSS sampler and a cold page cache made one run
+506 s against a true ~155 s. Both were thrown away and re-measured.
+
+**What M3 still owes:** `state.db` **as an index for reporting** — which is what
+this file has always said (*"an index, not a home"*) and explicitly **not**
+load-bearing for correctness; transitions (D-057), still `cut` until `xfade` is
+measured, which the fixture now makes cheap; and an integration test for gate 5,
+the one gate that should not stay a unit test because FFmpeg returns exit 0 on a
+bad join. **D-144 already delivered M3's RAM-derived pool sizing.**
+
+**Delivered with it:** plan.md §M3's *"a test asserts `project.yaml`'s mtime and
+hash are unchanged after a full render"* — promised in `settings.rs`'s module
+note since M2 and never written. Gate 7g now, and it matters more since D-153
+made `create_project` write a starter file: the rule became "written exactly
+once, at creation, and never again". **M2 is 21 gates; `make gates` is 37.**
+
+### State as of 2026-09-04 — a reorder is free now, and no film already made moves
+
+**D-153 — the motion seed is versioned.** `findings.md` F-21, which is D-140
+reopened on the terms D-140 itself set. Reproduced first: eight scenes,
+`still move 008 1`, render again → `8 narrations from cache, **0 segments
+reused**`. Every scene re-encoded and every scene's motion changed, for one row
+moved. About four minutes per drag at chapter size; eighteen at 500 scenes.
+
+**The author chose this option** over opting in by hand, changing it for
+everybody, or leaving it.
+
+- **`MotionSeed::V1` is frozen.** `MotionSpec::seeded` is untouched and a test
+  pins the six descriptors D-140 recorded. **Absent means V1**, and absent is
+  every `project.yaml` written before the key existed.
+- **`V2` is `project id + occurrence + content hash`** — no scene index.
+  `occurrence` is how many earlier scenes use the same still, carrying the one
+  thing the index was genuinely for (D-035: one photograph shown twice must not
+  move identically) without depending on position. Counted by **path**, because
+  the content hash is computed inside the pool (D-146) and re-reading every
+  photograph here would put back the serial pass D-149 removed. The seed is
+  tagged, or V2's first occurrence would hash identically to V1 at index 0.
+- **The index was in the segment filename too.** With the seed fixed the
+  measurement was *still* `0 segments reused`: `seg-{index:04}-{key}.mp4` names
+  a file after where a scene sits. It is `seg-{key:016x}.mp4` now. Checked that
+  `scene_index` reaches nothing in the encoded bytes first — three log fields
+  and one `seeded` call that only `still render-scene` reaches.
+- **`still new` writes a starter `project.yaml`** — the one exception to
+  "ingest writes no settings file", and narrow: nothing touches a file that
+  exists, `add_media` still writes none, and a folder that says nothing renders
+  under V1 **forever, including folders made tomorrow**.
+
+**Measured, and it is the claim everything rests on:** a project with no
+`motion_seed:` key rendered by the build before all of this and the build after
+it — in folders with the **same basename**, because `project_id` is the
+basename and it seeds the move (gate 7e already fell into that once) — is
+**byte-identical**. With `motion_seed: v2` it differs, as it must. A v2 reorder
+reuses **6 of 6**; a v1 reorder still reuses 0, deliberately.
+
+**One migration cost, one-time and invisible:** a project already rendered holds
+old-style segment names, so its next render re-encodes once and produces a
+byte-identical film. The old names are matched by `is_our_segment`, so D-109
+bounds them rather than stranding them. Same trade as D-107 and D-118.
+
+**M2 is 20 gates; `make gates` is 36.** Gate 4g's v1 half asserts `0 segments
+reused` — asserting that a documented cost *persists*, because that is the
+promise being kept.
+
+**Running it found a gate that had been passing by doing nothing.** D-147's
+insertion split a two-line `check "…" \` call and orphaned
+`gate_reuse_checks_length` on the line below, so **gate 4e reported PASS while
+running no command** for three sessions — and the orphaned function ran at the
+top level, its `ls:` errors landing outside the harness's capture where they
+read as noise. `check` now fails loudly on a call with no command, verified by
+orphaning it again. **A gate count is not evidence that every gate ran.**
+
+Once running again it failed for a *second*, real reason: it globbed
+`seg-0000-*` to find its two segments, and the index had just left the name. It
+asks each segment its frame count now — 60 against 240 — which needs no
+filename and survives the next rename.
+
+### State as of 2026-09-04 — a README was being read aloud
+
+**D-152 — `findings.md` F-22.** `TEXT_EXTENSIONS` holds `md`, and D-080's
+importer pairs **by stem first, then by position** — so `still new proj
+photos/*` over a folder holding a `README.md`, which is most folders, paired it
+with a photograph and **spoke it**. Billable under D-014, and easy to miss in a
+list of thirty rows.
+
+**The harm is the guess, not the extension.** A `.md` whose stem names a still
+is a statement of intent, and projects made by earlier builds contain exactly
+that. `POSITIONAL_TEXT_EXTENSIONS` is `["txt"]` and `assign` takes the predicate
+deciding what its second pass may consider: `.md` still pairs by stem, and is
+never dropped into a still that did not name it.
+
+**Removing `md` from the list was the obvious fix and is worse** — a `.md`
+already in a project would go silent with no explanation, and the constant is
+shared with the folder scan, so one edit would change two surfaces invisibly.
+Both halves are tested. The refused file is reported as `Skipped` with what to
+do about it; silence there is the same defect one layer along.
+
+Worth knowing, because it is why nothing is lost: **markdown markup is spoken
+literally** — `# Chapter One` reaches the provider as those characters. `.md`
+was never a good narration format. **`make gates` is still 35.**
+
+### State as of 2026-09-04 — the log and the docs stop lying
+
+**D-151 — `findings.md` F-16, F-17, F-19 and F-20.** Four places where what
+this program wrote down was not what it did.
+
+- **F-16** 200 rows of `runs.csv` say `voice=default` while the argv on the same
+  row says `--voice en-US-AvaNeural`. D-086 already ruled that **`default` is
+  not a voice** and fixed it for every displayed surface; the log never got the
+  same treatment. `Spoken` carries the voice that actually spoke now — from the
+  **provider**, which is the thing that resolves it, rather than the caller
+  working the rule out a second time (D-111's lesson).
+- **F-17** "film complete" carried `duration_s`, `scenes` and `frames` and not
+  the one number that says *why a run took the time it did*. A 112-scene
+  re-render finished in 9.9 s and the log could not say whether the cache had
+  worked. It records `reused_segments`, `reused_audio`, `spoken` and
+  `freed_bytes` now, so a performance question is answerable from the file
+  instead of by repeating the render.
+- **F-19** `CLAUDE.md` said FFmpeg **8.0.1**. It is **9.0.1** — the major
+  version moved underneath this project between two sessions and nothing
+  noticed, because D-041 asserts a strict profile against whatever it finds and
+  so kept passing. The line is corrected, `still doctor` prints the version, and
+  **every render records `ffmpeg=` and `ffmpeg_path=`** — one `-version` spawn
+  per run, not per file, and one implementation (`tools::version_line`) shared
+  with the diagnostics bundle so the two cannot disagree about which build made
+  a film. **`ffmpeg-findings.md`'s 8.0.1 is correct as provenance and must not
+  be changed.**
+- **F-20** the handoff record stopped at D-141 and the test count was stale.
+  D-142 is in the read-before-touching list now, and the counts move with the
+  work.
+
+**`make gates` is still 35.**
+
+### State as of 2026-09-04 — seven wrong messages, one of them in `still --help`
+
+**D-150 — `findings.md` F-01 through F-07.** None of them produces a wrong
+film; all seven are a message an operator cannot act on, which D-091 already
+called the same class of defect as a wrong number.
+
+- **F-01** `still new` reported every `.txt` as a line to speak. Since D-106 a
+  `.txt` beside a recording is that scene's **caption**, so one folder answered
+  two ways — *"3 scripts to speak"* against `still validate`'s *"2 narrated"* —
+  and under D-014's BYOK it **overstated the bill**. `lines_to_speak` and
+  `captions` split them by the renderer's own rule, and the printed row shows
+  the caption instead of dropping it.
+- **F-02** `MediaError::Exit` said *"ffmpeg exited"* over an `ffprobe` argv on
+  the next line. It carries the program now, taken from the path launched.
+- **F-03** one problem list, two standards: a broken photo got a sentence, a
+  broken recording got `ffprobe exited 1` and a `[mp3 @ 0x…]` line. Not
+  deliberate — a truncated JPEG still *probes*, so it reached D-052's mapping,
+  while a broken MP3 makes `ffprobe` exit and never got there. A failed probe
+  now leads with a sentence; the evidence follows it, indented (D-105: a
+  terminal loses nothing).
+- **F-04** integer megabytes truncated, so every size between D-126's 256 KiB
+  ceiling and 1 MB said **`0 MB`** while being refused for being too big.
+  `human_size` reports bytes, KB, then one decimal of MB.
+- **F-05** six sites cited **D-099** (Gatekeeper quarantine) for the arrange
+  work, which is **D-100** — and two were doc comments, so the wrong number
+  **printed in `still --help`**. `cited_decisions.rs` now fails on a `D-nnn`
+  that is not a heading in `decisions.md`; it is honest that this cannot catch
+  D-099-for-D-100, and what it does enforce is that **a decision cited in code
+  is written in the same commit** — it failed on this change until D-150
+  existed.
+- **F-06** `still diagnostics where` printed the project log's status *after*
+  the `runs.csv` line, so `(not created yet)` read as belonging to a file whose
+  size had just been reported.
+- **F-07** a move renumbers, so the list it printed read `001  001.jpg`, … —
+  it could not confirm the one thing it existed to confirm. `move_to` returns
+  `Moved` now: `003 → 001   moved from 3 to 1 of 3`, and the files.
+
+**Deliberately not done:** the window does not fold F-03's technical half behind
+a disclosure. `NotUsableMedia` carries one string and splitting it is a model
+change plus a component; the sentence is first in both surfaces, which is the
+half that was wrong. **`make gates` is still 35.**
+
+### State as of 2026-09-04 — `still validate` was eleven seconds of waiting
+
+**D-149 — a poll interval is a floor under every child, and one probe at a time
+is a floor under `still validate`.** `findings.md` F-08, F-09 and F-10 as one
+number: **200 scenes took 11.82 s** on a ten-core machine and almost none of it
+was work.
+
+| 200 scenes, best of three | one at a time | eight at a time |
+|---|---|---|
+| 20 ms fixed poll (before) | **11.82 s** | 1.65 s |
+| doubling 1→20 ms | — | 1.62 s |
+| proportional (now) | 7.64 s | **1.31 s** |
+
+**9.0x.**
+
+**The poll.** `POLL_INTERVAL` was a flat 20 ms and its own comment stated the
+premise it failed on — *"irrelevant against a multi-second encode"*, true of an
+encode, and `still validate` spawns two `ffprobe` calls per scene and touches no
+encoder. It is now `clamp(waited / 8, 1 ms, 20 ms)`: **a look is never further
+from the last than an eighth of how long this child has already run**. A plain
+doubling was tried first and is measurably not enough — 1, 2, 4, 8, 16 hits the
+ceiling after 31 ms of cumulative wait, exactly where a probe lives, and costs
+19%. `waited` is time **slept**, not the clock, so the schedule is asserted
+exactly rather than timed.
+
+**It is a `still validate` fix, not a render fix**, and the numbers say so: 60
+scenes cold, 7.57 s → 7.50 s, about 1%. Recorded so nobody re-derives it hoping
+for more.
+
+**The probes.** `import::load` resolved rows one at a time; they now run
+`probe_jobs()` at a time (twice the render pool's default — a probe waits and
+holds no canvas, so D-144's memory rule does not reach it). `MediaCheck` gained
+a `Sync` bound on the **trait**, so every implementation promises it.
+
+**The blocker F-09 named is not the real one.** It warned the *problem list*
+must stay deterministic — but `order_by_scene` re-sorts it afterwards, so a
+shuffled merge would still print correctly and a test of that would pass against
+the broken code (**D-116's trap**). What the merge really carries is `files`,
+indexed by row: get it out of order and scene 3 renders scene 7's photograph
+silently. That is what is asserted, and it fails when the merge is reversed.
+The concurrency itself is asserted **without a clock** — a stand-in that will
+not answer until a second check arrives — and fails after its ten-second
+deadline when the pool is forced to one worker.
+
+**F-10 was already fixed by D-146**, which moved `plan_scene` and the still's
+hash inside the segment pool.
+
+**No gate, deliberately**: what changed is how long something takes, and a
+wall-clock assertion on a shared runner fails for reasons that are not defects
+(D-130's rule). The schedule, the ordering and the concurrency are unit-tested.
+**`make gates` is still 35.**
+
+### State as of 2026-09-04 — the log that answers "what went wrong" was written by one command in fourteen
+
+**D-148 — `runs.csv` recorded renders and nothing else.** `findings.md` F-15.
+D-093 built that file to be *the one to open when the question is "what went
+wrong"*, and then constructed it **inside `render_project`** — so `still
+validate`, `new`, `add`, `voices`, `doctor`, `remove`, `move` and the **entire
+window** wrote to it not at all (`apps/desktop/src/main.rs` held no `record`
+call). The file covers 2026-08-31 with **1508 rows** and the failure the author
+reported that day — the wall of Python on the Voice screen, D-141 — **is not in
+it**.
+
+**Why is worth more than the fix.** The sinks are normally two `Option`s, and
+D-093's `Tee` composes two sinks that both *exist*: expressing the real case
+took a `zip`, a `map` and a four-arm match — eleven lines. So there was exactly
+one call site. **A sink that is awkward to build is a sink that gets built
+once.** `Journal` owns the pair and is itself a `Diagnostics`; `Tee` is
+removed. Three existing sites got simpler for free, and `still render-scene`
+and the window's voice audition now reach both sinks instead of only the
+project's.
+
+**Asking about a folder is not adopting it.** `Journal::for_surface` opens the
+machine index always and the project's own log **only where `.spoonstill/`
+already exists**, because `FileLog::open` *creates* it — `still validate
+~/Pictures` must not leave a state directory behind.
+
+**One wrapper, above `dispatch`**, covers all fourteen CLI commands, so a
+fifteenth inherits it. The scope is a `&'static str` match and not anything
+derived from `clap`: a scope that moved when a help string was reworded would
+make an old `runs.csv` unfilterable. **Two rows in the terminal, one in the
+window** — the `invoked` row is what says a command started and never came
+back, which is how D-144 was diagnosed; a window command that hangs leaves an
+operator describing a spinner instead.
+
+**The window records now.** Sixteen commands hand their outcome to
+`journalled`; four are exempt **by name with a reason** (`resolve_output`,
+`subtitle_preview`, `activity_log`, `cancel_render` — pure and local).
+`ui_contract.rs` fails on any `#[tauri::command]` returning `Result` that
+neither journals nor is on that list; verified by removing it from `voices`.
+
+**Measured with `HOME` redirected**: every command produces its rows, a failed
+`validate` carries `detail=… is not a project folder`, the refused folder is not
+created, and a rendered project carries the same rows in its own JSON Lines.
+**Gate 7f** asserts all of it plus that a render still writes its detailed
+events to both sinks — D-093 must not be traded for D-148. Against the old code
+it fails, 18/19. **M2 is 19 gates; `make gates` is 35.**
+
+### State as of 2026-09-03 — 861 MB protecting 26.5 MB
+
+**D-147 — the cache keeps what cost money and sweeps what cost a second.**
+`findings.md` F-14: the author's folders held **861 MB of normalized WAV around
+26.5 MB of spoken MP3 — 32:1**, on a network volume, because D-109 swept
+segments and spared the audio cache entirely.
+
+D-109's sentence — *"a segment is CPU, a narration is a network call and under
+D-014 money"* — is **right about the spoken layer and does not describe the
+derived one**. D-084 already keys them as two layers precisely so that changing
+the loudness target re-normalizes every line and re-speaks none; the normalized
+WAV is one local FFmpeg pass from an MP3 that is still sitting beside it.
+
+`AudioCache::is_derived_name` matches exactly what `path_for` writes and refuses
+`spoken-` explicitly as well as by extension. Same live-set-plus-two-generations
+bound, same refusal to delete a stranger's file, same `--keep-cache`, same
+only-after-the-join placement.
+
+**One rule, one implementation.** `prune_segments` and `prune_audio` are two
+lines each over a shared `prune` that takes the ownership predicate as its only
+parameter — the two caches differed in exactly that, and everything else would
+have drifted as two copies. The spare budget now counts **distinct** live files,
+since many scenes resolving to one narration is the ordinary case (D-108).
+
+**Measured**, eight scenes under six voices: derived **70.5 MB / 48 files →
+35.2 MB / 24 files**; spoken **2.25 MB / 48 files, unchanged**. The 31:1 ratio
+between the layers reproduces the author's 32:1 from an independent direction.
+The bound is three generations however many renders happen.
+
+**Flipping back is still free** — re-rendering under a voice from two
+generations ago reports `4 narrations from cache, 4 segments reused`. Keeping
+only the live set would also be bounded and would make every flip a
+re-normalize.
+
+**A voice audition is derived too, and that is correct**: `preview` writes into
+the same cache, so a render may sweep an audition's normalized half and can
+never sweep its spoken half — auditioning that voice again is a local pass, not
+a call.
+
+**Gate 4f** asserts all four properties and uses D-146's voice-service
+stand-in, now the shared `stub_voice_service` helper. With the audio sweep
+removed it fails, 17/18. **M2 is 18 gates; `make gates` is 34.**
+
+### State as of 2026-09-03 — a quarter of every render had the CPU idle
+
+**D-146 — a scene needs its own narration, not everybody's.** `findings.md`
+F-12, out of the production log: `film.rs` ran `resolve_audio` to completion and
+only then `render_segments`, and in **4531 rows of real renders the two phases
+never once overlapped**. For 78 seconds of chapter 1 ten cores did nothing while
+`edge-tts` waited on the network; then the network sat idle for 228 seconds of
+encoding. **24-28% of every cold render.**
+
+`pool::pipeline` sits beside `pool::run` with the same guarantees — both stages
+bounded by their own job count, both result vectors in input order, D-045
+cancellation in both — and starts a scene's segment the moment *that scene's*
+narration is measured.
+
+**D-077 is proven, not argued.** `plan_scene` is the whole of what decides a
+segment's identity and none of it can see which worker ran it. The same
+twelve-scene project rendered by the old code and the new produced **one
+byte-identical film**; ten cold renders in a row produced the same hash.
+
+**Measured with the network stood in for.** The live service is unusable as a
+benchmark (three paired runs: 22.4/25.1/38.1 s against 15.5/24.3/68.2 s, one
+plainly a D-094 retry), so `edge-tts` was replaced by a script that sleeps and
+then answers — which is what a network is here: waiting, not computing. Twelve
+scenes, `--jobs 4 --audio-jobs 2`: **22.43/25.07/23.15 s before,
+14.34/16.32/15.03 s after — 35%, three times out of three.**
+
+**It costs no memory, and that was measured** because the two pools now run at
+the same time, which is what D-144 sizes. Peak resident across every child:
+**2900 MB before, 2904 MB after** at `--audio-jobs 8`; 2909 vs 2905 at
+`--audio-jobs 16`. A segment worker holds a prescale canvas and an audio worker
+holds nothing, so widening the stage that holds nothing does not move the peak.
+
+**The trade F-12 named is handled.** Under two barriers a failed narration was
+known before a frame was encoded; `pipeline` therefore **stops admitting
+stage-two work as soon as any stage-one item fails**. Verified end to end: one
+failing line out of twelve gives exit 1 in 11 s with **0 segments encoded** and
+the scene named. D-002/D-094's pre-flight is unchanged and still runs before
+both pools.
+
+**Gate 7e** renders six spoken scenes through the stand-in and asserts a
+narration is reported *after* the first segment — an ordering of events, never a
+wall-clock number. Against the code before this change: *"first segment at line
+8, last narration at line 7"*. **Its first version was wrong in a way worth
+remembering:** it copied the project to `overlap-twin` for the byte-identity
+half and the films differed — correctly, because `project_id` is the **folder
+name** and it seeds the Ken Burns move (D-035). Two renders of "the same
+project" have to mean the same project by the renderer's definition.
+
+**M2 is 17 gates; `make gates` is 33.**
+
+### State as of 2026-09-03 — the photographs were smaller than the frame
+
+**D-145 — a still that does not cover the frame is a warning now, and
+`still render` prints warnings at all.** This is the first finding in the
+project that only *real films* could produce: `findings.md` F-13, read out of
+the author's own production log. **699 of 741 rendered scenes are 1376x768
+stills going into a 1920x1080 frame** — the whole of chapters 1, 2 and 3-5.
+D-034's cover-fit enlarges them 1.41x and the Ken Burns zoom takes another 1.12x
+on top, so **every frame of every chapter is a ~1.57x upscale**, and
+`still validate` said **"no problems"** for all 699.
+
+**Why nothing caught it:** every fixture in this repo is *larger* than the frame
+(1999x1001 up to 4000x3000). The only stills ever tested at size are the ones
+the author does not use. Gate 7d now renders the author's real geometry.
+
+**It is a warning, not an error** — upscaling is a trade, and D-089 says a
+refusal has to be actionable. What is actionable is the number, so the message
+carries it: `2 of 3 stills are smaller than the 1920x1080 frame and will be
+enlarged to fill it — the smallest is scene 001 at 1376x768; `--short-edge 756`
+renders every scene at its own detail`. **One line for the project, not one per
+scene** (`ToolingMissing`'s reasoning, second case): 699 identical lines state
+one fact 699 times and the fix is one setting.
+
+Three things worth knowing about the arithmetic. It measures **display** pixels,
+so SAR is applied — an anamorphic 1000x720 at 4:3 covers 1333 pixels of frame
+and a stored-width check would call it too small. It is **per aspect**, because
+the shape decides which edge binds: 1376x768 is **756 landscape and 432
+portrait**. And every suggested edge is rounded down to one `OutputSpec::new`
+accepts (a multiple of 18 for 16:9, 2 for square), because naming a size the
+next command refuses is worse than saying nothing.
+
+**The geometry is carried back rather than probed twice.**
+`MediaCheck::check` returns `Result<Option<SourceGeometry>, String>` now: the
+probe that decides whether a still is usable already knows how big it is.
+`--no-probe` measures nothing and so warns about nothing — the absence of a
+measurement is not a small photograph. And the warning **follows D-143's
+override**: `apply_geometry_override` recomputes it, or a `--resolution 4k` run
+would print a sentence about 1920x1080 at exactly the size where the
+enlargement is worst.
+
+**`still render` used to discard the whole warning list.** It counted errors and
+threw the rest away, so the surface most operators use never mentioned an
+unpaired recording either. `FilmEvent::Warned` carries each one to both control
+surfaces, **before the pool starts** — D-144's rule, because a line under five
+minutes of progress output is a line nobody reads.
+
+**Round trip, measured:** two 1376x768 stills and one 4000x3000 warn at 1080p,
+name `--short-edge 756`, and render silently at 756. Gate 7d reads the number
+out of the message rather than writing it down, so the gate cannot agree with
+the code by construction. **M2 is 16 gates; `make gates` is 32.** The README
+said "30 checks" in one place and "31" in another, because only one phrasing was
+ever tested; `readme_claims.rs` now checks both.
 
 ### State as of 2026-09-03 — the pool learned what a 4K frame costs
 
@@ -557,9 +1003,9 @@ exact thing the top of this file warns about.
 
 #### If you are checking this work
 
-Run `make gates` first: **M0 8/8, M1 8/8, M2 15/15**, plus `cargo fmt --check`,
+Run `make gates` first: **M0 8/8, M1 8/8, M2 21/21**, plus `cargo fmt --check`,
 `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test
---workspace` (493 tests). Then `cargo audit --deny warnings` (D-129), which is
+--workspace` (558 tests). Then `cargo audit --deny warnings` (D-129), which is
 new and is the one check that can fail without the code changing.
 
 Each decision names its own reproduction, and most can be re-run in a scratch
@@ -1440,7 +1886,8 @@ also holds a **fallback voice**; precedence is run override → project's
 
 **One CSV of everything, beside the operator's other machine state** (D-093).
 Every event goes to the project's JSON Lines *and* to
-`<config>/spoonstill/runs.csv`, composed with `spoonstill_state::Tee`. That file
+`<config>/spoonstill/runs.csv`, through `spoonstill_state::Journal` (D-148
+replaced D-093's `Tee`). That file
 is the one to open when the question is "what went wrong" rather than "what went
 wrong in this project" — every field quoted, column order pinned by a test,
 rolling at 16 MB. Reachable from **Settings > Activity log** and from
@@ -1487,9 +1934,27 @@ the `MediaCheck::ready` pre-flight, or the window's empty-project screen, and
 **D-105 before touching `Remedy`, `spoonstill_app::tooling`, `drawFix`, or
 anything that reports a missing program to an operator**, **D-143 before
 touching `Aspect`, `Resolution`, `spoonstill_app::formats`, the geometry
-override in `film.rs`, or the Output screen's choosers**, **D-144 before
+override in `film.rs`, or the Output screen's choosers**, **D-145 before
+touching `SourceGeometry`, `MediaCheck::check`, `undersized_sources`,
+`ProblemKind::UndersizedSources` or `FilmEvent::Warned`**, **D-146 before
+touching `pool::pipeline`, `resolve_and_render`, `plan_scene`, or the order the
+narration and segment stages run in**, **D-147 before touching `prune`,
+`prune_audio`, `AudioCache::is_derived_name`, or anything that removes a file
+from a cache**, **D-148 before touching `Journal`, `runs.csv`, the CLI's
+`run`/`dispatch` split, or the window's `journalled` wrapper**, **D-149 before
+touching `Backoff`, `wait_until`'s loop, `probe_jobs`, or the `Sync` bound on
+`MediaCheck`**, **D-150 before touching `Ingested::summary`, `unreadable`,
+`human_size`, `arrange::Moved`, or a cited D-number**, **D-151 before touching
+`Spoken::voice`, `tools::version_line`, the "film complete" event's fields, or
+the FFmpeg version line in this file**, **D-152 before touching
+`TEXT_EXTENSIONS`, `POSITIONAL_TEXT_EXTENSIONS` or `ingest::assign`**, **D-153
+before touching `MotionSeed`, `MotionSpec::seeded`, the segment filename,
+`occurrences_of`, or what `create_project` writes**, and **D-154 before starting
+M3, writing `state.db`, or assuming resume needs one**, **D-144 before
 touching `spoonstill_app::capacity`, `pool::default_jobs`, `RenderProjectOptions.jobs`,
-or anything that decides how many scenes render at once**, and **D-141 before
+or anything that decides how many scenes render at once**, and **D-142 before touching
+`without_verbatim_prefix`, a `canonicalize` call site, or where the Windows
+FFmpeg is looked for**, and **D-141 before
 touching `network_hint`, `classify`'s markers, or a failure path on the Voice
 screen** — the sibling of D-105 for a transient network error rather than a
 missing tool. D-054 through D-057 and D-075 through D-082 were added during M2 and

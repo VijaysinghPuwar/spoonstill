@@ -776,7 +776,7 @@ button.small { padding: 3px 9px; font-size: 11px; }
 }
 .grid .frames { color: var(--ink-3); font-size: 10.5px; margin-left: 4px; }
 
-/* Reordering and removal (D-099). Quiet until the row is under the pointer:
+/* Reordering and removal (D-100). Quiet until the row is under the pointer:
    these move the operator's photographs about, and a control that shouts is a
    control that gets pressed by accident. */
 /* Its own gutter: this column is buttons, and a button needs less air on its

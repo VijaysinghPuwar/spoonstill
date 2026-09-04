@@ -54,7 +54,9 @@ use std::path::{Path, PathBuf};
 
 use spoonstill_core::path_safety::without_verbatim_prefix;
 
-use crate::import::rows::{AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, TEXT_EXTENSIONS};
+use crate::import::rows::{
+    AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, POSITIONAL_TEXT_EXTENSIONS, TEXT_EXTENSIONS,
+};
 
 /// The smallest number of digits a scene name gets: `001`, not `1`.
 ///
@@ -153,6 +155,26 @@ impl Ingested {
         with_stem(&self.scripts, &image.name)
     }
 
+    /// Scripts that will be **spoken**: the ones with no recording beside them.
+    ///
+    /// Since D-106 a `.txt` next to a recording is the scene's **caption**, not
+    /// a line to synthesize — that is what turned a D-020 conflict into a
+    /// working scene. This report counted all of them as lines to speak, so it
+    /// contradicted `still validate` about the same folder and, under D-014's
+    /// BYOK, **overstated the bill**.
+    pub fn lines_to_speak(&self) -> impl Iterator<Item = &Copied> {
+        self.scripts
+            .iter()
+            .filter(|script| with_stem(&self.audio, &script.name).is_none())
+    }
+
+    /// Scripts that are a caption for a recording rather than a line to speak.
+    pub fn captions(&self) -> impl Iterator<Item = &Copied> {
+        self.scripts
+            .iter()
+            .filter(|script| with_stem(&self.audio, &script.name).is_some())
+    }
+
     /// One line, in the shape both the terminal and the window want.
     #[must_use]
     pub fn summary(&self) -> String {
@@ -168,12 +190,13 @@ impl Ingested {
                 plural(self.audio.len())
             ));
         }
-        if !self.scripts.is_empty() {
-            parts.push(format!(
-                "{} script{} to speak",
-                self.scripts.len(),
-                plural(self.scripts.len())
-            ));
+        let spoken = self.lines_to_speak().count();
+        if spoken > 0 {
+            parts.push(format!("{spoken} script{} to speak", plural(spoken)));
+        }
+        let captions = self.captions().count();
+        if captions > 0 {
+            parts.push(format!("{captions} caption{}", plural(captions)));
         }
         if self.image_without_audio > 0 {
             parts.push(format!("{} silent", self.image_without_audio));
@@ -267,7 +290,25 @@ impl std::error::Error for IngestError {}
 /// refusing it would be pedantry. An existing folder that already holds stills
 /// is refused by name: that is a project, and the verb for it is open.
 ///
-/// Nothing is written inside — see the module note on `project.yaml`.
+/// One thing is written inside: a starter `project.yaml` naming the motion seed
+/// rule this project renders under (D-153).
+///
+/// **This is the one exception to "ingest writes no settings file", and it is
+/// narrow on purpose.** D-013's rule is that `project.yaml` is an *input* the
+/// renderer never writes to, and that still holds — nothing here ever touches
+/// a file that already exists, and [`add_media`] writes none. What is
+/// different about creating a project is that there is nothing to overwrite,
+/// and that a folder which says nothing about its motion rule is a folder that
+/// renders under the old one forever, including brand-new ones (D-140's cost,
+/// permanently). Writing one line at creation is what makes the fix reach a
+/// project without reaching any existing film.
+///
+/// It is deliberately **one key**, not a template of every setting. An absent
+/// setting is a valid setting (D-056), and a scaffold full of commented
+/// defaults is a file an operator edits by accident.
+///
+/// A failure to write it is not a failure to create the project: the folder is
+/// real and usable, and the only consequence is that it renders under `v1`.
 ///
 /// # Errors
 ///
@@ -290,10 +331,30 @@ pub fn create_project(path: &Path) -> Result<PathBuf, IngestError> {
     }
     // Not the `\\?\` form `canonicalize` returns on Windows: the render reads
     // this back as a project root, and the prefix breaks the concat join (D-142).
-    Ok(fs::canonicalize(path)
+    let root = fs::canonicalize(path)
         .map(without_verbatim_prefix)
-        .unwrap_or_else(|_| path.to_path_buf()))
+        .unwrap_or_else(|_| path.to_path_buf());
+
+    // Never over an existing file, and never fatal (D-153).
+    let settings = root.join(spoonstill_core::MANIFEST_FILE);
+    if !settings.exists() {
+        let _ = fs::write(&settings, STARTER_SETTINGS);
+    }
+    Ok(root)
 }
+
+/// What a brand-new project's `project.yaml` says, and all it says (D-153).
+///
+/// The comment is there because the value is not one an operator would guess
+/// the meaning of, and because the honest thing to say about a versioned rule
+/// is that older projects are on the older one.
+const STARTER_SETTINGS: &str = "\
+# How each scene's Ken Burns move is chosen (D-153). `v2` makes the move a
+# property of the photograph, so reordering the film re-renders nothing and
+# changes no other scene's motion. Projects made before this key existed have
+# no `motion_seed:` line and render under `v1`, exactly as they always have.
+motion_seed: v2
+";
 
 /// Copy media into a project folder, numbered and paired.
 ///
@@ -337,10 +398,26 @@ pub fn add_media(root: &Path, sources: &[PathBuf]) -> Result<Ingested, IngestErr
     audio.sort_by_key(|path| natural_key(path));
     scripts.sort_by_key(|path| natural_key(path));
 
-    let (narration, spare_audio) = assign(&images, audio);
-    let (lines, spare_scripts) = assign(&images, scripts);
-    report.audio_without_image = spare_audio;
-    report.script_without_image = spare_scripts;
+    let (narration, spare_audio) = assign(&images, audio, any_recording);
+    let (lines, spare_scripts) = assign(&images, scripts, a_plain_script);
+    report.audio_without_image = spare_audio.len();
+
+    // A script that was left over for two different reasons: there was no still
+    // for it, or it is a `.md` and this importer will not guess (D-152). Both
+    // are reported, and the second says what to do about it — silence would
+    // leave an operator wondering where their words went.
+    for script in spare_scripts {
+        if a_plain_script(&script) {
+            report.script_without_image += 1;
+        } else {
+            report.skipped.push(Skipped {
+                reason: "not paired with any photo by name — rename it to `.txt`, or name it \
+                         after the photo it belongs to, if it is a line to speak"
+                    .to_owned(),
+                source: script,
+            });
+        }
+    }
     report.image_without_audio = narration
         .iter()
         .zip(&lines)
@@ -372,8 +449,17 @@ pub fn add_media(root: &Path, sources: &[PathBuf]) -> Result<Ingested, IngestErr
 /// over falls into the stills that matched nothing, in order — the assumption
 /// from the module note, applied only where no better answer exists.
 ///
-/// Returns the assignment and the count that had no still left to belong to.
-fn assign(images: &[PathBuf], pool: Vec<PathBuf>) -> (Vec<Option<PathBuf>>, usize) {
+/// `may_guess` decides which leftovers are allowed into that second pass
+/// (D-152). A `README.md` dropped in with a folder of photographs used to be
+/// paired with one and **spoken** — visible in the report, billable under
+/// D-014, and easy to miss.
+///
+/// Returns the assignment and everything that was not used, in order.
+fn assign(
+    images: &[PathBuf],
+    pool: Vec<PathBuf>,
+    may_guess: fn(&Path) -> bool,
+) -> (Vec<Option<PathBuf>>, Vec<PathBuf>) {
     let mut assigned = vec![None; images.len()];
     let mut pool: Vec<Option<PathBuf>> = pool.into_iter().map(Some).collect();
 
@@ -387,7 +473,13 @@ fn assign(images: &[PathBuf], pool: Vec<PathBuf>) -> (Vec<Option<PathBuf>>, usiz
         }
     }
 
-    let mut spare = pool.into_iter().flatten();
+    // The stem pass is over, so what is left named no still. Only files this
+    // caller is willing to guess about go into the second pass; the rest are
+    // handed back for the report to account for.
+    let (guessable, refused): (Vec<PathBuf>, Vec<PathBuf>) =
+        pool.into_iter().flatten().partition(|path| may_guess(path));
+
+    let mut spare = guessable.into_iter();
     for slot in assigned.iter_mut().filter(|slot| slot.is_none()) {
         match spare.next() {
             Some(file) => *slot = Some(file),
@@ -395,7 +487,26 @@ fn assign(images: &[PathBuf], pool: Vec<PathBuf>) -> (Vec<Option<PathBuf>>, usiz
         }
     }
 
-    (assigned, spare.count())
+    let mut left: Vec<PathBuf> = spare.collect();
+    left.extend(refused);
+    (assigned, left)
+}
+
+/// Whether a leftover file may be guessed into a still that did not name it.
+///
+/// Recordings always may: a folder of `IMG_2931.HEIC` and `take-1.wav` is the
+/// ordinary case D-080 exists for. Scripts may only when they are `.txt`
+/// ([`POSITIONAL_TEXT_EXTENSIONS`]).
+fn any_recording(_: &Path) -> bool {
+    true
+}
+
+fn a_plain_script(path: &Path) -> bool {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| {
+            POSITIONAL_TEXT_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+        })
 }
 
 /// A file's stem, folded for comparison: a volume that preserves case but does
@@ -600,11 +711,18 @@ mod tests {
             path
         }
 
+        /// The **media** a drop put in the folder.
+        ///
+        /// `project.yaml` is excluded because `create_project` writes one
+        /// (D-153) and every test here is about what a *drop* did.
+        /// `a_new_project_declares_the_motion_seed_rule` is the one that
+        /// asserts the settings file itself.
         fn names(&self, sub: &str) -> Vec<String> {
             let mut names: Vec<String> = fs::read_dir(self.0.join(sub))
                 .expect("the folder")
                 .flatten()
                 .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|name| name != spoonstill_core::MANIFEST_FILE)
                 .collect();
             names.sort();
             names
@@ -615,6 +733,95 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn copied(name: &str) -> Copied {
+        Copied {
+            source: PathBuf::from(name),
+            name: name.to_owned(),
+        }
+    }
+
+    /// D-152, the reported case: a folder of photographs almost always holds a
+    /// `README.md`, and it used to be paired with one of them positionally and
+    /// **spoken** — visible in the report, billable under D-014, easy to miss.
+    #[test]
+    fn a_readme_dropped_in_with_photographs_is_not_spoken() {
+        let source = Temp::new("readme-source");
+        let a = source.file("photo-a.jpg", b"jpeg");
+        let b = source.file("photo-b.jpg", b"jpeg");
+        let readme = source.file("README.md", b"# spoonstill\n");
+        let project = Temp::new("readme-project");
+
+        let report = add_media(&project.0, &[a, b, readme]).expect("it imports");
+
+        assert!(
+            report.scripts.is_empty(),
+            "the README became a line to speak: {:?}",
+            report.scripts
+        );
+        assert_eq!(report.image_without_audio, 2, "both stills are silent");
+        assert_eq!(report.skipped.len(), 1, "{:?}", report.skipped);
+        let said = &report.skipped[0].reason;
+        assert!(said.contains(".txt"), "the reason says what to do: {said}");
+    }
+
+    /// The other half, and the reason `md` was not simply removed from the
+    /// list: a `.md` whose stem names a still is a statement of intent, and
+    /// projects made by earlier builds contain exactly that.
+    #[test]
+    fn a_markdown_file_that_names_its_still_is_still_narration() {
+        let source = Temp::new("named-md-source");
+        let image = source.file("scene.jpg", b"jpeg");
+        let words = source.file("scene.md", b"The words for this scene.");
+        let project = Temp::new("named-md-project");
+
+        let report = add_media(&project.0, &[image, words]).expect("it imports");
+
+        assert_eq!(report.scripts.len(), 1, "{:?}", report.skipped);
+        assert_eq!(report.scripts[0].name, "001.md");
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+    }
+
+    /// And a `.txt` is still guessed into a still that did not name it, which
+    /// is the case D-080 exists for and must not be traded away.
+    #[test]
+    fn a_plain_script_is_still_paired_by_position() {
+        let source = Temp::new("positional-source");
+        let image = source.file("IMG_2931.HEIC", b"heic");
+        let words = source.file("opening line.txt", b"Spoken over the first still.");
+        let project = Temp::new("positional-project");
+
+        let report = add_media(&project.0, &[image, words]).expect("it imports");
+
+        assert_eq!(report.scripts.len(), 1, "{:?}", report.skipped);
+        assert_eq!(report.scripts[0].name, "001.txt");
+    }
+
+    /// F-01. A `.txt` beside a recording is that scene's **caption** since
+    /// D-106, not a line to synthesize — so counting it as one contradicted
+    /// `still validate` about the same folder and, under D-014's BYOK,
+    /// overstated the bill.
+    #[test]
+    fn a_script_beside_a_recording_is_a_caption_and_not_a_line_to_speak() {
+        let report = Ingested {
+            images: vec![copied("001.jpg"), copied("002.jpg"), copied("003.jpg")],
+            audio: vec![copied("001.wav")],
+            scripts: vec![copied("001.txt"), copied("002.txt")],
+            image_without_audio: 1,
+            ..Ingested::default()
+        };
+
+        assert_eq!(
+            report.lines_to_speak().count(),
+            1,
+            "only 002 has no recording"
+        );
+        assert_eq!(report.captions().count(), 1, "001.txt captions 001.wav");
+        let summary = report.summary();
+        assert!(summary.contains("1 script to speak"), "{summary}");
+        assert!(summary.contains("1 caption"), "{summary}");
+        assert!(!summary.contains("2 scripts to speak"), "{summary}");
     }
 
     #[test]
@@ -848,15 +1055,56 @@ mod tests {
     }
 
     #[test]
-    fn nothing_written_here_is_a_settings_file() {
+    /// D-153. A new project says which motion rule it renders under, because a
+    /// folder that says nothing renders under the old one **forever** — and
+    /// that is D-140's cost made permanent for projects that did not exist
+    /// when it was written.
+    fn a_new_project_declares_the_motion_seed_rule() {
         let temp = Temp::new("nosettings");
         let root = create_project(&temp.0.join("film")).expect("a new project");
-        add_media(&root, &[temp.file("a.jpg", b"1")]).expect("the drop");
 
-        assert!(
-            !root.join("project.yaml").exists(),
-            "an absent settings file is a valid project (D-056); \
-             writing one is not this module's business"
+        let settings = root.join(spoonstill_core::MANIFEST_FILE);
+        let text = fs::read_to_string(&settings).expect("a starter settings file");
+        assert!(text.contains("motion_seed: v2"), "{text}");
+
+        // One key, not a template of every setting: an absent setting is a
+        // valid setting (D-056), and a scaffold full of commented-out defaults
+        // is a file somebody edits by accident.
+        let keys = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
+            .count();
+        assert_eq!(
+            keys, 1,
+            "the starter file says more than it needs to:\n{text}"
+        );
+
+        // And a *drop* still writes none of it — that half of the rule is
+        // unchanged, and it is the half D-013 is actually about.
+        let before = fs::read_to_string(&settings).expect("readable");
+        add_media(&root, &[temp.file("a.jpg", b"1")]).expect("the drop");
+        assert_eq!(
+            fs::read_to_string(&settings).expect("readable"),
+            before,
+            "adding media rewrote the settings file"
+        );
+    }
+
+    /// An existing project keeps whatever it already says, including nothing.
+    #[test]
+    fn creating_never_writes_over_a_settings_file_that_is_there() {
+        let temp = Temp::new("existing-settings");
+        let folder = temp.0.join("film");
+        fs::create_dir_all(&folder).expect("the folder");
+        let settings = folder.join(spoonstill_core::MANIFEST_FILE);
+        fs::write(&settings, "output: mine.mp4\n").expect("their own file");
+
+        create_project(&folder).expect("an empty folder is a fine place");
+
+        assert_eq!(
+            fs::read_to_string(&settings).expect("readable"),
+            "output: mine.mp4\n",
+            "the operator's own settings were overwritten"
         );
     }
 

@@ -319,3 +319,73 @@ fn the_traffic_light_padding_is_asked_for_by_platform() {
          attribute and macOS flashes its title bar under the traffic lights"
     );
 }
+
+/// D-148. Every window command that can fail has to say so somewhere an
+/// operator's report can be checked against.
+///
+/// This file held **no `record` call at all**, so `runs.csv` covered renders
+/// started from a terminal and nothing anybody did in the app — and the failure
+/// the author actually reported (D-141) left no trace in the one file D-093
+/// says to open. A source scan is the right instrument for the same reason the
+/// two tests above give: what it prevents is a *new* command being added six
+/// months from now without one, which no test of today's behaviour can catch.
+///
+/// The exemptions are listed by name, each with a reason, so adding one is a
+/// decision rather than an omission.
+#[test]
+fn every_fallible_window_command_is_written_down() {
+    let main = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+        .expect("readable main.rs");
+    let code = code_only(&main);
+
+    // Pure, local, and answerable from the arguments alone. A failure in one
+    // of these is a bug in the window rather than something about this
+    // machine, and a row saying so would be noise in a file an operator reads.
+    let exempt = [
+        // Joins two strings the operator typed and checks the result (D-089).
+        "resolve_output",
+        // Draws a caption on a canvas in memory (D-106).
+        "subtitle_preview",
+        // Reads this machine's own settings file, already reported on screen.
+        "activity_log",
+        // Sets a flag on a running render (D-045); the render logs the rest.
+        "cancel_render",
+    ];
+
+    // Every `#[tauri::command]` whose signature returns a `Result`.
+    let mut unlogged = Vec::new();
+    for block in code.split("#[tauri::command]").skip(1) {
+        let Some(signature_end) = block.find('{') else {
+            continue;
+        };
+        let signature = &block[..signature_end];
+        if !signature.contains("-> Result<") {
+            continue;
+        }
+        let Some(name) = signature
+            .split("fn ")
+            .nth(1)
+            .and_then(|rest| rest.split('(').next())
+            .map(str::trim)
+        else {
+            continue;
+        };
+        if exempt.contains(&name) {
+            continue;
+        }
+        // The body of the command itself, which is the wrapper: it must hand
+        // its outcome to `journalled`.
+        let body_end = block[signature_end..]
+            .find("\n}\n")
+            .map_or(block.len(), |at| signature_end + at);
+        if !block[signature_end..body_end].contains("journalled(") {
+            unlogged.push(name.to_owned());
+        }
+    }
+
+    assert!(
+        unlogged.is_empty(),
+        "these window commands can fail and write nothing down: {unlogged:?} — \
+         wrap the outcome in `journalled`, or add the name to `exempt` with a reason"
+    );
+}

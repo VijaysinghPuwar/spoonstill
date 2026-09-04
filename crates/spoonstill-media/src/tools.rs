@@ -78,6 +78,24 @@ impl Tools {
         &self.ffprobe
     }
 
+    /// What FFmpeg build this run is using, as a version string (D-151).
+    ///
+    /// `"9.0.1"`, or the whole first line when it will not parse, or
+    /// `"<unknown>"` when the binary would not run at all. **Nothing in this
+    /// tree recorded the FFmpeg version**, and the major version moved from 8
+    /// to 9 underneath the project between two sessions with no gate, no log
+    /// line and no document noticing — D-041 asserts a strict profile against
+    /// whatever it finds, so the whole thing kept passing and would have kept
+    /// passing through the next one too.
+    ///
+    /// This is a `-version` spawn, so it belongs **once per run** and not on
+    /// the path of every file — which is exactly the split [`Self::ready`]
+    /// already documents for itself.
+    #[must_use]
+    pub fn ffmpeg_version(&self) -> String {
+        short_version(&version_line(&self.ffmpeg))
+    }
+
     /// Whether both binaries are really where this `Tools` says they are.
     ///
     /// Asked **once, before a probe runs over the operator's files**, because
@@ -544,9 +562,114 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
+/// Ask a binary for its version, tolerating its absence (D-151).
+///
+/// A missing FFmpeg is itself the most useful line a diagnostics bundle can
+/// carry, so this reports the failure rather than omitting the field. One
+/// implementation, here beside the process boundary, because the bundle and the
+/// run log must not disagree about which build made a film.
+///
+/// # Panics
+///
+/// Never: every failure becomes a line of text.
+#[must_use]
+pub fn version_output(program: &Path) -> String {
+    let mut command = crate::command::FfmpegCommand::new(program);
+    command.args(["-hide_banner", "-version"]);
+    match command
+        .spawn()
+        .and_then(|child| child.wait_until(VERSION_TIMEOUT))
+    {
+        Ok(finished) => String::from_utf8_lossy(&finished.stdout).into_owned(),
+        Err(error) => format!("<could not be run: {error}>"),
+    }
+}
+
+/// The first line of [`version_output`] — the one with the version in it.
+#[must_use]
+pub fn version_line(program: &Path) -> String {
+    version_output(program)
+        .lines()
+        .next()
+        .unwrap_or("<no output>")
+        .trim()
+        .to_owned()
+}
+
+/// How long to wait for a version probe before giving up on it.
+const VERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `ffmpeg version 9.0.1 Copyright (c) …` -> `9.0.1`.
+///
+/// The whole line when it does not have that shape: a build string this does
+/// not recognise is still the answer to "which FFmpeg made this", and guessing
+/// a substring out of it would be worse than printing it.
+fn short_version(line: &str) -> String {
+    if line.is_empty() {
+        return "<unknown>".to_owned();
+    }
+    let mut words = line.split_whitespace();
+    match (words.next(), words.next(), words.next()) {
+        (Some(_), Some("version"), Some(version)) => version.to_owned(),
+        _ => line.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D-151. The version is the first thing a report from a stranger's machine
+    /// is checked against, so what it reports has to be the version and not the
+    /// banner around it — and an unrecognised banner has to survive whole
+    /// rather than be guessed at.
+    #[test]
+    fn the_version_is_read_out_of_the_banner_or_the_banner_is_kept() {
+        assert_eq!(
+            short_version("ffmpeg version 9.0.1 Copyright (c) 2000-2025 the FFmpeg developers"),
+            "9.0.1"
+        );
+        assert_eq!(
+            short_version("ffprobe version 7.1_4 Copyright (c) 2007-2024"),
+            "7.1_4"
+        );
+        assert_eq!(
+            short_version("ffmpeg version n6.1-static https://johnvansickle.com"),
+            "n6.1-static"
+        );
+        // Nothing to parse: the line itself is the answer.
+        assert_eq!(
+            short_version("some other build banner"),
+            "some other build banner"
+        );
+        assert_eq!(
+            short_version("<could not be run: no such file>"),
+            "<could not be run: no such file>"
+        );
+        assert_eq!(short_version(""), "<unknown>");
+    }
+
+    /// And it survives the real thing on this machine, whichever build that is.
+    #[test]
+    fn the_ffmpeg_on_this_machine_reports_a_version() {
+        let tools = Tools::from_env();
+        if tools.ready().is_err() {
+            return; // A machine with no FFmpeg has nothing to assert here.
+        }
+        let version = tools.ffmpeg_version();
+        assert!(!version.is_empty());
+        assert!(
+            !version.contains("could not be run"),
+            "a runnable ffmpeg reported {version:?}"
+        );
+        assert!(
+            version
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit() || c == 'n'),
+            "{version:?} does not look like a version"
+        );
+    }
 
     /// There is still no auto-download: the only ways to get a binary are the
     /// environment, an explicit path, and the operator's own installation.

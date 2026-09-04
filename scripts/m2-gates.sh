@@ -22,6 +22,16 @@ trap 'rm -rf "$WORK"' EXIT
 
 check() { # description, then a command
   local what="$1"; shift
+  # A gate with no command is a gate that passes by doing nothing. This
+  # happened: an insertion split a two-line `check … \` invocation and left the
+  # function name orphaned on its own, so gate 4e reported PASS for three
+  # sessions while running nothing at all — D-116's trap, in the harness rather
+  # than in a test. Refused loudly, because the failure mode is silence.
+  if [ "$#" -eq 0 ]; then
+    printf '  %sFAIL%s  %s\n' "$RED" "$OFF" "$what"
+    printf '          no command was given to `check` — a gate that runs nothing\n'
+    fail=$((fail+1)); return
+  fi
   if "$@" >"$WORK/out" 2>&1; then
     printf '  %sPASS%s  %s\n' "$GREEN" "$OFF" "$what"; pass=$((pass+1))
   else
@@ -265,6 +275,33 @@ gate_bounded_cache() {
 check "the segment cache is bounded, and the last two generations stay free" \
   gate_bounded_cache
 
+# A stand-in for the voice service, for the two gates that need speech.
+#
+# Not `edge-tts` itself, for two reasons. It is not on the CI runner, where M2
+# gate 7 deliberately tests the *other* half of D-020 — and a gate that depends
+# on somebody else's service is a gate that fails on their afternoon (D-134's
+# rule). And a fixed delay with a fixed answer is what makes both gates
+# repeatable: a network is waiting, not computing.
+stub_voice_service() { # delay-seconds
+  "$FFMPEG" -y -loglevel error -f lavfi -i "sine=frequency=440:duration=2" \
+    -ar 24000 -ac 1 -b:a 48k "$WORK/stub.mp3" || return 1
+  cat > "$WORK/stub-edge-tts" <<STUB
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "--version" ]; then echo "edge-tts (stand-in)"; exit 0; fi
+done
+out=""; prev=""
+for a in "\$@"; do
+  if [ "\$prev" = "--write-media" ]; then out="\$a"; fi
+  prev="\$a"
+done
+sleep $1
+cp "\$STUB_MP3" "\$out"
+STUB
+  chmod +x "$WORK/stub-edge-tts"
+  export SPOONSTILL_EDGE_TTS="$WORK/stub-edge-tts" STUB_MP3="$WORK/stub.mp3"
+}
+
 # --- gate 4e: a cached segment of the wrong length is not reused ------------
 # D-110. The reuse check asserted the segment *profile*, which pins codec,
 # geometry and colour and says nothing about length — so a file with a
@@ -291,10 +328,24 @@ gate_reuse_checks_length() {
 
   # Put the short scene's segment under the long scene's cache name. Same
   # profile in every field the assertion checks; four times the wrong length.
-  local short long
-  short=$(ls "$seg"/seg-0000-*.mp4 | head -1)
-  long=$(ls "$seg"/seg-0001-*.mp4 | head -1)
-  [ -n "$short" ] && [ -n "$long" ] || { echo "no segments to swap"; return 1; }
+  #
+  # Found **by length, not by filename**. The names used to carry the scene
+  # index and this globbed `seg-0000-*`; D-153 took the index out, because a
+  # file named after where a scene sits cannot be reused when the scene moves.
+  # Asking each segment how long it is needs no name at all, which is also why
+  # it survives the next rename.
+  local short long frames
+  for candidate in "$seg"/seg-*.mp4; do
+    [ -f "$candidate" ] || continue
+    frames=$("$FFPROBE" -v error -select_streams v:0 \
+      -show_entries stream=nb_frames -of csv=p=0 "$candidate")
+    case "$frames" in
+      60)  short="$candidate" ;;
+      240) long="$candidate" ;;
+    esac
+  done
+  [ -n "$short" ] && [ -n "$long" ] || {
+    echo "no 60-frame and 240-frame segments to swap:"; ls -l "$seg"; return 1; }
   cp "$short" "$long" || return 1
 
   # It must notice, re-render that scene, and produce the right film.
@@ -312,6 +363,135 @@ gate_reuse_checks_length() {
 }
 check "a cached segment of the wrong length is re-rendered, not reused" \
   gate_reuse_checks_length
+
+# --- gate 4f: the audio cache is bounded, and a network call is never swept --
+# D-147. The author's own folders held 861 MB of normalized WAV protecting
+# 26.5 MB of spoken MP3 — 32:1, on a network volume — because D-109 spared the
+# audio cache entirely. It was right about the *spoken* layer, which costs a
+# network call and under D-014 money, and wrong about the normalized one, which
+# is one local FFmpeg pass away from the MP3 still sitting beside it.
+#
+# Five voices over four scenes is five generations of both layers. The derived
+# half must end at three generations; the spoken half must end at five.
+gate_bounded_audio() {
+  local proj="$WORK/bounded-audio"
+  local cache="$proj/$STATE/cache/audio"
+  mkdir -p "$proj"
+  printf 'output: film.mp4\naspect: 16:9\nshort_edge: 540\nfps: 30\n' > "$proj/project.yaml"
+  local i
+  for i in 1 2 3 4; do
+    cp fixtures/generated/land.jpg "$proj/00$i.jpg" || return 1
+    printf 'Scene %s speaks a line.\n' "$i" > "$proj/00$i.txt"
+  done
+
+  stub_voice_service 0 || return 1
+
+  local v
+  for v in en-US-AvaNeural en-GB-RyanNeural en-AU-NatashaNeural en-IE-EmilyNeural \
+           en-CA-LiamNeural; do
+    "$STILL" render "$proj" --out "$WORK/ba.mp4" --voice "$v" >/dev/null 2>&1 || return 1
+  done
+
+  # Four scenes, so three generations is twelve derived files. Not twenty.
+  local derived spoken
+  derived=$(ls "$cache" | grep -c '\.wav$')
+  [ "$derived" -le 12 ] || {
+    echo "the derived cache grew to $derived files, bound is 12"; return 1; }
+
+  # And every one of the twenty network calls is still on disk. This is the
+  # half of D-109 that was right, and it must stay right.
+  spoken=$(ls "$cache" | grep -c '\.spoken$')
+  [ "$spoken" -eq 20 ] || {
+    echo "$spoken spoken files of 20 — the sweep took something that cost a call"
+    return 1; }
+
+  # Flipping back to a recent voice costs neither a call nor a re-normalize.
+  local out
+  out=$("$STILL" render "$proj" --out "$WORK/ba.mp4" --voice en-IE-EmilyNeural 2>&1) || {
+    echo "$out"; return 1; }
+  grep -q "4 narrations from cache" <<<"$out" || {
+    echo "flipping back re-resolved the narrations:"; echo "$out"; return 1; }
+
+  # A file we did not write is not ours to delete, in this cache either.
+  echo "not ours" > "$cache/holiday.wav"
+  "$STILL" render "$proj" --out "$WORK/ba.mp4" --voice en-US-GuyNeural \
+    >/dev/null 2>&1 || return 1
+  [ -f "$cache/holiday.wav" ] || { echo "the sweep deleted a stranger's file"; return 1; }
+
+  # --keep-cache is the operator's override here too.
+  out=$("$STILL" render "$proj" --out "$WORK/ba.mp4" --voice en-US-JennyNeural \
+    --keep-cache 2>&1) || { echo "$out"; return 1; }
+  grep -q "swept" <<<"$out" && { echo "--keep-cache swept anyway"; return 1; }
+
+  unset SPOONSTILL_EDGE_TTS STUB_MP3
+  return 0
+}
+check "the audio cache is bounded, and nothing that cost a call is swept" gate_bounded_audio
+
+# --- gate 4g: a reorder costs nothing, and an old project is untouched ------
+# D-153. Moving one scene used to re-encode the whole film and change the Ken
+# Burns move on every scene the operator did not touch (D-140), because the
+# scene's *index* was in the motion seed and in the segment's filename.
+#
+# Both halves are asserted, and the second is the one that made this possible
+# to do at all: a project with no `motion_seed:` key is every folder made
+# before the key existed, and it must keep behaving exactly as it did.
+gate_reorder() {
+  local media="$WORK/reorder-media"
+  mkdir -p "$media"
+  local i
+  for i in 1 2 3 4 5 6; do
+    "$FFMPEG" -y -loglevel error -f lavfi -i "testsrc2=size=640x360:rate=1" \
+      -frames:v 1 -q:v "$i" "$media/p$i.jpg" || return 1
+    "$FFMPEG" -y -loglevel error -f lavfi -i "sine=frequency=$((300 + i * 40)):duration=1" \
+      -ar 48000 -ac 1 "$media/p$i.wav" || return 1
+  done
+
+  # `project_id` is the folder *basename* and it seeds the move (D-035), so the
+  # two projects must differ only in their settings — not in their name.
+  local new="$WORK/reorder/new/chapter" old="$WORK/reorder/old/chapter"
+  rm -rf "$WORK/reorder"; mkdir -p "$new" "$old"
+  for i in 1 2 3 4 5 6; do
+    cp "$media/p$i.jpg" "$new/00$i.jpg"; cp "$media/p$i.wav" "$new/00$i.wav"
+    cp "$media/p$i.jpg" "$old/00$i.jpg"; cp "$media/p$i.wav" "$old/00$i.wav"
+  done
+  printf 'output: film.mp4\nshort_edge: 360\nmotion_seed: v2\n' > "$new/project.yaml"
+  printf 'output: film.mp4\nshort_edge: 360\n'                  > "$old/project.yaml"
+
+  # The new rule: move a scene, and nothing re-encodes.
+  "$STILL" render "$new" --out "$WORK/r-new.mp4" --jobs 2 >/dev/null 2>&1 || return 1
+  "$STILL" move "$new" 006 1 >/dev/null 2>&1 || return 1
+  local out
+  out=$("$STILL" render "$new" --out "$WORK/r-new2.mp4" --jobs 2 2>&1) || { echo "$out"; return 1; }
+  grep -q "6 segments reused" <<<"$out" || {
+    echo "$out"; echo "a reorder re-encoded the film under motion_seed: v2"; return 1; }
+
+  # Six scenes still, in the new order: a reuse that dropped one would pass the
+  # line above and produce a shorter film.
+  grep -q "6 scenes, 180 frames" <<<"$out" || {
+    echo "$out"; echo "the film is not six one-second scenes"; return 1; }
+
+  # The old rule, deliberately unchanged: a project that says nothing about its
+  # seed keeps re-rendering, because the alternative is changing a film that
+  # has already been made.
+  "$STILL" render "$old" --out "$WORK/r-old.mp4" --jobs 2 >/dev/null 2>&1 || return 1
+  "$STILL" move "$old" 006 1 >/dev/null 2>&1 || return 1
+  out=$("$STILL" render "$old" --out "$WORK/r-old2.mp4" --jobs 2 2>&1) || { echo "$out"; return 1; }
+  grep -q "0 segments reused" <<<"$out" || {
+    echo "$out"
+    echo "a project with no motion_seed: key changed behaviour — an existing film would move"
+    return 1; }
+
+  # And `still new` says which rule it made the project under, so a folder is
+  # not silently on the old one forever.
+  rm -rf "$WORK/reorder-fresh"
+  "$STILL" new "$WORK/reorder-fresh" "$media/p1.jpg" >/dev/null 2>&1 || return 1
+  grep -q '^motion_seed: v2$' "$WORK/reorder-fresh/project.yaml" || {
+    echo "a new project does not declare its motion seed"; return 1; }
+
+  return 0
+}
+check "moving a scene re-encodes nothing, and an older project is unchanged" gate_reorder
 
 # --- gate 5: two renders of one project do not interleave -------------------
 # D-113. The lock is the operating system's, taken with `File::try_lock`, so
@@ -376,10 +556,15 @@ gate_hostile() {
   sar=$(ffprobe -v error -select_streams v:0 -show_entries stream=sample_aspect_ratio \
         -of csv=p=0 "$WORK/film.mp4")
   [ "$sar" = "1:1" ] || { echo "SAR is $sar, not 1:1 (D-033)"; return 1; }
-  ls "$RENDERABLE/.spoonstill/segments" | grep -qE '^seg-[0-9]{4}-[0-9a-f]{16}\.mp4$' || {
+  # `seg-<16 hex>.mp4` since D-153 — the scene index left the name, because a
+  # file named after where a scene sits cannot be reused when the scene moves.
+  ls "$RENDERABLE/.spoonstill/segments" | grep -qE '^seg-[0-9a-f]{16}\.mp4$' || {
     ls "$RENDERABLE/.spoonstill/segments"; return 1; }
-  # No operator spelling anywhere in the segment directory.
-  ! ls "$RENDERABLE/.spoonstill/segments" | grep -qv -E '^seg-[0-9]{4}-[0-9a-f]{16}\.mp4$'
+  # No operator spelling anywhere in the segment directory. This is what the
+  # gate is really for: the concat list is the one text format in the codebase,
+  # and it stays ASCII because the names are content-addressed rather than
+  # built from whatever the operator called their photograph (D-052).
+  ! ls "$RENDERABLE/.spoonstill/segments" | grep -qv -E '^seg-[0-9a-f]{16}\.mp4$'
 }
 check "odd dimensions and a Unicode filename survive the join" gate_hostile
 
@@ -540,6 +725,245 @@ gate_capacity() {
   return 0
 }
 check "four workers fit at 1080p and are warned about at 4K" gate_capacity
+
+# --- gate 7d: a photograph smaller than the frame is said out loud ----------
+# D-145. 699 of the author's 741 real scenes are 1376x768 stills going into a
+# 1920x1080 frame, and `still validate` reported "no problems" for every one of
+# them. Nothing caught it because every fixture in this repo is *larger* than
+# the frame — the only stills ever tested at size are the ones the author does
+# not use, which is the blind spot this gate exists to close.
+#
+# The round trip is the assertion: the warning names a `--short-edge`, and
+# rendering at that number must produce no warning. A message that names a size
+# which does not fix the thing it warns about is worse than no message.
+gate_undersized() {
+  local proj="$WORK/undersized"
+  mkdir -p "$proj"
+  # The author's real geometry, twice, plus one still that does cover the frame
+  # so the count in the message has to be a count rather than "all of them".
+  "$FFMPEG" -y -loglevel error -f lavfi -i "testsrc2=size=1376x768:rate=1" \
+    -frames:v 1 "$proj/001.jpg" || return 1
+  cp "$proj/001.jpg" "$proj/002.jpg" || return 1
+  cp fixtures/generated/land.jpg "$proj/003.jpg" || return 1
+
+  local out
+  out=$("$STILL" validate "$proj") || { echo "$out"; return 1; }
+  grep -q '2 of 3 stills are smaller than the 1920x1080 frame' <<<"$out" || {
+    echo "$out"; echo "no undersized warning at 1080p"; return 1; }
+  grep -q 'the smallest is scene 001 at 1376x768' <<<"$out" || {
+    echo "$out"; echo "the warning did not name the smallest still"; return 1; }
+  grep -q 'nothing here stops a render' <<<"$out" || {
+    echo "$out"; echo "an undersized still must be a warning, not an error"; return 1; }
+
+  # The number it offers, read out of the message rather than written here, so
+  # the gate cannot agree with the code by construction.
+  local edge
+  edge=$(sed -n 's/.*--short-edge \([0-9]*\).*/\1/p' <<<"$out" | head -1)
+  [ -n "$edge" ] || { echo "$out"; echo "the warning suggested no size"; return 1; }
+
+  printf 'short_edge: %s\n' "$edge" > "$proj/project.yaml"
+  out=$("$STILL" validate "$proj") || { echo "$out"; return 1; }
+  grep -q 'no problems' <<<"$out" || {
+    echo "$out"; echo "--short-edge $edge was suggested and does not silence it"; return 1; }
+
+  # And `still render` prints warnings at all, which it never did before D-145.
+  rm -f "$proj/project.yaml"
+  "$STILL" render "$proj" --out "$WORK/undersized.mp4" --jobs 2 >"$WORK/u.log" 2>&1 || {
+    cat "$WORK/u.log"; return 1; }
+  grep -q 'warning:.*smaller than the 1920x1080 frame' "$WORK/u.log" || {
+    cat "$WORK/u.log"; echo "still render discarded the warning list"; return 1; }
+  # Said before the pool, because a line under five minutes of progress output
+  # is a line nobody reads (D-144's rule, applied to this warning).
+  local warn_line first_scene
+  warn_line=$(grep -n 'warning:' "$WORK/u.log" | head -1 | cut -d: -f1)
+  first_scene=$(grep -n 'done\]' "$WORK/u.log" | head -1 | cut -d: -f1)
+  [ -n "$first_scene" ] && [ "$warn_line" -lt "$first_scene" ] || {
+    cat "$WORK/u.log"; echo "the warning arrived after the pool started"; return 1; }
+
+  rm -rf "$proj/$STATE"
+  return 0
+}
+check "an undersized still warns, names a size, and that size silences it" gate_undersized
+
+# --- gate 7e: narration and rendering overlap -------------------------------
+# D-146. In 4531 rows of the author's production log the two phases never once
+# overlapped: 78 s of a 320 s render had ten cores idle while `edge-tts` waited
+# on the network, and then the network was idle for the 228 s of encoding.
+#
+# The voice service is stood in for by a script that sleeps and then answers,
+# because that is what a network is from this program's point of view — waiting,
+# not computing — and because a gate that depends on somebody else's service is
+# a gate that fails on their afternoon (D-134's rule).
+#
+# What is asserted is an *ordering of events*, never a wall-clock number: a
+# shared runner is slow for reasons that are not defects.
+gate_overlap() {
+  local proj="$WORK/overlap"
+  mkdir -p "$proj"
+  printf 'output: film.mp4\naspect: 16:9\nshort_edge: 540\nfps: 30\n' > "$proj/project.yaml"
+  local i
+  for i in 1 2 3 4 5 6; do
+    cp fixtures/generated/land.jpg "$proj/00$i.jpg" || return 1
+    printf 'Scene number %s, spoken aloud.\n' "$i" > "$proj/00$i.txt"
+  done
+
+  stub_voice_service 1 || return 1
+
+  "$STILL" render "$proj" --out "$WORK/overlap.mp4" --jobs 2 --audio-jobs 1 \
+    >"$WORK/overlap.log" 2>&1 || { cat "$WORK/overlap.log"; return 1; }
+
+  # The barrier, stated as a line number: with two phases, every narration is
+  # reported before the first segment. Overlapped, at least one narration is
+  # reported after it.
+  local first_segment last_audio
+  first_segment=$(grep -n 'done\]' "$WORK/overlap.log" | head -1 | cut -d: -f1)
+  last_audio=$(grep -n '^  audio ' "$WORK/overlap.log" | tail -1 | cut -d: -f1)
+  [ -n "$first_segment" ] && [ -n "$last_audio" ] || {
+    cat "$WORK/overlap.log"; echo "no audio or no segment events"; return 1; }
+  [ "$last_audio" -gt "$first_segment" ] || {
+    cat "$WORK/overlap.log"
+    echo "every narration finished before the first segment — the phases did not overlap"
+    return 1; }
+
+  # Six scenes went in and six came out: an overlap that dropped one would
+  # otherwise pass the ordering check above.
+  grep -q '6 scenes, 360 frames' "$WORK/overlap.log" || {
+    cat "$WORK/overlap.log"; echo "the film is not six two-second scenes"; return 1; }
+
+  # And the overlap changes the timing and nothing else (D-077). A separate
+  # copy, so this is a cold render rather than a cache hit, at a different pair
+  # of job counts.
+  #
+  # The copy keeps the **same folder name** in a different parent: `project_id`
+  # is the basename and it seeds the Ken Burns move (D-035), so a twin called
+  # `overlap-twin` renders different motion on purpose and this comparison
+  # would fail for a reason that is not a defect. Found by writing it wrong.
+  local twin="$WORK/twin/overlap"
+  rm -rf "$WORK/twin"; mkdir -p "$WORK/twin"; cp -R "$proj" "$twin"
+  rm -rf "$twin/$STATE"
+  "$STILL" render "$twin" --out "$WORK/overlap-twin.mp4" --jobs 1 --audio-jobs 4 \
+    >"$WORK/overlap-twin.log" 2>&1 || { cat "$WORK/overlap-twin.log"; return 1; }
+  cmp -s "$WORK/overlap.mp4" "$WORK/overlap-twin.mp4" || {
+    echo "two pipelined runs at different job counts produced different films"; return 1; }
+
+  unset SPOONSTILL_EDGE_TTS STUB_MP3
+  return 0
+}
+check "narration and rendering overlap, and the film is unchanged by it" gate_overlap
+
+# --- gate 7f: every command is written down, not just renders ---------------
+# D-148. The machine-wide `runs.csv` was built *inside* `render_project`, so for
+# five months it held renders and nothing else: `validate`, `new`, `add`,
+# `voices`, `doctor`, `remove`, `move` and the entire window wrote to it not at
+# all. The failure the author reported on 2026-08-31 (D-141) is absent from a
+# file that has 1508 rows for that day.
+#
+# `HOME` is redirected so this writes into `$WORK` and not into the operator's
+# own activity log — the index lives under `~/Library/Application Support` on
+# this platform, which is also why this gate is macOS-only like the rest.
+gate_journal() {
+  local home="$WORK/journal-home" proj="$WORK/journal-project"
+  local csv="$home/Library/Application Support/spoonstill/runs.csv"
+  rm -rf "$home" "$proj"; mkdir -p "$home" "$proj"
+  printf 'output: film.mp4\naspect: 16:9\nshort_edge: 540\nfps: 30\n' > "$proj/project.yaml"
+  cp fixtures/generated/land.jpg "$proj/001.jpg" || return 1
+
+  HOME="$home" "$STILL" validate "$proj" >/dev/null 2>&1 || return 1
+  HOME="$home" "$STILL" subtitles >/dev/null 2>&1 || return 1
+  # A failure, which is the whole reason the file exists.
+  HOME="$home" "$STILL" validate "$WORK/no-such-folder" >/dev/null 2>&1 && {
+    echo "validate on a missing folder reported success"; return 1; }
+
+  [ -f "$csv" ] || { echo "nothing was written to runs.csv at all"; return 1; }
+
+  # A project command, a machine-level command, and a failure carrying the
+  # sentence the operator saw.
+  grep -q '","validate","journal-project","command finished"' "$csv" || {
+    echo "validate is not in the log:"; cat "$csv"; return 1; }
+  grep -q '","subtitles","","command finished"' "$csv" || {
+    echo "a machine-level command is not in the log:"; cat "$csv"; return 1; }
+  grep -q '"error","validate",.*"command failed"' "$csv" || {
+    echo "a failed command is not in the log:"; cat "$csv"; return 1; }
+
+  # Asking about a folder is not adopting it.
+  [ -e "$WORK/no-such-folder" ] && { echo "validate created the folder it refused"; return 1; }
+
+  # And a render still writes what D-093 asked for — the wrapper's row *and*
+  # the detailed events, in both files.
+  HOME="$home" "$STILL" render "$proj" --out "$WORK/journal.mp4" >/dev/null 2>&1 || return 1
+  grep -q '","render","journal-project","command finished"' "$csv" || {
+    echo "the render command itself is not in the log"; return 1; }
+  grep -q '"film complete"' "$csv" || {
+    echo "the render's own events stopped reaching runs.csv"; return 1; }
+  grep -q '"film complete"' "$proj/$STATE/logs/"*.jsonl || {
+    echo "the render's own events stopped reaching the project log"; return 1; }
+
+  return 0
+}
+check "every command reaches the activity log, not only renders" gate_journal
+
+# --- gate 7g: a render never writes to project.yaml -------------------------
+# D-013, and plan.md §M3 asks for exactly this: *"`project.yaml` is never
+# written to. A test asserts its mtime and hash are unchanged after a full
+# render."* `settings.rs`'s own module note has promised this gate since M2 and
+# it did not exist.
+#
+# It matters more since D-153, not less: `still new` now writes a starter
+# `project.yaml`, so "this program does not write that file" became "this
+# program writes it exactly once, when it creates the folder, and never again".
+# The second half is the one an operator's edits depend on.
+gate_settings_untouched() {
+  local proj="$WORK/untouched"
+  rm -rf "$proj"; mkdir -p "$proj"
+  cp fixtures/generated/land.jpg "$proj/001.jpg" || return 1
+  cp fixtures/generated/land.jpg "$proj/002.jpg" || return 1
+  "$FFMPEG" -y -loglevel error -f lavfi -i "sine=frequency=440:duration=1" \
+    -ar 48000 -ac 1 "$proj/001.wav" || return 1
+
+  # Written by hand, with a comment and an ordering no writer of ours would
+  # reproduce — so a rewrite is visible even if it happened to keep the values.
+  cat > "$proj/project.yaml" <<'YAML'
+# the operator's own file, in the operator's own order
+short_edge: 360
+output: film.mp4
+fps: 30
+YAML
+
+  local before_hash before_time
+  before_hash=$(shasum -a 256 "$proj/project.yaml" | cut -d' ' -f1)
+  before_time=$(stat -f %m "$proj/project.yaml")
+
+  # Everything that touches a project: validate, add media, render, render
+  # again from cache, and rearrange the scenes.
+  "$STILL" validate "$proj" >/dev/null 2>&1 || return 1
+  "$STILL" add "$proj" fixtures/generated/square.jpg >/dev/null 2>&1 || return 1
+  "$STILL" render "$proj" --out "$WORK/untouched.mp4" --jobs 2 >/dev/null 2>&1 || return 1
+  "$STILL" render "$proj" --out "$WORK/untouched.mp4" --jobs 2 >/dev/null 2>&1 || return 1
+  "$STILL" move "$proj" 002 1 >/dev/null 2>&1 || return 1
+  "$STILL" remove "$proj" 003 >/dev/null 2>&1 || return 1
+
+  local after_hash after_time
+  after_hash=$(shasum -a 256 "$proj/project.yaml" | cut -d' ' -f1)
+  after_time=$(stat -f %m "$proj/project.yaml")
+
+  [ "$before_hash" = "$after_hash" ] || {
+    echo "project.yaml was rewritten:"; diff <(echo "$before_hash") <(echo "$after_hash")
+    cat "$proj/project.yaml"; return 1; }
+  [ "$before_time" = "$after_time" ] || {
+    echo "project.yaml's mtime moved from $before_time to $after_time — something opened it for writing"
+    return 1; }
+
+  # And the settings really were read: a gate that passes because the file was
+  # ignored would assert nothing at all.
+  local out
+  out=$("$STILL" validate "$proj" 2>&1) || { echo "$out"; return 1; }
+  "$FFPROBE" -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 \
+    "$WORK/untouched.mp4" | grep -qx 360 || {
+    echo "the film is not 360 high, so short_edge: 360 was never read"; return 1; }
+
+  return 0
+}
+check "a render never writes to project.yaml" gate_settings_untouched
 
 # --- gates 8 and 9: the two cargo gates plan.md names -----------------------
 check "cargo test -p spoonstill-app validation" \

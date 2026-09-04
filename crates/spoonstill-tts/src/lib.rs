@@ -88,6 +88,15 @@ pub struct Spoken {
     /// The command or endpoint used, with the text redacted — safe to log
     /// (D-016).
     pub how: String,
+    /// The voice that actually spoke, resolved (D-151).
+    ///
+    /// **Not the voice the caller asked for.** `default` is not a voice
+    /// (D-086), and a provider resolves it to a real name before it speaks — so
+    /// a log recording the request said `voice=default` on 200 rows whose own
+    /// argv, on the same row, said `--voice en-US-AvaNeural`. The resolution
+    /// belongs to the provider, so the answer comes back from the provider
+    /// rather than being worked out a second time by the caller.
+    pub voice: String,
 }
 
 /// Whether a provider can be used right now, and if not, what to do about it.

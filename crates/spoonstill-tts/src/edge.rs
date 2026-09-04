@@ -898,7 +898,11 @@ impl Edge {
             )));
         }
 
-        Ok(Spoken { bytes, how })
+        Ok(Spoken {
+            bytes,
+            how,
+            voice: voice.to_owned(),
+        })
     }
 
     /// One piece of a line: write it, say it, retry it if the service faltered.
@@ -1157,6 +1161,7 @@ impl Provider for Edge {
         let mut spoken = Spoken {
             bytes: 0,
             how: String::new(),
+            voice: voice.to_owned(),
         };
 
         for (index, piece) in pieces.iter().enumerate() {
@@ -1832,6 +1837,7 @@ aiohttp.client_exceptions.ClientConnectorDNSError: Cannot connect to host speech
     #[test]
     fn a_bad_voice_is_reported_as_a_bad_voice_and_not_as_a_traceback() {
         let error = spoonstill_media::MediaError::Exit {
+            program: "edge-tts".to_owned(),
             command: "edge-tts".to_owned(),
             code: Some(1),
             stderr: BAD_VOICE.to_owned(),
@@ -1853,6 +1859,7 @@ aiohttp.client_exceptions.ClientConnectorDNSError: Cannot connect to host speech
     #[test]
     fn a_line_with_nothing_speakable_in_it_names_the_line_and_the_cause() {
         let error = spoonstill_media::MediaError::Exit {
+            program: "edge-tts".to_owned(),
             command: "edge-tts".to_owned(),
             code: Some(1),
             stderr: NO_AUDIO.to_owned(),
@@ -2073,6 +2080,7 @@ aiohttp.client_exceptions.ClientConnectorDNSError: Cannot connect to host speech
     #[test]
     fn no_audio_is_permanent_for_a_caption_and_transient_for_a_paragraph() {
         let error = || spoonstill_media::MediaError::Exit {
+            program: "edge-tts".to_owned(),
             command: "edge-tts".to_owned(),
             code: Some(1),
             stderr: NO_AUDIO.to_owned(),

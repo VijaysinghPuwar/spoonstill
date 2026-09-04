@@ -64,7 +64,7 @@ you have. The one-line installer below works that out for the command line too.
 > What has **not** happened is a person sitting at a Windows desktop and running
 > the packaged app. `spoonstill-Windows-Installer.exe` and the PowerShell
 > one-liner are built and shipped by CI but have never been executed by anyone,
-> here or in CI (D-128). The 30 `make gates` checks are macOS-only. Every
+> here or in CI (D-128). The 37 `make gates` checks are macOS-only. Every
 > performance number in [`ffmpeg-findings.md`](ffmpeg-findings.md) is macOS
 > arm64 and none of it has been measured on Windows.
 >
@@ -330,7 +330,7 @@ make fixtures   # synthesize the test media
 make gates      # every milestone's exit gates — the real state of the build
 ```
 
-`make gates` is the honest answer to "does this work?". It runs 31 checks
+`make gates` is the honest answer to "does this work?". It runs 37 checks
 across M0, M1 and M2 and prints pass/fail for each.
 
 ---
@@ -377,7 +377,7 @@ subtitles, [D-143](decisions.md) for sizes and shapes.
 |---|---|
 | **M0** scaffolding, architecture boundary | complete — 8/8 gates |
 | **M1** one scene, end to end | complete — 8/8 gates |
-| **M2** whole projects: import, validation, speech, parallel render | complete — 15/15 gates |
+| **M2** whole projects: import, validation, speech, parallel render | complete — 21/21 gates |
 | **M3** state database, resumable queue | next |
 | **M4** the Tauri window | shell exists, ahead of schedule |
 | **M5** signing, notarization, bundled FFmpeg, auto-update | not started |

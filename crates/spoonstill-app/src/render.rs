@@ -13,7 +13,6 @@ use spoonstill_core::diagnostics::{Diagnostics, Event};
 use spoonstill_core::{Aspect, MotionSpec, OutputSpec};
 use spoonstill_media::scene::{Cancel, EncodeSettings, RenderedScene, SceneRequest};
 use spoonstill_media::{MediaError, Progress, Tools};
-use spoonstill_state::FileLog;
 
 /// What the caller asked for, before any of it has been resolved.
 #[derive(Debug, Clone)]
@@ -141,13 +140,12 @@ pub fn render_scene(
 
     // The log is opened before the render, not after a failure — the whole
     // point is that the machine wrote things down while it was going wrong.
+    // Both sinks, not just the folder's own (D-148). `still render-scene` used
+    // to write only into the project it wrote its segment beside, so a scene
+    // that failed here was invisible in the file D-093 says to open.
     let root = state_root_for(&options.out);
-    let log = FileLog::open(&root).ok();
-    let sink: &dyn Diagnostics = log
-        .as_ref()
-        .map_or(&spoonstill_core::diagnostics::Noop, |l| {
-            l as &dyn Diagnostics
-        });
+    let journal = spoonstill_state::Journal::for_project(&root);
+    let sink: &dyn Diagnostics = &journal;
 
     sink.record(
         &Event::info("cli", "render-scene invoked")

@@ -653,7 +653,7 @@ function editNarration(scene, cell) {
   input.addEventListener("blur", () => finish(true));
 }
 
-// Move a scene, or take it out (D-099).
+// Move a scene, or take it out (D-100).
 //
 // Only under the folder convention: there, the scene's *number is* its
 // position, so reordering means renaming files and spoonstill owns that
@@ -1444,6 +1444,13 @@ async function render() {
           `and this machine should spare about ${event.budget}. ${fix}`,
         true,
       );
+      return;
+    }
+    if (event.kind === "warned") {
+      // Everything `still validate` would have said and this screen used to
+      // discard — an enlarged photograph, a recording paired with nothing.
+      // Before the pool, so it is not buried under five minutes of progress.
+      note(`warning: ${event.detail}`, true);
       return;
     }
     if (event.kind === "joining") {

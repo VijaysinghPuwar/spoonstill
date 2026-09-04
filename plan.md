@@ -298,7 +298,7 @@ own decisions. Where a slice is done, the exit gate it satisfies is named.
 |---|---|---|
 | **1. The pure domain** | `spoonstill_core::path_safety` + `spoonstill_core::project`: containment, the scene model, and every validation rule that needs no disk. D-054, D-055. | ✅ 2026-08-26 — satisfies `cargo test -p spoonstill-core path_safety` |
 | **2. Import and `still validate`** | `project.yaml` and the CSV manifest, convention-mode stem pairing, path resolution and media probing merged into one problem list, `still validate` printing it. D-056. | ✅ 2026-08-26 — satisfies `still validate fixtures/projects/mixed/` |
-| **3. The three audio sources, and `still render`** | `AudioSource::resolve()` → `(normalized_path, Duration)`: ingest normalization to 48 kHz stereo, `ffprobe` on the normalized artifact, generated silence. Then `still render DIR` over a whole project — **parallel**, with two bounded pools. D-075, D-076, D-077, D-078. | ✅ 2026-08-26 — `make gates-m2` is 14/14 |
+| **3. The three audio sources, and `still render`** | `AudioSource::resolve()` → `(normalized_path, Duration)`: ingest normalization to 48 kHz stereo, `ffprobe` on the normalized artifact, generated silence. Then `still render DIR` over a whole project — **parallel**, with two bounded pools. D-075, D-076, D-077, D-078. | ✅ 2026-08-26 — `make gates-m2` is 20/20 |
 | **4. Speech behind a trait** | `spoonstill-tts`: the `Provider` trait, typed settings and errors, and the `edge` implementation — `edge-tts` through the one process boundary, cached under `hash(text, provider, voice, settings, profile)`. `still voices`, `--voice`. D-081, D-082. ElevenLabs is deferred, not cancelled. | ✅ 2026-08-26 — gate 7 renders `mixed/` |
 | **+ Getting media in** | Not in the original four. `spoonstill_app::ingest`, `still new`, `still add`: the operator drops what they have and the program names and pairs it. D-080. | ✅ 2026-08-26 |
 
@@ -423,8 +423,10 @@ Slice 4 notes:
 
 ### Exit gates
 
-`make gates-m2` runs all of these. **14/14 pass as of 2026-09-02**, slice 4
-included, and D-143's size and shape gate with them.
+`make gates-m2` runs all of these. **20/20 pass as of 2026-09-04**, slice 4
+included, and D-143's size and shape gate, D-144's capacity gate, D-145's
+undersized-source gate, D-146's overlap gate, D-147's audio-cache bound and D-148's
+activity-log gate with them.
 
 ```bash
 still validate fixtures/projects/mixed/     # 3 scenes, 3 sources, 0 warnings
@@ -609,6 +611,25 @@ cargo test -p spoonstill-app cancel_leaves_no_partial_segment
 Record the wall time and peak RSS from gate 1 in this file. A number nobody
 wrote down is a number nobody can regress against.
 
+**Measured 2026-09-04 (D-154).** 500 scenes, 1920x1080, `--jobs 4`, supplied
+narration, on the ten-core machine every other number here comes from:
+
+| | |
+|---|---|
+| cold render, three runs | **161 s, 151 s, 154 s** |
+| peak resident, all children | **2873 MB** |
+| film | 30 000 frames, 1000.021 s against 1000.000 expected |
+| all three cold films | byte-identical |
+| killed at 60 s (167 of 500 done), then resumed | **167 reused**, 105 s, film identical to a clean run |
+| one narration edited | **499 of 500 reused** |
+
+**Gates 1, 2, 3 and 4 pass on the tree as it stands, with no state database** —
+resume falls out of D-043's content-addressed cache rather than out of anything
+that remembers. Gates 5 and 6 exist as tests under other names
+(`profile.rs`'s per-field assertions; `cancellation_leaves_no_valid_looking_stub`).
+What M3 still owes is the database **as an index for reporting**, transitions
+(D-057), and an integration test for gate 5. Read D-154 before starting it.
+
 ### Risks
 
 - **Determinism is easy to lose and hard to notice.** Any unseeded choice, any
@@ -763,8 +784,8 @@ Updated **2026-08-30**, after an external audit was worked through end to end.
 
 **The audit is closed.** Twenty-six decisions, D-107 through D-132 — the list
 is in `CLAUDE.md` under "State as of 2026-08-30", and each decision carries its
-own reproduction. `make gates` is 8/8, 8/8, 14/14; `cargo test --workspace` is
-462; `cargo audit --deny warnings` is new and green. Nothing it found changes
+own reproduction. `make gates` is 8/8, 8/8, 20/20; `cargo test --workspace` is
+558; `cargo audit --deny warnings` is new and green. Nothing it found changes
 M3's shape, and M3 has still not been started.
 
 **D-132 was not in the audit — it came from checking the audit.** Building the

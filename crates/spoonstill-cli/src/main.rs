@@ -15,6 +15,7 @@ use spoonstill_app::film::{FilmEvent, SerialEvents};
 use spoonstill_app::render::RenderSceneOptions;
 use spoonstill_app::surface::{Cancel, EncodeSettings};
 use spoonstill_core::captions::{Placement, SubtitleTheme};
+use spoonstill_core::diagnostics::{Diagnostics, Event};
 use spoonstill_core::{Anchor, Aspect, MotionKind, MotionSpec};
 
 #[derive(Debug, Parser)]
@@ -38,9 +39,9 @@ enum Command {
     New(NewArgs),
     /// Copy photos and recordings into a project, numbered and paired.
     Add(AddArgs),
-    /// Take a scene out of a project, keeping its files (D-099).
+    /// Take a scene out of a project, keeping its files (D-100).
     Remove(RemoveArgs),
-    /// Move a scene to another position in the film (D-099).
+    /// Move a scene to another position in the film (D-100).
     Move(MoveArgs),
     /// Check a project folder and report every problem at once.
     Validate(ValidateArgs),
@@ -377,8 +378,93 @@ fn main() -> ExitCode {
     }
 }
 
+/// Run one command, and write down that it ran (D-148).
+///
+/// **One place, above every command**, rather than a line in each: this is
+/// exactly the shape D-093 asked for and did not get. The machine-wide
+/// `runs.csv` was built *inside* `render_project`, so for five months it held
+/// renders and nothing else — `validate`, `new`, `add`, `voices`, `doctor`,
+/// `remove` and `move` all wrote to it not at all. The failure the author
+/// actually reported (D-141, a Voice screen full of Python) left no trace in
+/// the file whose whole purpose is answering "what went wrong just now".
+///
+/// Two rows per command, not one. The `invoked` row is what says a command
+/// **started and never came back** — a hang, a crash, a machine that froze —
+/// which is precisely how D-144 was diagnosed: `runs.csv` ended mid-render
+/// with four children started and no completion.
+///
+/// Silent on failure, by design, and the journal itself enforces that: a
+/// command must never fail because a log could not be written (D-093).
 fn run(cli: Cli) -> Result<(), String> {
-    match cli.command {
+    let scope = cli.command.scope();
+    let journal = spoonstill_app::Journal::for_surface(cli.command.project());
+    journal.record(&Event::info(scope, "command invoked"));
+
+    let outcome = dispatch(cli.command);
+
+    match &outcome {
+        Ok(()) => journal.record(&Event::info(scope, "command finished")),
+        Err(detail) => {
+            journal.record(&Event::error(scope, "command failed").with("detail", detail.clone()))
+        }
+    }
+    outcome
+}
+
+impl Command {
+    /// The word this command is logged under — its own name, and stable.
+    ///
+    /// `&'static str` rather than something derived from `clap`, because a
+    /// scope that changed when a help string was reworded would make a
+    /// six-month-old `runs.csv` unfilterable.
+    const fn scope(&self) -> &'static str {
+        match self {
+            Command::New(_) => "new",
+            Command::Add(_) => "add",
+            Command::Remove(_) => "remove",
+            Command::Move(_) => "move",
+            Command::Validate(_) => "validate",
+            Command::Voices(_) => "voices",
+            Command::Subtitles => "subtitles",
+            Command::Resolutions => "resolutions",
+            Command::Licences => "licences",
+            Command::Doctor(_) => "doctor",
+            Command::Render(_) => "render",
+            Command::RenderScene(_) => "render-scene",
+            Command::Diagnostics(_) => "diagnostics",
+        }
+    }
+
+    /// The project this command is about, when it is about one.
+    ///
+    /// `None` for the machine-level commands — `doctor`, `voices` and the
+    /// listings — whose two project columns are then left empty rather than
+    /// filled with a guess.
+    fn project(&self) -> Option<&std::path::Path> {
+        match self {
+            Command::New(a) => Some(&a.project),
+            Command::Add(a) => Some(&a.project),
+            Command::Remove(a) => Some(&a.project),
+            Command::Move(a) => Some(&a.project),
+            Command::Validate(a) => Some(&a.project),
+            Command::Render(a) => Some(&a.project),
+            Command::Diagnostics(
+                DiagnosticsCommand::Export { project, .. } | DiagnosticsCommand::Where { project },
+            ) => project.as_deref(),
+            // `render-scene` renders one segment and names no folder; its own
+            // log goes beside the file it writes (`state_root_for`).
+            Command::RenderScene(_)
+            | Command::Voices(_)
+            | Command::Subtitles
+            | Command::Resolutions
+            | Command::Licences
+            | Command::Doctor(_) => None,
+        }
+    }
+}
+
+fn dispatch(command: Command) -> Result<(), String> {
+    match command {
         Command::New(args) => new_project(args),
         Command::Add(args) => add_media(&args.project, &args.media),
         Command::Remove(args) => remove_scenes(&args.project, &args.scenes),
@@ -421,7 +507,7 @@ fn new_project(args: NewArgs) -> Result<(), String> {
 ///
 /// Prints what each file became, because renaming someone's files for them is
 /// only acceptable if they can see exactly what happened (D-080).
-/// `still remove DIR SCENE...` — take scenes out, keeping their files (D-099).
+/// `still remove DIR SCENE...` — take scenes out, keeping their files (D-100).
 ///
 /// Several at once, and **highest first**: removing 002 renumbers everything
 /// after it, so `still remove p 002 005` would otherwise take 002 and then
@@ -458,11 +544,27 @@ fn remove_scenes(root: &std::path::Path, ids: &[String]) -> Result<(), String> {
 
 /// `still move DIR SCENE POSITION` — put a scene somewhere else in the film.
 fn move_scene(root: &std::path::Path, id: &str, to: usize) -> Result<(), String> {
-    let after = spoonstill_app::arrange::move_to(root, id, to).map_err(|e| e.to_string())?;
-    let landed = to.max(1).min(after.len());
-    println!("  scene {id} is now {landed} of {}", after.len());
-    for scene in &after {
-        println!("  {:<8} {}", scene.id, name_of(&scene.files[0]));
+    let moved = spoonstill_app::arrange::move_to(root, id, to).map_err(|e| e.to_string())?;
+
+    // What moved, and where — not the scene list, every row of which reads
+    // `00N  00N.jpg` after a renumber and so confirms nothing (D-150).
+    println!(
+        "  {} → {}   moved from {} to {} of {}",
+        moved.was,
+        moved.now,
+        moved.from,
+        moved.to,
+        moved.scenes.len()
+    );
+    for file in &moved.files {
+        println!("           {}", name_of(file));
+    }
+    let renumbered = moved.from.abs_diff(moved.to);
+    if renumbered > 0 {
+        println!(
+            "  {renumbered} scene{} between them were renumbered.",
+            if renumbered == 1 { " was" } else { "s" }
+        );
     }
     Ok(())
 }
@@ -471,8 +573,16 @@ fn add_media(root: &std::path::Path, media: &[PathBuf]) -> Result<(), String> {
     let report = spoonstill_app::add_media(root, media).map_err(|e| e.to_string())?;
 
     for image in &report.images {
+        // A `.txt` beside a recording is the scene's caption (D-106), and this
+        // arm used to drop it — so the operator could not see that it had
+        // arrived at all (D-150).
         let narration = match (report.narration_for(image), report.script_for(image)) {
-            (Some(audio), _) => name_of(&audio.source),
+            (Some(audio), Some(caption)) => format!(
+                "{}  +  {} (caption)",
+                name_of(&audio.source),
+                name_of(&caption.source)
+            ),
+            (Some(audio), None) => name_of(&audio.source),
             (None, Some(script)) => format!("{} (spoken)", name_of(&script.source)),
             (None, None) => "silent".to_owned(),
         };
@@ -544,6 +654,12 @@ fn doctor(args: &DoctorArgs) -> Result<(), String> {
     for tool in spoonstill_app::tooling::check_all() {
         if tool.ready {
             println!("  ok       {} — {}", tool.id, tool.purpose);
+            // Which build, not just whether there is one (D-151). The version
+            // is the first thing a report from a stranger's machine is checked
+            // against, and until now no surface printed it.
+            if let Some(version) = tool.version.as_deref() {
+                println!("           {version}");
+            }
             continue;
         }
 
@@ -732,8 +848,14 @@ fn validate(args: ValidateArgs) -> Result<(), String> {
 struct SkipProbe;
 
 impl spoonstill_app::MediaCheck for SkipProbe {
-    fn check(&self, _path: &std::path::Path, _role: spoonstill_app::Role) -> Result<(), String> {
-        Ok(())
+    fn check(
+        &self,
+        _path: &std::path::Path,
+        _role: spoonstill_app::Role,
+    ) -> Result<Option<spoonstill_core::SourceGeometry>, String> {
+        // Nothing is measured, so nothing is known — including how big the
+        // stills are, which is why `--no-probe` produces no F-13 warning.
+        Ok(None)
     }
 }
 
@@ -965,6 +1087,12 @@ fn render_project(args: RenderArgs) -> Result<(), String> {
                 );
             }
         }
+        FilmEvent::Warned { detail } => {
+            // Before the pool, and on stderr beside the memory warning: this
+            // is everything `still validate` prints that does not stop a run,
+            // and `still render` used to print none of it (F-13).
+            eprintln!("  warning: {detail}");
+        }
         FilmEvent::Audio {
             id,
             kind,
@@ -1030,7 +1158,8 @@ fn render_project(args: RenderArgs) -> Result<(), String> {
     );
     if film.freed_bytes > 0 {
         println!(
-            "  swept {} of superseded segments (--keep-cache keeps them)",
+            "  swept {} of superseded segments and normalized audio \
+             (--keep-cache keeps them)",
             human_bytes(film.freed_bytes)
         );
     }
@@ -1174,21 +1303,10 @@ fn show_log_location(project: Option<PathBuf>) -> Result<(), String> {
 
     println!("{}", dir.display());
 
-    // And the machine-wide one, which is the file to open when the question is
-    // "what went wrong" rather than "what went wrong in this project" (D-093).
-    if let Some(index) = spoonstill_app::runs_index_path() {
-        let size = std::fs::metadata(&index).map(|m| m.len()).unwrap_or(0);
-        println!(
-            "{}   every project, {}",
-            index.display(),
-            if size == 0 {
-                "nothing recorded yet".to_owned()
-            } else {
-                format!("{} KB", size / 1024)
-            }
-        );
-    }
-
+    // The project's own log and its status, together (D-150). This block used
+    // to sit *after* the machine-wide line below, so `(not created yet)` read
+    // as belonging to `runs.csv` — a file the very same line had just reported
+    // the size of.
     if dir.exists() {
         let mut files: Vec<_> = std::fs::read_dir(&dir)
             .map_err(|e| format!("could not read {}: {e}", dir.display()))?
@@ -1203,8 +1321,24 @@ fn show_log_location(project: Option<PathBuf>) -> Result<(), String> {
             println!("  (empty)");
         }
     } else {
-        println!("  (not created yet — it appears on the first render)");
+        println!("  (not created yet — it appears the first time this folder is used)");
     }
+
+    // And the machine-wide one, which is the file to open when the question is
+    // "what went wrong" rather than "what went wrong in this project" (D-093).
+    if let Some(index) = spoonstill_app::runs_index_path() {
+        let size = std::fs::metadata(&index).map(|m| m.len()).unwrap_or(0);
+        println!(
+            "{}   every project, {}",
+            index.display(),
+            if size == 0 {
+                "nothing recorded yet".to_owned()
+            } else {
+                human_bytes(size)
+            }
+        );
+    }
+
     println!();
     println!("`still diagnostics export` packages these into one file to send.");
     Ok(())

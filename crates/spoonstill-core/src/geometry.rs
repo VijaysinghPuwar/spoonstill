@@ -503,6 +503,69 @@ impl SourceGeometry {
     pub const fn has_square_pixels(&self) -> bool {
         self.sar_num == self.sar_den
     }
+
+    /// Source width in **display** pixels — stored width corrected for SAR.
+    ///
+    /// This, not [`Self::width`], is what D-034's cover-fit sees: an
+    /// anamorphic source is squared up by the leading correction in the filter
+    /// chain before anything is scaled, so a 720x576 frame at 16:15 covers
+    /// 768 pixels of frame and not 720.
+    #[must_use]
+    pub fn display_width(&self) -> u32 {
+        let scaled = u64::from(self.width) * u64::from(self.sar_num) / u64::from(self.sar_den);
+        u32::try_from(scaled).unwrap_or(u32::MAX)
+    }
+
+    /// Source height in display pixels. SAR is horizontal, so this is the
+    /// stored height — named for symmetry, so a caller never has to remember
+    /// which of the two the ratio applies to.
+    #[must_use]
+    pub const fn display_height(&self) -> u32 {
+        self.height
+    }
+
+    /// Whether this source covers `out` without being enlarged (D-034).
+    ///
+    /// Cover-fit scales the source until it fills the frame in both axes, so
+    /// it is enlarged unless it is at least as wide **and** at least as tall
+    /// as the frame. `true` means every output pixel comes from at least one
+    /// source pixel; `false` means the film is an upscale of the photograph.
+    ///
+    /// Deliberately ignores the Ken Burns zoom, which samples a sub-region and
+    /// so enlarges further: this answers "is the frame itself an upscale",
+    /// which is the question an operator can act on by choosing a size.
+    #[must_use]
+    pub fn fills(&self, out: &OutputSpec) -> bool {
+        self.display_width() >= out.width() && self.display_height() >= out.height()
+    }
+
+    /// The largest output short edge this source covers without being enlarged.
+    ///
+    /// Rounded **down** to a short edge [`OutputSpec::new`] accepts in that
+    /// aspect — a multiple of 18 for the two 16:9 shapes, which is what "even
+    /// and divisible by 9" comes to, and a multiple of 2 for square. `0` means
+    /// no legal size renders this source natively.
+    ///
+    /// The answer is per aspect because the frame's shape decides which edge
+    /// binds: a 1376x768 still is 756 landscape and 432 portrait, because
+    /// portrait asks its 768 pixels of height to carry the *long* edge.
+    #[must_use]
+    pub fn native_short_edge(&self, aspect: Aspect) -> u32 {
+        let dw = u64::from(self.display_width());
+        let dh = u64::from(self.display_height());
+        // `s` is the short edge; the long edge is `s * 16 / 9` in the two 16:9
+        // shapes. Both edges have to fit, so the answer is the smaller bound.
+        let raw = match aspect {
+            Aspect::Landscape16x9 => core::cmp::min(dw * 9 / 16, dh),
+            Aspect::Portrait9x16 => core::cmp::min(dw, dh * 9 / 16),
+            Aspect::Square1x1 => core::cmp::min(dw, dh),
+        };
+        let step = match aspect {
+            Aspect::Landscape16x9 | Aspect::Portrait9x16 => 18,
+            Aspect::Square1x1 => 2,
+        };
+        u32::try_from(raw / step * step).unwrap_or(u32::MAX)
+    }
 }
 
 #[cfg(test)]
@@ -786,5 +849,86 @@ mod tests {
                     .expect("no overflow"),
             );
         }
+    }
+
+    /// F-13. The author's whole corpus is 1376x768 into a 1920x1080 frame:
+    /// every scene of every chapter is an upscale, and nothing said so.
+    #[test]
+    fn a_source_smaller_than_the_frame_does_not_fill_it() {
+        let out = OutputSpec::new(Aspect::Landscape16x9, 1080, 30).unwrap();
+        let real = SourceGeometry::new(1376, 768, 1, 1).unwrap();
+        assert!(!real.fills(&out));
+        assert!(SourceGeometry::new(1920, 1080, 1, 1).unwrap().fills(&out));
+        assert!(SourceGeometry::new(4000, 3000, 1, 1).unwrap().fills(&out));
+    }
+
+    /// Cover-fit needs **both** edges, so a source that is wide enough and
+    /// short is still enlarged — the failure a width-only check would miss.
+    #[test]
+    fn one_edge_long_enough_is_not_enough() {
+        let out = OutputSpec::new(Aspect::Landscape16x9, 1080, 30).unwrap();
+        assert!(!SourceGeometry::new(4000, 1000, 1, 1).unwrap().fills(&out));
+        assert!(!SourceGeometry::new(1900, 4000, 1, 1).unwrap().fills(&out));
+    }
+
+    /// SAR is not decoration: an anamorphic source covers more frame than its
+    /// stored width, and `fills` reads the display size D-034 actually scales.
+    #[test]
+    fn an_anamorphic_source_is_measured_after_its_pixels_are_squared_up() {
+        let out = OutputSpec::new(Aspect::Landscape16x9, 720, 30).unwrap();
+        // 1000x720 stored at 4:3 is 1333x720 displayed — wide enough for
+        // 1280x720, which the stored width alone is not.
+        let anamorphic = SourceGeometry::new(1000, 720, 4, 3).unwrap();
+        assert_eq!(anamorphic.display_width(), 1333);
+        assert_eq!(anamorphic.display_height(), 720);
+        assert!(anamorphic.fills(&out));
+        assert!(!SourceGeometry::new(1000, 720, 1, 1).unwrap().fills(&out));
+    }
+
+    /// The number the warning offers has to be a size `OutputSpec` accepts,
+    /// or the message tells the operator to type something that is refused.
+    #[test]
+    fn every_suggested_short_edge_is_a_size_that_renders() {
+        for aspect in Aspect::ALL {
+            for (w, h) in [
+                (1376, 768),
+                (640, 480),
+                (4000, 3000),
+                (1920, 1080),
+                (17, 19),
+                (3, 3),
+            ] {
+                let edge = SourceGeometry::new(w, h, 1, 1)
+                    .unwrap()
+                    .native_short_edge(aspect);
+                if edge == 0 {
+                    continue;
+                }
+                let spec = OutputSpec::new(aspect, edge, 30)
+                    .unwrap_or_else(|e| panic!("{aspect:?} {w}x{h} suggested {edge}: {e}"));
+                assert!(
+                    SourceGeometry::new(w, h, 1, 1).unwrap().fills(&spec),
+                    "{aspect:?} {w}x{h} suggested {edge}, which it does not fill"
+                );
+            }
+        }
+    }
+
+    /// The author's own stills, in the two shapes they might be cut for.
+    #[test]
+    fn the_native_size_depends_on_the_shape_it_is_cut_to() {
+        let real = SourceGeometry::new(1376, 768, 1, 1).unwrap();
+        assert_eq!(real.native_short_edge(Aspect::Landscape16x9), 756);
+        assert_eq!(real.native_short_edge(Aspect::Portrait9x16), 432);
+        assert_eq!(real.native_short_edge(Aspect::Square1x1), 768);
+    }
+
+    /// A source too small for any legal frame answers 0 rather than a size
+    /// that would be refused a line later.
+    #[test]
+    fn a_source_smaller_than_the_smallest_legal_frame_suggests_nothing() {
+        let tiny = SourceGeometry::new(10, 10, 1, 1).unwrap();
+        assert_eq!(tiny.native_short_edge(Aspect::Landscape16x9), 0);
+        assert_eq!(tiny.native_short_edge(Aspect::Square1x1), 10);
     }
 }

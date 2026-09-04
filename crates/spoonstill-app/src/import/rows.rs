@@ -53,6 +53,21 @@ pub const AUDIO_EXTENSIONS: [&str; 8] = ["mp3", "m4a", "wav", "aac", "flac", "og
 /// Extensions treated as a line to speak.
 pub const TEXT_EXTENSIONS: [&str; 2] = ["txt", "md"];
 
+/// Text extensions an importer may pair with a still **by position** (D-152).
+///
+/// Only `.txt`. A `.md` is read as narration when its stem names a still —
+/// `001.md` beside `001.jpg` is a statement of intent, and projects made by
+/// earlier builds contain exactly that — but it is never *guessed* into a
+/// scene, because the `.md` in a folder of photographs is overwhelmingly a
+/// `README`, and the one thing worse than not speaking it is speaking it.
+///
+/// Two reasons it is this list and not simply removing `md` from the one
+/// above. A `.md` already in a project keeps working, which a silent change
+/// would not. And markdown *markup* is spoken literally — `# Chapter One`
+/// becomes the word "hash" — so `.md` was never a good narration format and
+/// nothing is lost by refusing to guess at one.
+pub const POSITIONAL_TEXT_EXTENSIONS: [&str; 1] = ["txt"];
+
 /// Which mode a project resolved to, so the caller can say so.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
@@ -473,9 +488,9 @@ fn read_line(path: &Path) -> Result<String, String> {
         .map_err(|e| format!("could not read it: {e}"))?;
     if size > MAX_SCRIPT_BYTES {
         return Err(format!(
-            "is {} MB of text — no scene can hold more than {} KB of narration, \
+            "is {} of text — no scene can hold more than {} KB of narration, \
              so this is not a script",
-            size / (1024 * 1024),
+            super::human_size(size),
             MAX_SCRIPT_BYTES / 1024
         ));
     }

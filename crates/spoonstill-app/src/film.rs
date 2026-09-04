@@ -41,11 +41,10 @@ use std::sync::Mutex;
 
 use spoonstill_core::captions::{self, Placement, SubtitleSpec, SubtitleTheme};
 use spoonstill_core::diagnostics::{Diagnostics, Event};
-use spoonstill_core::project::MotionRequest;
+use spoonstill_core::project::{MotionRequest, Problem, ProblemKind};
 use spoonstill_core::{Aspect, MotionSpec, OutputSpec, STATE_DIR, hash, timing};
 use spoonstill_media::scene::{Cancel, EncodeSettings, SceneRequest};
 use spoonstill_media::{MediaError, Tools, concat, profile};
-use spoonstill_state::FileLog;
 
 use crate::audio::{AudioCache, AudioError, ResolvedAudio};
 use crate::capacity;
@@ -188,6 +187,18 @@ pub enum FilmEvent {
     /// Emitted before any worker starts, and only when the operator asked for
     /// the count themselves — the automatic count already respects the budget.
     MemoryPressure(crate::capacity::Pressure),
+    /// Something the validation found that does not stop the render.
+    ///
+    /// `still validate` has always printed these; `still render` dropped them
+    /// on the floor, which meant the one surface most operators use never said
+    /// that every photograph in the film was being enlarged (F-13), or that a
+    /// recording paired with nothing. Emitted **before the pool starts**, for
+    /// the same reason as [`FilmEvent::MemoryPressure`]: a line printed under
+    /// five minutes of progress output is a line nobody reads.
+    Warned {
+        /// The problem, already phrased for an operator.
+        detail: String,
+    },
     /// One scene's narration is resolved.
     Audio {
         /// Position in render order.
@@ -266,8 +277,9 @@ pub struct RenderedFilm {
     pub reused_segments: usize,
     /// Where the segments are, for a re-run and for diagnostics.
     pub segments_dir: PathBuf,
-    /// Bytes of superseded segments swept after the join (D-109). Zero when
-    /// there was nothing to sweep, and when `keep_cache` asked us not to.
+    /// Bytes swept after the join — superseded segments (D-109) and the
+    /// derived half of the audio cache (D-147). Zero when there was nothing to
+    /// sweep, and when `keep_cache` asked us not to.
     pub freed_bytes: u64,
 }
 
@@ -501,18 +513,8 @@ pub fn render_project(
     // that can answer "what went wrong just now" without already knowing which
     // folder to look in (D-093). Either may be absent; neither may fail a
     // render.
-    let log = FileLog::open(&project.root).ok();
-    let index = spoonstill_state::ActivityLog::for_project(&project.root);
-    let both = log
-        .as_ref()
-        .zip(index.as_ref())
-        .map(|(l, i)| spoonstill_state::Tee(l as &dyn Diagnostics, i as &dyn Diagnostics));
-    let sink: &dyn Diagnostics = match (&both, &log, &index) {
-        (Some(tee), _, _) => tee,
-        (None, Some(l), _) => l,
-        (None, None, Some(i)) => i,
-        _ => &spoonstill_core::diagnostics::Noop,
-    };
+    let journal = spoonstill_state::Journal::for_project(&project.root);
+    let sink: &dyn Diagnostics = &journal;
 
     let _lock = Lock::take(&project.root, options.force)?;
 
@@ -557,17 +559,35 @@ pub fn render_project(
         on_event(FilmEvent::MemoryPressure(pressure));
     }
 
+    // Everything validation found that does not stop the run. Said here rather
+    // than never: `render` used to discard the whole warning list, so an
+    // operator who never runs `still validate` was told nothing at all.
+    for problem in project.warnings() {
+        sink.record(&Event::warn("render", "project warning").with("detail", problem.to_string()));
+        on_event(FilmEvent::Warned {
+            detail: problem.to_string(),
+        });
+    }
+
     let tools = Tools::from_env();
+
+    // Which FFmpeg made this film (D-151). One `-version` spawn per run, not
+    // per file. The major version moved from 8 to 9 under this project between
+    // two sessions and nothing noticed — D-041 asserts a strict profile against
+    // whatever it finds, so a report from a stranger's machine has to say which
+    // build produced it or the assertion is checking our own guess.
+    sink.record(
+        &Event::info("render", "tooling")
+            .with("ffmpeg", tools.ffmpeg_version())
+            .with("ffmpeg_path", tools.ffmpeg().display().to_string()),
+    );
+
     let output = project.settings.output_spec;
     let encode = EncodeSettings {
         preset: project.settings.preset.clone(),
         crf: project.settings.crf,
     };
 
-    // Phase one: every narration, N at a time.
-    let audio = resolve_audio(&project, audio_jobs, &tools, cancel, sink, on_event)?;
-
-    // Phase two: every segment, N at a time. A different N.
     let segments_dir = project.root.join(STATE_DIR).join(SEGMENTS_DIR);
     std::fs::create_dir_all(&segments_dir).map_err(|source| FilmError::Io {
         doing: "creating the segment directory",
@@ -575,10 +595,15 @@ pub fn render_project(
         source,
     })?;
 
-    let rendered = render_segments(
+    // The two stages, overlapped (D-146). A scene needs only **its own**
+    // narration measured before it can be planned and encoded, so the barrier
+    // that used to sit between them was stronger than the dependency it
+    // enforced — and it left the CPU idle for a fifth of every cold render
+    // while `edge-tts` waited on the network.
+    let (audio, rendered) = resolve_and_render(
         &project,
-        &audio,
         options,
+        audio_jobs,
         jobs,
         &segments_dir,
         output,
@@ -624,15 +649,37 @@ pub fn render_project(
     let freed = if options.keep_cache {
         0
     } else {
+        // Both layers, on one rule (D-109, D-147). The audio cache's *spoken*
+        // half is untouched — `prune_audio` cannot see it.
+        let narrations: Vec<PathBuf> = audio.iter().map(|a| a.path.clone()).collect();
         prune_segments(&segments_dir, &paths, sink)
+            + prune_audio(
+                AudioCache::in_project(&project.root).directory(),
+                &narrations,
+                sink,
+            )
     };
 
+    // `reused` and `spoken` are the two numbers that say **why** a run took the
+    // time it did (D-151). A 112-scene re-render finished in 9.9 s and the log
+    // could not say whether the cache had done its job or the machine had got
+    // faster; every performance question asked of this file needed the render
+    // to be repeated by hand to answer.
+    let reused_audio = audio.iter().filter(|a| a.reused).count();
+    let reused_segments = rendered.iter().filter(|s| s.reused).count();
     sink.record(
         &Event::info("render", "film complete")
             .with("out", film.path.display().to_string())
             .with("duration_s", format!("{:.6}", film.duration))
             .with("scenes", rendered.len().to_string())
-            .with("frames", frames.to_string()),
+            .with("frames", frames.to_string())
+            .with("reused_segments", reused_segments.to_string())
+            .with("reused_audio", reused_audio.to_string())
+            .with(
+                "spoken",
+                audio.iter().filter(|a| !a.reused).count().to_string(),
+            )
+            .with("freed_bytes", freed.to_string()),
     );
 
     Ok(RenderedFilm {
@@ -641,8 +688,8 @@ pub fn render_project(
         expected_duration: expected_total,
         scenes: rendered.len(),
         frames,
-        reused_audio: audio.iter().filter(|a| a.reused).count(),
-        reused_segments: rendered.iter().filter(|s| s.reused).count(),
+        reused_audio,
+        reused_segments,
         segments_dir,
         freed_bytes: freed,
     })
@@ -677,10 +724,15 @@ fn is_abandoned_partial(name: &str) -> bool {
 
 /// Is this a file we made, and are therefore entitled to delete?
 ///
-/// The pattern `render_segments` writes, and nothing else: `seg-`, four digits,
-/// `-`, sixteen hex, `.mp4`. A sweep that deleted by extension would eventually
-/// meet an operator who put something in this folder, and a cache is not a
-/// licence to delete a stranger's file.
+/// The pattern `plan_scene` writes, and nothing else: `seg-`, sixteen hex,
+/// `.mp4`. A sweep that deleted by extension would eventually meet an operator
+/// who put something in this folder, and a cache is not a licence to delete a
+/// stranger's file.
+///
+/// **The older `seg-0007-<key>.mp4` form is matched too** (D-153). Those were
+/// written by every build before the index left the name, and a project that
+/// has been rendered once is full of them; not matching them would leave the
+/// segment directory holding a dead generation nothing would ever sweep.
 fn is_our_segment(name: &str) -> bool {
     let Some(rest) = name.strip_prefix("seg-") else {
         return false;
@@ -688,22 +740,60 @@ fn is_our_segment(name: &str) -> bool {
     let Some(rest) = rest.strip_suffix(".mp4") else {
         return false;
     };
-    let Some((index, key)) = rest.split_once('-') else {
-        return false;
-    };
-    index.len() == 4
-        && index.bytes().all(|b| b.is_ascii_digit())
-        && key.len() == 16
-        && key.bytes().all(|b| b.is_ascii_hexdigit())
+    let is_key = |text: &str| text.len() == 16 && text.bytes().all(|b| b.is_ascii_hexdigit());
+
+    match rest.split_once('-') {
+        Some((index, key)) => {
+            index.len() == 4 && index.bytes().all(|b| b.is_ascii_digit()) && is_key(key)
+        }
+        None => is_key(rest),
+    }
 }
 
 /// Sweep superseded segments, keeping the live set and `SPARE_GENERATIONS`
 /// more of the rest, newest first (D-109).
+fn prune_segments(dir: &Path, live: &[PathBuf], log: &dyn Diagnostics) -> u64 {
+    prune(dir, live, is_our_segment, "segments", log)
+}
+
+/// The same sweep, over the **derived** half of the audio cache (D-147).
+///
+/// Derived from the author's own log: 861 MB of normalized WAV protecting
+/// 26.5 MB of spoken MP3, a ratio of 32:1, on a network volume. D-109 spared
+/// the audio cache entirely and was right to — *"a segment is CPU, a narration
+/// is a network call and under D-014 money"* — but that is a sentence about
+/// the **spoken** layer. The normalized artifact is a separate cache layer on
+/// top of it (D-084), and it is one local FFmpeg pass away from the MP3 that
+/// is still sitting there.
+///
+/// So the sweep takes `file-`, `silent-` and `tts-` and never `spoken-`
+/// ([`AudioCache::is_derived_name`]). Nothing that cost a network call, or
+/// money, is ever removed.
+fn prune_audio(dir: &Path, live: &[PathBuf], log: &dyn Diagnostics) -> u64 {
+    prune(dir, live, AudioCache::is_derived_name, "narrations", log)
+}
+
+/// Keep the live set and `SPARE_GENERATIONS` more of the rest, newest first.
 ///
 /// Returns the bytes reclaimed. **Never fails a render**: a cache that cannot
 /// be tidied is not a reason to withhold a film that is already made and
 /// already asserted, so every error here is logged and stepped over.
-fn prune_segments(dir: &Path, live: &[PathBuf], log: &dyn Diagnostics) -> u64 {
+///
+/// `is_ours` decides what this sweep is entitled to delete, and it is a
+/// parameter rather than two copies of the same loop because the two caches
+/// differ in **exactly** that: everything else — the spare budget, the
+/// newest-first ordering, the litter, the refusal to touch a stranger's file —
+/// is one rule and belongs in one place.
+///
+/// `live` may name the same file twice: many scenes resolving to one narration
+/// is the ordinary case (D-108), so the budget counts *distinct* live files.
+fn prune(
+    dir: &Path,
+    live: &[PathBuf],
+    is_ours: fn(&str) -> bool,
+    what: &str,
+    log: &dyn Diagnostics,
+) -> u64 {
     let keep: std::collections::HashSet<&std::ffi::OsStr> =
         live.iter().filter_map(|p| p.file_name()).collect();
 
@@ -733,7 +823,10 @@ fn prune_segments(dir: &Path, live: &[PathBuf], log: &dyn Diagnostics) -> u64 {
         }
 
         // Litter from a run that never finished. Removed outright rather than
-        // kept as a spare: a partial is not a segment and can never be reused.
+        // kept as a spare: a partial is not an artifact and can never be
+        // reused. Safe in either cache for D-115's reason — the render lock is
+        // exclusive per project, so nothing else in this folder is being
+        // written right now.
         if is_abandoned_partial(name) {
             if std::fs::remove_file(&path).is_ok() {
                 freed += meta.len();
@@ -742,7 +835,7 @@ fn prune_segments(dir: &Path, live: &[PathBuf], log: &dyn Diagnostics) -> u64 {
             continue;
         }
 
-        if !is_our_segment(name) {
+        if !is_ours(name) {
             continue;
         }
         let when = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
@@ -753,7 +846,7 @@ fn prune_segments(dir: &Path, live: &[PathBuf], log: &dyn Diagnostics) -> u64 {
     // flipped back to.
     dead.sort_unstable_by(|a, b| b.0.cmp(&a.0));
 
-    let spare = live.len().saturating_mul(SPARE_GENERATIONS);
+    let spare = keep.len().saturating_mul(SPARE_GENERATIONS);
     for (_, size, path) in dead.into_iter().skip(spare) {
         if std::fs::remove_file(&path).is_ok() {
             freed += size;
@@ -763,7 +856,8 @@ fn prune_segments(dir: &Path, live: &[PathBuf], log: &dyn Diagnostics) -> u64 {
 
     if swept > 0 {
         log.record(
-            &Event::info("render", "swept superseded segments")
+            &Event::info("render", "swept superseded files")
+                .with("what", what)
                 .with("files", swept.to_string())
                 .with("bytes", freed.to_string())
                 .with("kept_spare", spare.to_string()),
@@ -831,6 +925,19 @@ fn apply_geometry_override(
         OutputSpec::new(aspect, short_edge, fps).map_err(|error| FilmError::UnusableGeometry {
             detail: format!("{short_edge} at {aspect}, {fps} fps — {error}"),
         })?;
+
+    // The undersized-source warning names the frame (F-13), and the frame just
+    // changed. Recomputed rather than left: a warning that says 1920x1080 on a
+    // run that renders 3840x2160 is a message about a film nobody asked for —
+    // and rendering at 4K is exactly when it matters most.
+    project
+        .problems
+        .retain(|p| !matches!(p.kind, ProblemKind::UndersizedSources { .. }));
+    if let Some(kind) =
+        crate::import::undersized_sources(&project.scenes, &project.settings.output_spec)
+    {
+        project.problems.push(Problem::in_project(kind));
+    }
     Ok(())
 }
 
@@ -923,15 +1030,38 @@ fn check_voice_service(
     Ok(())
 }
 
-/// Phase one: resolve every scene's narration, `audio_jobs` at a time.
-fn resolve_audio(
+/// Resolve every narration and render every segment, overlapping the two
+/// (D-146, `findings.md` F-12).
+///
+/// These used to be two functions with a barrier between them, and in 4531
+/// rows of the author's production log the two phases **never once
+/// overlapped**: 78 seconds of a 320-second render had ten cores doing nothing
+/// while `edge-tts` waited on the network, and then the network sat idle for
+/// the 228 seconds of encoding that followed. A scene needs only *its own*
+/// narration measured before it can be planned, so the barrier enforced more
+/// than the dependency required.
+///
+/// **D-077 is not threatened.** Scene identity comes from content and index,
+/// never from completion order, so a pipelined run produces the same film byte
+/// for byte — which is gate 3, not a comment.
+///
+/// **D-002's pre-flight stays**, and stays *before* both pools: the whole point
+/// of asking the voice service one question up front is that five hundred
+/// scenes should not discover its absence one process at a time.
+#[allow(clippy::too_many_arguments)]
+fn resolve_and_render(
     project: &Project,
+    options: &RenderProjectOptions,
     audio_jobs: usize,
+    jobs: usize,
+    segments_dir: &Path,
+    output: OutputSpec,
+    encode: &EncodeSettings,
     tools: &Tools,
     cancel: &Cancel,
     log: &dyn Diagnostics,
     on_event: &(dyn Fn(FilmEvent) + Sync),
-) -> Result<Vec<ResolvedAudio>, FilmError> {
+) -> Result<(Vec<ResolvedAudio>, Vec<Segment>), FilmError> {
     let cache = AudioCache::in_project(&project.root);
     let policy = &crate::audio::AudioPolicy {
         trim: spoonstill_media::audio::Trim {
@@ -940,7 +1070,7 @@ fn resolve_audio(
         },
     };
 
-    // Before the pool: is the voice service even there? (D-002, D-094.)
+    // Before either pool: is the voice service even there? (D-002, D-094.)
     //
     // Every scene that needs speech would otherwise discover this for itself,
     // which at n=500 means five hundred processes failing one at a time, and
@@ -948,9 +1078,13 @@ fn resolve_audio(
     // thrown away to learn something one `--version` call knew at the start.
     check_voice_service(project, &cache, log)?;
 
-    let outcomes = pool::run(
+    let project_id = project_id(&project.root);
+    let occurrences = occurrences_of(project);
+
+    let (audio_outcomes, segment_outcomes) = pool::pipeline(
         &project.scenes,
         audio_jobs,
+        jobs,
         cancel,
         |index, scene: &ResolvedScene| -> Result<ResolvedAudio, AudioError> {
             let resolved = crate::audio::resolve(
@@ -977,9 +1111,47 @@ fn resolve_audio(
             }
             resolved
         },
+        |index, scene: &ResolvedScene, audio: &ResolvedAudio| -> Result<Segment, MediaError> {
+            let result = plan_scene(
+                project,
+                options,
+                &project_id,
+                index,
+                scene,
+                audio,
+                occurrences[index],
+                segments_dir,
+                output,
+                encode,
+            )
+            .and_then(|plan| render_one(tools, &plan, cancel, log));
+            match &result {
+                Ok(segment) => on_event(FilmEvent::Segment {
+                    index,
+                    id: scene.spec.id.as_str().to_owned(),
+                    frames: segment.frames,
+                    duration: segment.duration,
+                    reused: segment.reused,
+                }),
+                Err(error) => on_event(FilmEvent::Failed {
+                    index,
+                    id: scene.spec.id.as_str().to_owned(),
+                    detail: error.to_string(),
+                }),
+            }
+            result
+        },
     );
 
-    collect(project, outcomes, cancel).map_err(|failures| FilmError::Audio { failures })
+    // The narrations first, and the order matters: a scene whose narration
+    // failed has no segment, so reporting the segment list would name the
+    // consequence rather than the cause.
+    let audio = collect(project, audio_outcomes, cancel)
+        .map_err(|failures| FilmError::Audio { failures })?;
+    let rendered = collect(project, segment_outcomes, cancel)
+        .map_err(|failures| FilmError::Render { failures })?;
+
+    Ok((audio, rendered))
 }
 
 /// A segment, and whether this run had to make it.
@@ -990,92 +1162,79 @@ struct Segment {
     reused: bool,
 }
 
-/// Phase two: render every scene, `jobs` at a time.
+/// Everything about one scene's segment that is fixed before it is encoded.
+///
+/// **Nothing here depends on which worker runs it, or on what order the
+/// workers ran in** — that is D-077, and it is what makes the overlap in
+/// [`resolve_and_render`] safe. The inputs are the scene's own content, its
+/// index in the film, and this run's settings; the outputs are a
+/// content-addressed name and a frame count.
 #[allow(clippy::too_many_arguments)]
-fn render_segments(
+fn plan_scene(
     project: &Project,
-    audio: &[ResolvedAudio],
     options: &RenderProjectOptions,
-    jobs: usize,
+    project_id: &str,
+    index: usize,
+    scene: &ResolvedScene,
+    audio: &ResolvedAudio,
+    occurrence: u32,
     segments_dir: &Path,
     output: OutputSpec,
     encode: &EncodeSettings,
-    tools: &Tools,
-    cancel: &Cancel,
-    log: &dyn Diagnostics,
-    on_event: &(dyn Fn(FilmEvent) + Sync),
-) -> Result<Vec<Segment>, FilmError> {
-    let project_id = project_id(&project.root);
+) -> Result<Plan, MediaError> {
+    let narration = audio.duration;
+    let frames = timing::frames_for_duration(narration, output.fps());
+    // One implementation, in `spoonstill-media` (D-126). This used to be a
+    // second streaming loop here, and the pair had to agree on the cache
+    // key for `still render` and `still render-scene` to share a segment.
+    let content = spoonstill_media::scene::hash_file(&scene.image)?;
 
-    // Scene identity — and therefore the move, and therefore the segment's
-    // name — is decided *before* the pool starts. Nothing a worker does can
-    // depend on which worker it is, or on what order the workers ran in.
-    let mut plans = Vec::with_capacity(project.scenes.len());
-    for (index, scene) in project.scenes.iter().enumerate() {
-        let narration = audio[index].duration;
-        let frames = timing::frames_for_duration(narration, output.fps());
-        // One implementation, in `spoonstill-media` (D-126). This used to be a
-        // second streaming loop here, and the pair had to agree on the cache
-        // key for `still render` and `still render-scene` to share a segment.
-        let content = spoonstill_media::scene::hash_file(&scene.image)
-            .map_err(|source| FilmError::Media(Box::new(source)))?;
+    let index32 = u32::try_from(index).unwrap_or(u32::MAX);
+    let motion = motion_for(
+        &scene.spec.motion,
+        project_id,
+        index32,
+        occurrence,
+        &content,
+        project,
+    );
+    let subtitles = subtitles_for(project, options, scene, narration);
+    let key = segment_key(
+        &content,
+        audio.key,
+        frames,
+        motion,
+        output,
+        encode,
+        subtitles.as_ref(),
+    );
 
-        let index32 = u32::try_from(index).unwrap_or(u32::MAX);
-        let motion = motion_for(&scene.spec.motion, &project_id, index32, &content, project);
-        let subtitles = subtitles_for(project, options, scene, narration);
-        let key = segment_key(
-            &content,
-            audio[index].key,
-            frames,
-            motion,
+    Ok(Plan {
+        request: SceneRequest {
+            image: scene.image.clone(),
+            audio: audio.path.clone(),
+            // **The key alone** (D-153). This used to be
+            // `seg-{index:04}-{key:016x}.mp4`, and the index in the *name* is
+            // D-140's defect one layer down: with a stable motion seed the key
+            // of a moved scene is unchanged, and the lookup still missed
+            // because the file it looked for was named after where the scene
+            // used to sit. The index bought legibility in `ls` and cost every
+            // reorder a full re-encode.
+            out: segments_dir.join(format!("seg-{key:016x}.mp4")),
             output,
-            encode,
-            subtitles.as_ref(),
-        );
-
-        plans.push(Plan {
-            request: SceneRequest {
-                image: scene.image.clone(),
-                audio: audio[index].path.clone(),
-                out: segments_dir.join(format!("seg-{index:04}-{key:016x}.mp4")),
-                output,
-                motion: Some(motion),
-                project_id: project_id.clone(),
-                scene_index: index32,
-                encode: encode.clone(),
-                subtitles,
-            },
-            id: scene.spec.id.as_str().to_owned(),
-            frames,
-        });
-    }
-
-    let outcomes = pool::run(&plans, jobs, cancel, |index, plan: &Plan| {
-        let result = render_one(tools, plan, cancel, log);
-        match &result {
-            Ok(segment) => on_event(FilmEvent::Segment {
-                index,
-                id: plan.id.clone(),
-                frames: segment.frames,
-                duration: segment.duration,
-                reused: segment.reused,
-            }),
-            Err(error) => on_event(FilmEvent::Failed {
-                index,
-                id: plan.id.clone(),
-                detail: error.to_string(),
-            }),
-        }
-        result
-    });
-
-    collect(project, outcomes, cancel).map_err(|failures| FilmError::Render { failures })
+            motion: Some(motion),
+            project_id: project_id.to_owned(),
+            scene_index: index32,
+            encode: encode.clone(),
+            subtitles,
+        },
+        frames,
+    })
 }
 
 /// One scene's plan, fixed before any worker starts.
 struct Plan {
     request: SceneRequest,
-    id: String,
     frames: u32,
 }
 
@@ -1214,16 +1373,49 @@ fn collect<T>(
     }
 }
 
+/// For each scene, how many **earlier scenes use the same still** (D-153).
+///
+/// Zero for every scene in the ordinary film, where each photograph appears
+/// once. It exists so [`MotionSeed::V2`] can keep D-035's promise that one
+/// photograph shown twice does not move identically both times, while still
+/// being **stable under a reorder**: moving an unrelated scene past a repeat
+/// changes nobody's occurrence, and the only pair that re-renders is the two
+/// scenes that actually swapped places in that photograph's own sequence.
+///
+/// Counted by resolved path rather than by content, because the content hash
+/// is computed inside the pool (D-146) and reading every photograph again here
+/// to count them would put back the serial pass D-149 took out.
+fn occurrences_of(project: &Project) -> Vec<u32> {
+    let mut seen: std::collections::HashMap<&Path, u32> = std::collections::HashMap::new();
+    project
+        .scenes
+        .iter()
+        .map(|scene| {
+            let count = seen.entry(scene.image.as_path()).or_insert(0);
+            let this = *count;
+            *count += 1;
+            this
+        })
+        .collect()
+}
+
 /// The move for one scene: the operator's, where they expressed one, and the
 /// seeded choice where they did not (D-035).
 fn motion_for(
     request: &MotionRequest,
     project_id: &str,
     index: u32,
+    occurrence: u32,
     content: &str,
     project: &Project,
 ) -> MotionSpec {
-    let seeded = MotionSpec::seeded(project_id, index, content);
+    let seeded = MotionSpec::seeded_with(
+        project.settings.motion_seed,
+        project_id,
+        index,
+        occurrence,
+        content,
+    );
     MotionSpec {
         kind: request.kind.unwrap_or(seeded.kind),
         anchor: request.anchor.unwrap_or(seeded.anchor),
@@ -1505,6 +1697,7 @@ mod tests {
                 caption: Some(text.to_owned()),
             },
             image: PathBuf::from("001.jpg"),
+            geometry: None,
             audio: None,
         }
     }
@@ -2156,7 +2349,6 @@ mod tests {
                     encode: EncodeSettings::default(),
                     subtitles: None,
                 },
-                id: "001".to_owned(),
                 frames,
             }
         }
@@ -2268,5 +2460,62 @@ mod tests {
         assert_eq!(freed, 9, "freed bytes should be the abandoned temporary");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F-13. The warning names the frame, and `--resolution 4k` changes the
+    /// frame — so a warning left over from `project.yaml`'s size would name a
+    /// film this run is not making, at exactly the size where the enlargement
+    /// is worst.
+    #[test]
+    fn the_undersized_warning_follows_the_geometry_override() {
+        use spoonstill_core::SourceGeometry;
+
+        let root = scratch("undersized-override");
+        let mut scene = spoken_scene("001", "a line", "edge");
+        scene.geometry = Some(SourceGeometry::new(1376, 768, 1, 1).expect("a real size"));
+        let mut project = project_of(&root, vec![scene]);
+        // `load` would have put it there; this test starts after that stage.
+        if let Some(kind) =
+            crate::import::undersized_sources(&project.scenes, &project.settings.output_spec)
+        {
+            project.problems.push(Problem::in_project(kind));
+        }
+        let at_1080 = project.warnings().next().expect("a warning").to_string();
+        assert!(at_1080.contains("1920x1080"), "{at_1080}");
+
+        let options = RenderProjectOptions {
+            short_edge: Some(2160),
+            ..RenderProjectOptions::for_project(&root)
+        };
+        apply_geometry_override(&mut project, &options).expect("4K is a legal size");
+
+        let warnings: Vec<String> = project.warnings().map(ToString::to_string).collect();
+        assert_eq!(warnings.len(), 1, "recomputed, not appended: {warnings:?}");
+        assert!(warnings[0].contains("3840x2160"), "{warnings:?}");
+    }
+
+    /// The other direction: an override small enough that every still covers
+    /// the frame removes the warning rather than leaving a stale one.
+    #[test]
+    fn an_override_the_stills_cover_clears_the_warning() {
+        use spoonstill_core::SourceGeometry;
+
+        let root = scratch("undersized-cleared");
+        let mut scene = spoken_scene("001", "a line", "edge");
+        scene.geometry = Some(SourceGeometry::new(1376, 768, 1, 1).expect("a real size"));
+        let mut project = project_of(&root, vec![scene]);
+        if let Some(kind) =
+            crate::import::undersized_sources(&project.scenes, &project.settings.output_spec)
+        {
+            project.problems.push(Problem::in_project(kind));
+        }
+        assert_eq!(project.warnings().count(), 1);
+
+        let options = RenderProjectOptions {
+            short_edge: Some(720),
+            ..RenderProjectOptions::for_project(&root)
+        };
+        apply_geometry_override(&mut project, &options).expect("720 is a legal size");
+        assert_eq!(project.warnings().count(), 0, "{:?}", project.problems);
     }
 }

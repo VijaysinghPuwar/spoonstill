@@ -32,7 +32,7 @@ pub use diagnostics::{Diagnostics, Event, Severity};
 pub use geometry::{
     Aspect, GeometryError, OutputSpec, PRESCALE_FACTOR, Resolution, SourceGeometry,
 };
-pub use motion::{Anchor, MotionKind, MotionSpec, build_filter};
+pub use motion::{Anchor, MotionKind, MotionSeed, MotionSpec, build_filter};
 pub use path_safety::{PathError, RealPath, resolve_within};
 pub use project::{
     AudioSource, MotionRequest, Problem, ProblemKind, ProviderId, SceneDraft, SceneId, SceneSpec,

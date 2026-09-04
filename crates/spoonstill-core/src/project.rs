@@ -508,6 +508,39 @@ pub enum ProblemKind {
         /// The file, relative to the project root.
         value: String,
     },
+    /// Every still is smaller than the frame it renders into, so the film is
+    /// an upscale of the photographs (F-13).
+    ///
+    /// A **warning**. Upscaling is a legitimate choice — an operator who wants
+    /// a 1080p film from 768px artwork is not making a mistake, they are
+    /// making a trade — and D-089's rule is that a refusal must be something
+    /// the operator can act on. What was wrong was the silence: 699 scenes of
+    /// the author's own films were enlarged 1.4x before the Ken Burns zoom
+    /// took another 1.12x on top, and `still validate` said "no problems".
+    ///
+    /// **Project-level, and deliberately not per scene**, on the same reasoning
+    /// as [`ProblemKind::ToolingMissing`]: 699 identical lines about 699
+    /// photographs state one fact 699 times, and the fix is one setting rather
+    /// than 699 new photographs. The smallest is named so it can be found.
+    UndersizedSources {
+        /// How many stills do not cover the frame.
+        scenes: usize,
+        /// How many stills were measured. `scenes` of `total`.
+        total: usize,
+        /// The id of the scene whose still is furthest from covering it.
+        smallest: String,
+        /// That still's width in display pixels.
+        width: u32,
+        /// That still's height in display pixels.
+        height: u32,
+        /// The output frame's width.
+        out_width: u32,
+        /// The output frame's height.
+        out_height: u32,
+        /// The largest short edge at which **every** still renders without
+        /// being enlarged, or `None` when no legal size does.
+        native_short_edge: Option<u32>,
+    },
     /// An image in the folder appears in no manifest row (D-056).
     ///
     /// A **warning**. The manifest is the complete list of scenes when it
@@ -523,15 +556,19 @@ pub enum ProblemKind {
 impl ProblemKind {
     /// Whether this stops a render.
     ///
-    /// The two warnings are the unresolved-input cases of D-050: something in
-    /// the folder was not used. Everything else is an error, because
+    /// Two of the three warnings are the unresolved-input cases of D-050:
+    /// something in the folder was not used. The third says the photographs
+    /// are smaller than the frame, which is a trade and not a mistake.
+    /// Everything else is an error, because
     /// everything else means a scene the operator asked for cannot be built —
     /// and rendering 499 of 500 scenes without saying so is the failure this
     /// whole validation stage exists to prevent.
     #[must_use]
     pub const fn severity(&self) -> Severity {
         match self {
-            ProblemKind::UnpairedFile { .. } | ProblemKind::UnlistedImage { .. } => Severity::Warn,
+            ProblemKind::UnpairedFile { .. }
+            | ProblemKind::UnlistedImage { .. }
+            | ProblemKind::UndersizedSources { .. } => Severity::Warn,
             _ => Severity::Error,
         }
     }
@@ -604,6 +641,32 @@ impl fmt::Display for ProblemKind {
                     f,
                     "{value:?} pairs with no image, so it is not part of any scene"
                 )
+            }
+            ProblemKind::UndersizedSources {
+                scenes,
+                total,
+                smallest,
+                width,
+                height,
+                out_width,
+                out_height,
+                native_short_edge,
+            } => {
+                write!(
+                    f,
+                    "{scenes} of {total} still{} smaller than the \
+                     {out_width}x{out_height} frame and will be enlarged to \
+                     fill it — the smallest is scene {smallest} at \
+                     {width}x{height}; ",
+                    if *scenes == 1 { " is" } else { "s are" }
+                )?;
+                match native_short_edge {
+                    Some(edge) => write!(
+                        f,
+                        "`--short-edge {edge}` renders every scene at its own detail"
+                    ),
+                    None => f.write_str("no output size renders them all at their own detail"),
+                }
             }
             ProblemKind::UnlistedImage { value } => write!(
                 f,

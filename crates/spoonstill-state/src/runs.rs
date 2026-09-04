@@ -16,6 +16,8 @@
 
 use spoonstill_core::diagnostics::{Diagnostics, Event, format_utc};
 
+use crate::logs::FileLog;
+
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -127,6 +129,24 @@ impl ActivityLog {
         })
     }
 
+    /// The index for events that belong to the machine rather than to any
+    /// project — `still doctor`, `still voices`, installing a tool.
+    ///
+    /// The two project columns are left **empty** rather than filled with a
+    /// placeholder: the honest answer to "which project was this" is that
+    /// there wasn't one, and an operator sorting the file by project should
+    /// see these together at one end rather than under a made-up name.
+    #[must_use]
+    pub fn for_machine() -> Option<Self> {
+        let dir = config_dir()?;
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(Self {
+            path: dir.join(RUNS_FILE),
+            project: String::new(),
+            folder: String::new(),
+        })
+    }
+
     /// Where this sink writes.
     #[must_use]
     pub fn path(&self) -> &Path {
@@ -226,17 +246,104 @@ impl Diagnostics for ActivityLog {
     }
 }
 
-/// Write to two sinks at once — the project's own log, and this machine's.
+/// Both of this program's log sinks, owned, for one surface's whole run
+/// (D-148).
 ///
-/// Composed rather than folded into `FileLog`, so that the per-project log
-/// keeps working unchanged on a machine that has no config directory, and so
-/// that neither sink can be made to depend on the other.
-pub struct Tee<A, B>(pub A, pub B);
+/// **This replaces D-093's `Tee`**, which composed two sinks that both exist.
+/// The pair is normally two `Option`s — a project with an unwritable
+/// `.spoonstill/`, a machine whose config directory cannot be found, an event
+/// that belongs to no project at all — and expressing that with `Tee` took a
+/// `zip`, a `map` and a four-arm match at every call site. There was exactly
+/// one call site, inside `render_project`, and that is the whole story of why
+/// for five months only renders reached `runs.csv`: `still validate`, `new`,
+/// `add`, `voices`, `doctor`, `remove`, `move` and the **entire desktop
+/// window** wrote nothing to the one file D-093 calls the one to open when
+/// something has gone wrong. A sink that is awkward to build is a sink that
+/// gets built once.
+///
+/// A `Journal` with neither sink is legal and does nothing, which is the same
+/// promise the two sinks make individually: **a command must never fail
+/// because a log could not be written.**
+pub struct Journal {
+    project: Option<FileLog>,
+    machine: Option<ActivityLog>,
+}
 
-impl<A: Diagnostics, B: Diagnostics> Diagnostics for Tee<A, B> {
+impl Journal {
+    /// Both sinks for one project.
+    ///
+    /// Neither is required. A read-only folder still gets the machine index; a
+    /// machine with no config directory still gets the project's own log.
+    #[must_use]
+    pub fn for_project(root: &Path) -> Self {
+        Journal {
+            project: FileLog::open(root).ok(),
+            machine: ActivityLog::for_project(root),
+        }
+    }
+
+    /// The machine index alone, for an event that belongs to no project.
+    #[must_use]
+    pub fn for_machine() -> Self {
+        Journal {
+            project: None,
+            machine: ActivityLog::for_machine(),
+        }
+    }
+
+    /// The journal a **control surface** uses to write down that a command ran.
+    ///
+    /// The machine index always, bound to `root` when the command named one.
+    /// The project's own log **only where this program already keeps state for
+    /// that project** — that is, where `.spoonstill/` exists.
+    ///
+    /// That condition is the whole point of this constructor.
+    /// [`crate::FileLog::open`] *creates* `.spoonstill/logs/`, and a surface
+    /// wrapper runs for every command including the ones that only ask a
+    /// question. `still validate ~/Pictures` must not leave a state directory
+    /// in a folder because somebody pointed at it — asking about a folder is
+    /// not adopting it. A project that has been rendered already has the
+    /// directory, and gets these rows in its diagnostics bundle (D-016) as
+    /// well as in the index.
+    #[must_use]
+    pub fn for_surface(root: Option<&Path>) -> Self {
+        let adopted = root.filter(|r| r.join(spoonstill_core::STATE_DIR).is_dir());
+        Journal {
+            project: adopted.and_then(|r| FileLog::open(r).ok()),
+            machine: match root {
+                Some(root) => ActivityLog::for_project(root),
+                None => ActivityLog::for_machine(),
+            },
+        }
+    }
+
+    /// A journal that writes nowhere, for a caller that has been asked not to.
+    #[must_use]
+    pub const fn silent() -> Self {
+        Journal {
+            project: None,
+            machine: None,
+        }
+    }
+
+    /// The project's own JSON Lines file, when there is one.
+    ///
+    /// Exposed because the diagnostics bundle names it and `still diagnostics
+    /// where` prints it (D-016).
+    #[must_use]
+    pub fn project_log(&self) -> Option<&FileLog> {
+        self.project.as_ref()
+    }
+}
+
+impl Diagnostics for Journal {
     fn record(&self, event: &Event) {
-        self.0.record(event);
-        self.1.record(event);
+        if let Some(log) = &self.project {
+            log.record(event);
+        }
+        if let Some(index) = &self.machine {
+            index.record(event);
+        }
     }
 }
 
@@ -296,6 +403,82 @@ fn defuse_formula(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "spoonstill-journal-{name}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// D-148. Asking about a folder is not adopting it: a surface journal must
+    /// not create `.spoonstill/` in a folder somebody merely pointed at.
+    /// `still validate ~/Pictures` used to be a question and would have become
+    /// a question that leaves state behind.
+    #[test]
+    fn a_folder_nobody_adopted_gains_no_state_directory() {
+        let dir = scratch("unadopted");
+        let journal = Journal::for_surface(Some(&dir));
+
+        assert!(journal.project_log().is_none());
+        assert!(
+            !dir.join(spoonstill_core::STATE_DIR).exists(),
+            "a question about a folder created state inside it"
+        );
+    }
+
+    /// And the other half: a project this program already keeps state for gets
+    /// these rows in its own log, so they reach the diagnostics bundle (D-016).
+    #[test]
+    fn a_project_the_program_already_owns_gets_its_own_log_too() {
+        let dir = scratch("adopted");
+        std::fs::create_dir_all(dir.join(spoonstill_core::STATE_DIR)).unwrap();
+
+        let journal = Journal::for_surface(Some(&dir));
+        let log = journal.project_log().expect("the project's own log");
+        assert!(log.path().starts_with(&dir), "{}", log.path().display());
+    }
+
+    /// One record reaches both sinks, and the pair is what D-093 asked for:
+    /// the project's own authority, and the machine's one answer to "what went
+    /// wrong just now".
+    #[test]
+    fn one_event_reaches_both_sinks() {
+        let project = scratch("both-project");
+        let index = scratch("both-index");
+        let journal = Journal {
+            project: Some(FileLog::open(&project).unwrap()),
+            machine: Some(ActivityLog {
+                path: index.join(RUNS_FILE),
+                project: "demo".to_owned(),
+                folder: project.display().to_string(),
+            }),
+        };
+
+        journal
+            .record(&Event::error("validate", "command failed").with("detail", "no such folder"));
+
+        let jsonl = journal.project_log().unwrap().path().to_path_buf();
+        let one = std::fs::read_to_string(&jsonl).unwrap();
+        assert!(one.contains("command failed"), "{one}");
+        let two = std::fs::read_to_string(index.join(RUNS_FILE)).unwrap();
+        assert!(two.contains("command failed"), "{two}");
+        assert!(two.contains("no such folder"), "{two}");
+    }
+
+    /// A journal with neither sink is legal and does nothing. This is the
+    /// promise the whole module rests on: a command must never fail because a
+    /// log could not be written.
+    #[test]
+    fn a_journal_with_no_sinks_records_nothing_and_does_not_complain() {
+        let journal = Journal::silent();
+        journal.record(&Event::info("validate", "command invoked"));
+        assert!(journal.project_log().is_none());
+    }
 
     /// A folder called `holiday, "best" one` is a folder someone will make.
     #[test]

@@ -247,6 +247,59 @@ pub struct MotionSpec {
     pub seed: u64,
 }
 
+/// Which rule decides a scene's Ken Burns move (D-153).
+///
+/// A film's motion is seeded rather than chosen, so changing the rule changes
+/// every scene of every film made under the old one. D-140 refused the
+/// improvement for exactly that reason and named this as the shape of the fix:
+/// **the rule a project renders under is written in the project**, so an
+/// existing folder keeps rendering the film it has always rendered and a new
+/// one gets the better rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum MotionSeed {
+    /// The original rule: `project id + scene index + content hash` (D-035).
+    ///
+    /// **The default, and it must stay the default.** A `project.yaml` with no
+    /// `motion_seed:` key is every project made before D-153 existed, and the
+    /// promise made to those is that they render exactly as they did.
+    #[default]
+    V1,
+    /// `project id + occurrence + content hash` — no scene index (D-153).
+    ///
+    /// A photograph's move is a property of the photograph, so reordering a
+    /// film re-encodes only the scenes whose *content* moved and changes the
+    /// motion on none of the others. What `still new` writes into a fresh
+    /// `project.yaml`.
+    V2,
+}
+
+impl MotionSeed {
+    /// The spelling used in `project.yaml` and in a log line.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            MotionSeed::V1 => "v1",
+            MotionSeed::V2 => "v2",
+        }
+    }
+
+    /// Parse the `motion_seed:` value. Case-insensitive, `v` optional.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().trim_start_matches('v') {
+            "1" => Some(MotionSeed::V1),
+            "2" => Some(MotionSeed::V2),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for MotionSeed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl MotionSpec {
     /// A hand-specified move. `amount` is clamped rather than rejected: an
     /// out-of-range zoom is a slider that went too far, not a corrupt project.
@@ -271,14 +324,53 @@ impl MotionSpec {
     /// (D-043): moving a file must not re-roll its motion, and two scenes
     /// pointing at the same bytes must not share a move by accident — which is
     /// why the scene index is in the seed too.
+    ///
+    /// **This is [`MotionSeed::V1`] and it is frozen.** Every film ever rendered
+    /// by this program was made with it, and it must keep producing exactly
+    /// these moves forever (D-153). New work goes in
+    /// [`MotionSpec::seeded_with`].
     #[must_use]
     pub fn seeded(project_id: &str, scene_index: u32, content_hash: &str) -> Self {
-        let seed = fnv1a_fields(&[
+        Self::from_seed(fnv1a_fields(&[
             project_id.as_bytes(),
             &scene_index.to_le_bytes(),
             content_hash.as_bytes(),
-        ]);
+        ]))
+    }
 
+    /// Derive a move under a stated seed rule (D-153).
+    ///
+    /// `occurrence` is how many **earlier scenes in this film use the same
+    /// still**, and it is ignored by [`MotionSeed::V1`]. It exists so that
+    /// [`MotionSeed::V2`] can keep D-035's promise that two scenes showing one
+    /// photograph do not move identically, without making the move depend on
+    /// where the scene sits — which is the whole of D-140's cost.
+    #[must_use]
+    pub fn seeded_with(
+        version: MotionSeed,
+        project_id: &str,
+        scene_index: u32,
+        occurrence: u32,
+        content_hash: &str,
+    ) -> Self {
+        match version {
+            MotionSeed::V1 => Self::seeded(project_id, scene_index, content_hash),
+            // No scene index, so a photograph's move is a property of the
+            // photograph. The version tag is in the seed as well: without it,
+            // the first occurrence under V2 would hash identically to scene
+            // index 0 under V1, and one film in every set would silently be
+            // unchanged while the rest moved — a coincidence that would look
+            // like a bug in whichever direction it was noticed.
+            MotionSeed::V2 => Self::from_seed(fnv1a_fields(&[
+                b"motion-seed-v2",
+                project_id.as_bytes(),
+                &occurrence.to_le_bytes(),
+                content_hash.as_bytes(),
+            ])),
+        }
+    }
+
+    fn from_seed(seed: u64) -> Self {
         // Three independent byte ranges of the same seed, so the kind, the
         // anchor and the amount do not move in lockstep across scenes.
         let kind = MotionKind::ALL[(seed % MotionKind::ALL.len() as u64) as usize];

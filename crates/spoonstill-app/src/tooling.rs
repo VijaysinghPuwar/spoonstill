@@ -36,6 +36,14 @@ pub struct ToolReport {
     pub ready: bool,
     /// What is wrong and what fixes it. [`None`] exactly when `ready`.
     pub remedy: Option<Remedy>,
+    /// Which build this is, when somebody has paid for the answer (D-151).
+    ///
+    /// `None` from [`ffmpeg`] and [`provider`] on purpose: those are a stat and
+    /// are on the path of every validate, and asking a binary its version is a
+    /// spawn. [`check_all`] fills it, because its two callers — `still doctor`
+    /// and the window's Settings card — are a person asking *what is on this
+    /// machine*, which is the one question a version answers.
+    pub version: Option<String>,
 }
 
 impl ToolReport {
@@ -73,6 +81,7 @@ pub fn provider(id: &str) -> ToolReport {
             id: id.to_owned(),
             purpose: PURPOSE,
             ready: false,
+            version: None,
             remedy: Some(Remedy::manual(
                 "This project asks for a voice service this version of spoonstill does \
                  not have.",
@@ -98,7 +107,13 @@ pub fn provider(id: &str) -> ToolReport {
 /// check and `still doctor` both read.
 #[must_use]
 pub fn check_all() -> Vec<ToolReport> {
-    let mut all = vec![ffmpeg()];
+    let mut ffmpeg = ffmpeg();
+    // Only when it runs: asking a binary that is not there for its version is
+    // a spawn that can only fail, and the remedy already says what is wrong.
+    if ffmpeg.ready {
+        ffmpeg.version = Some(spoonstill_media::Tools::from_env().ffmpeg_version());
+    }
+    let mut all = vec![ffmpeg];
     all.extend(crate::tts::providers().iter().map(|p| provider(p.id())));
     all
 }
@@ -139,6 +154,7 @@ fn report(id: &str, purpose: &'static str, checked: Result<(), Remedy>) -> ToolR
         purpose,
         ready: checked.is_ok(),
         remedy: checked.err(),
+        version: None,
     }
 }
 

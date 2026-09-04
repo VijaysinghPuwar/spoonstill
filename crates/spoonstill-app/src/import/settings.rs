@@ -28,6 +28,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use spoonstill_core::MotionSeed;
 use spoonstill_core::captions::{Placement, SubtitleTheme};
 use spoonstill_core::motion::{DEFAULT_AMOUNT, MAX_AMOUNT, MIN_AMOUNT};
 use spoonstill_core::project::{MAX_SCENE_SECONDS, Problem, ProblemKind, ProviderId, VoiceId};
@@ -119,6 +120,12 @@ pub struct Settings {
     pub subtitle_theme: SubtitleTheme,
     /// Which edge they sit against.
     pub subtitle_placement: Placement,
+    /// Which rule decides each scene's Ken Burns move (D-153).
+    ///
+    /// **Absent means [`MotionSeed::V1`]**, which is every project made before
+    /// this key existed: those render the film they have always rendered.
+    /// `still new` writes `v2` into a fresh `project.yaml`.
+    pub motion_seed: MotionSeed,
 }
 
 impl Default for Settings {
@@ -141,6 +148,10 @@ impl Default for Settings {
             subtitles: DEFAULT_SUBTITLES,
             subtitle_theme: DEFAULT_THEME,
             subtitle_placement: Placement::Bottom,
+            // The default is the old rule, and that is the whole point of the
+            // key: a folder that says nothing is a folder that was made before
+            // there was anything to say (D-153).
+            motion_seed: MotionSeed::default(),
         }
     }
 }
@@ -165,6 +176,8 @@ struct RawSettings {
     encode: Option<RawEncode>,
     defaults: Option<RawDefaults>,
     subtitles: Option<RawSubtitles>,
+    /// `v1` or `v2` (D-153). Absent is `v1`.
+    motion_seed: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -271,9 +284,9 @@ pub fn load(root: &Path) -> Result<(Settings, Vec<Problem>), SettingsError> {
             return Err(SettingsError::Malformed {
                 path,
                 detail: format!(
-                    "is {} MB — a project's settings are a dozen lines, so this is \
+                    "is {} — a project's settings are a dozen lines, so this is \
                      some other file under that name",
-                    meta.len() / (1024 * 1024)
+                    super::human_size(meta.len())
                 ),
             });
         }
@@ -491,6 +504,20 @@ fn resolve(raw: RawSettings) -> (Settings, Vec<Problem>) {
                     expected: "bottom or top",
                 })),
             }
+        }
+    }
+
+    if let Some(seed) = non_empty(raw.motion_seed) {
+        match MotionSeed::parse(&seed) {
+            Some(parsed) => settings.motion_seed = parsed,
+            // Refused rather than defaulted (D-055): a typed `v3` that fell
+            // back to v1 would silently re-render the whole film differently
+            // from the one the operator meant.
+            None => problems.push(Problem::in_project(ProblemKind::UnusableSetting {
+                field: "motion_seed",
+                value: seed,
+                expected: "v1 or v2",
+            })),
         }
     }
 

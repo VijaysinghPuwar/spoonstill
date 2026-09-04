@@ -67,6 +67,27 @@ fn the_readme_counts_the_gates_that_exist() {
     );
 }
 
+/// The same number appears a second time, in the Windows caveat near the top —
+/// and it was **stale** (30 against 31) the moment a gate landed, because only
+/// the "It runs N checks" phrasing was ever checked. A claim counted once and
+/// written twice is a claim that drifts.
+#[test]
+fn every_gate_count_in_the_readme_is_the_same_number() {
+    let counted = gates_in("scripts/m0-gates.sh")
+        + gates_in("scripts/m1-gates.sh")
+        + gates_in("scripts/m2-gates.sh");
+    let readme = read("README.md");
+    let phrase = format!("{counted} `make gates` checks");
+    assert!(
+        readme.contains(&phrase),
+        "README.md should say {phrase:?}; it says: {:?}",
+        readme
+            .lines()
+            .find(|l| l.contains("`make gates` checks"))
+            .unwrap_or("(no such line)"),
+    );
+}
+
 /// The per-milestone table on the same page is the same claim, split three ways.
 #[test]
 fn the_readme_milestone_table_counts_the_same_gates() {
