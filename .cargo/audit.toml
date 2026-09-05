@@ -8,6 +8,12 @@
 # Reviewed 2026-08-30 against 516 crates: **0 vulnerabilities**, 18 warnings.
 # Review again by 2026-11-30, or whenever `cargo update` moves any of these.
 #
+# Re-run 2026-09-05 against 528 crates after D-157 added a text shaper: same 18
+# warnings, **nothing added to this list**. The first choice, `rustybuzz`, was
+# unmaintained (RUSTSEC-2026-0206) and this gate refused it; `harfrust`, which
+# that advisory names as the maintained replacement, carries no advisory. An
+# ignore entry was the alternative and would have been the wrong answer.
+#
 # The two targets this project ships are macOS and Windows (D-071, and the five
 # `target:` entries in .github/workflows/release.yml). There is no Linux build.
 # That is not a reason to ignore a Linux-only advisory forever — it is the

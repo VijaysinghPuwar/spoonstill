@@ -451,6 +451,109 @@ const LIMIT_VERSION: Duration = Duration::from_secs(20);
 /// (D-043: a cache key that hashes "default" must mean one voice).
 pub const DEFAULT_VOICE: &str = "en-US-AvaNeural";
 
+/// The voice a line gets when nobody chose one and it is not in Latin script
+/// (D-158).
+///
+/// Without this a Hindi project does not render at all: the service accepts a
+/// request for `en-US-AvaNeural`, returns no audio, and every scene fails. The
+/// language comes from [`spoonstill_core::language::of`], which reads it off
+/// the characters — so an operator who writes Hindi gets a Hindi voice without
+/// having been told there was a setting.
+///
+/// **Named rather than searched**, exactly like [`DEFAULT_VOICE`] and for the
+/// same reason: picking "the first `hi-` voice in the catalogue" makes a render
+/// depend on a list that Microsoft changes, and the voice reaches the audio
+/// cache key (D-043). Each of these was checked against the live catalogue on
+/// 2026-09-05. A language not in this table falls back to [`DEFAULT_VOICE`],
+/// which is the behaviour every release before this one had.
+///
+/// One voice per language, and where a language has several countries the most
+/// widely spoken is taken. An operator who wants another one names it — that is
+/// what `--voice` and `tts.voice` are for, and both still win outright.
+///
+/// **Punjabi, Odia and Armenian are recognised by the script detector and are
+/// deliberately not here**: Edge has no voice for any of them — checked, the
+/// catalogue holds no `pa-`, `or-` or `hy-` row at all. Naming one anyway would
+/// turn "no audio" into "invalid voice", which is a different wrong answer, not
+/// a better one. `edge_live.rs` asserts every row below is really in the
+/// catalogue, because a table of names in a file nothing checks is a table that
+/// rots (`make tts-live`).
+const DEFAULT_VOICES: &[(&str, &str)] = &[
+    ("hi", "hi-IN-MadhurNeural"),
+    ("bn", "bn-IN-BashkarNeural"),
+    ("gu", "gu-IN-NiranjanNeural"),
+    ("ta", "ta-IN-ValluvarNeural"),
+    ("te", "te-IN-MohanNeural"),
+    ("kn", "kn-IN-GaganNeural"),
+    ("ml", "ml-IN-MidhunNeural"),
+    ("si", "si-LK-SameeraNeural"),
+    ("el", "el-GR-NestorasNeural"),
+    ("ru", "ru-RU-DmitryNeural"),
+    ("he", "he-IL-AvriNeural"),
+    ("ar", "ar-EG-ShakirNeural"),
+    ("th", "th-TH-NiwatNeural"),
+    ("lo", "lo-LA-ChanthavongNeural"),
+    ("ja", "ja-JP-KeitaNeural"),
+    ("my", "my-MM-ThihaNeural"),
+    ("ka", "ka-GE-GiorgiNeural"),
+    ("am", "am-ET-AmehaNeural"),
+    ("km", "km-KH-PisethNeural"),
+    ("ko", "ko-KR-InJoonNeural"),
+    ("zh", "zh-CN-YunxiNeural"),
+];
+
+/// Why a voice returned no audio, when the reason is that it cannot read this
+/// script (D-158).
+///
+/// `None` when the line is Latin, or when the voice's own language already
+/// matches it — in which case the caller's existing sentence about an
+/// unspeakable line is the right one.
+///
+/// The comparison is on the **primary subtag**, so `hi-IN-MadhurNeural` reads
+/// Hindi and `en-GB-RyanNeural` does not, without this needing a table of which
+/// country speaks what.
+fn wrong_script(text: &str, voice: &str) -> Option<String> {
+    let language = spoonstill_core::language::of(text)?;
+    if voice.starts_with(&format!("{language}-")) {
+        return None;
+    }
+    // Phrased without an article before either code: "a hi voice" and "an en
+    // voice" need different ones, and a sentence that has to pick is a
+    // sentence that gets it wrong for some language.
+    let spoken_by = voice.split('-').next().unwrap_or(voice);
+    Some(
+        match DEFAULT_VOICES.iter().find(|(id, _)| *id == language) {
+            Some((_, suggestion)) => format!(
+                "this line is written in {language}; {voice} speaks {spoken_by} and cannot read \
+             it. Name no voice at all — no `--voice`, no `tts.voice` — and the script \
+             chooses one, or render with `--voice {suggestion}`."
+            ),
+            None => format!(
+                "this line is written in {language}; {voice} speaks {spoken_by} and cannot read \
+             it — and this provider offers no {language} voice at all. \
+             `still voices {language}` lists what it does have."
+            ),
+        },
+    )
+}
+
+/// The voice this line would be spoken in if nobody chose one.
+///
+/// Pure, and a function of the text alone, so the audio cache key — which
+/// hashes the text and the *requested* voice — still names exactly one
+/// artifact (D-043).
+#[must_use]
+pub fn default_voice_for(text: &str) -> &'static str {
+    spoonstill_core::language::of(text)
+        .and_then(|language| {
+            DEFAULT_VOICES
+                .iter()
+                .find(|(id, _)| *id == language)
+                .map(|(_, voice)| *voice)
+        })
+        .unwrap_or(DEFAULT_VOICE)
+}
+
 /// Whether one failure is worth trying again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fault {
@@ -729,11 +832,19 @@ fn interpret(error: spoonstill_media::MediaError, voice: &str, text: &str) -> Fa
                         Failure::Permanent(TtsError::NoAudio {
                             provider: ID.to_owned(),
                             text: opening(text),
-                            detail: format!(
-                                "the service accepted the request for {voice} and returned no \
-                                 audio. A line with no speakable words in it — only punctuation, \
-                                 digits or symbols — does this."
-                            ),
+                            // The line being empty of words is one cause and
+                            // was the only one named. A voice that cannot read
+                            // the script is the other, it is the likelier one
+                            // the moment the line is not in Latin, and blaming
+                            // the operator's perfectly good sentence for it
+                            // sent them looking in the wrong place (D-158).
+                            detail: wrong_script(text, voice).unwrap_or_else(|| {
+                                format!(
+                                    "the service accepted the request for {voice} and returned \
+                                     no audio. A line with no speakable words in it — only \
+                                     punctuation, digits or symbols — does this."
+                                )
+                            }),
                         })
                     } else {
                         Failure::Transient(format!(
@@ -1105,8 +1216,10 @@ impl Provider for Edge {
             });
         }
 
+        // A voice the operator named is obeyed whatever the line says; only
+        // the *absence* of a choice is filled in from the script (D-158).
         let voice = if request.voice.is_empty() || request.voice == "default" {
-            DEFAULT_VOICE
+            default_voice_for(request.text)
         } else {
             request.voice
         };
@@ -2341,5 +2454,75 @@ aiohttp.client_exceptions.ClientConnectorDNSError: Cannot connect to host speech
             "the script cap is {cap} bytes against a {widest}-byte line: that is \
              not a bound, it is a number"
         );
+    }
+
+    /// D-158. Nobody chose a voice, so the script chooses one.
+    ///
+    /// Before this, a Hindi project did not render at all: `en-US-AvaNeural`
+    /// is accepted by the service and returns no audio, so every spoken scene
+    /// failed.
+    #[test]
+    fn a_line_that_named_no_voice_is_spoken_in_the_language_it_is_written_in() {
+        assert_eq!(default_voice_for("नमस्ते दुनिया"), "hi-IN-MadhurNeural");
+        assert_eq!(default_voice_for("你好世界"), "zh-CN-YunxiNeural");
+        assert_eq!(default_voice_for("こんにちは"), "ja-JP-KeitaNeural");
+
+        // Latin is unchanged, which is the promise to every project that
+        // already exists: same voice, same cache key, same audio.
+        assert_eq!(default_voice_for("Chapter three."), DEFAULT_VOICE);
+        assert_eq!(default_voice_for(""), DEFAULT_VOICE);
+
+        // A script this provider has no voice for falls back rather than
+        // naming one that does not exist — Edge offers no `pa-` voice at all,
+        // and `Invalid voice` is not a better failure than the old one.
+        assert_eq!(default_voice_for("ਸਤ ਸ੍ਰੀ ਅਕਾਲ"), DEFAULT_VOICE);
+    }
+
+    /// D-158. Every voice in the table is at least shaped like a voice, and
+    /// the table agrees with itself.
+    ///
+    /// That the service still *offers* them is `edge_live.rs`'s job — only the
+    /// service knows. What is checkable here is that each row's voice belongs
+    /// to the language it is filed under, which is the mistake a hurried edit
+    /// makes.
+    #[test]
+    fn every_default_voice_belongs_to_the_language_it_is_filed_under() {
+        let mut seen: Vec<&str> = Vec::new();
+        for (language, voice) in DEFAULT_VOICES {
+            assert!(
+                voice.starts_with(&format!("{language}-")),
+                "{voice} is filed under {language}"
+            );
+            assert!(!seen.contains(language), "{language} is listed twice");
+            seen.push(language);
+        }
+    }
+
+    /// D-158. A voice that cannot read the line says so, instead of blaming
+    /// the line.
+    ///
+    /// The old message said the line had "no speakable words in it — only
+    /// punctuation, digits or symbols" over a perfectly ordinary Hindi
+    /// sentence, which sent the operator to look at their text.
+    #[test]
+    fn a_voice_that_cannot_read_the_script_is_what_the_message_names() {
+        let hindi = "नमस्ते दुनिया";
+
+        let said = wrong_script(hindi, "en-GB-RyanNeural").expect("a mismatch");
+        assert!(said.contains("hi-IN-MadhurNeural"), "{said}");
+        assert!(said.contains("en-GB-RyanNeural"), "{said}");
+
+        // A voice that *can* read it gets no such explanation — then the line
+        // really is the suspect, and the caller's own sentence is right.
+        assert!(wrong_script(hindi, "hi-IN-SwaraNeural").is_none());
+
+        // Latin says nothing either, so an English project's failure message
+        // is exactly what it was.
+        assert!(wrong_script("Chapter three.", "en-GB-RyanNeural").is_none());
+
+        // A script with no voice anywhere says that, rather than suggesting
+        // one that does not exist.
+        let none = wrong_script("ਸਤ ਸ੍ਰੀ ਅਕਾਲ", "en-US-AvaNeural").expect("a mismatch");
+        assert!(none.contains("no pa voice at all"), "{none}");
     }
 }

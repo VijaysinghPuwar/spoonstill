@@ -51,6 +51,22 @@ const REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
 const SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.ttf");
 const BOLD: &[u8] = include_bytes!("../assets/fonts/Inter-Bold.ttf");
 
+/// Devanagari, which Inter does not draw at all (D-157).
+///
+/// A Hindi caption used to come out as one of Inter's `.notdef` glyphs per
+/// character — and Inter's `.notdef` is a box with the words **NO GLYPH** in
+/// it, so a line of Hindi rendered as a row of little warning labels. The
+/// operator's own report is the clearest statement of the defect there is.
+///
+/// Noto Sans Devanagari, SIL Open Font License 1.1, in the same three weights
+/// as Inter so a theme means one thing whatever it is asked to draw. The
+/// licence travels with the files, in
+/// `assets/fonts/LICENSE-NotoSansDevanagari.txt`, and is named in
+/// `THIRD-PARTY-NOTICES.md` like Inter's (D-124).
+const DEVA_REGULAR: &[u8] = include_bytes!("../assets/fonts/NotoSansDevanagari-Regular.ttf");
+const DEVA_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/NotoSansDevanagari-SemiBold.ttf");
+const DEVA_BOLD: &[u8] = include_bytes!("../assets/fonts/NotoSansDevanagari-Bold.ttf");
+
 /// Smallest the type may be shrunk to when a cue will not fit in
 /// [`ThemeStyle::max_lines`], as a fraction of the theme's own size.
 ///
@@ -413,30 +429,126 @@ impl Mask {
     }
 }
 
-/// One parsed weight, kept for the life of the process.
+/// One bundled face, seen by both the rasterizer and the shaper.
 ///
-/// Parsing a 320 KB TTF is not free, and `render_cue` is called once per cue —
-/// several times per scene, five hundred scenes at the design point. Parsing
-/// per cue cost measured seconds across a hundred-scene film. There are three
-/// of these and they never change, so they are parsed at most once each.
-fn font(weight: Weight) -> &'static fontdue::Font {
-    use std::sync::OnceLock;
-    static FONTS: [OnceLock<fontdue::Font>; 3] =
-        [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+/// The same bytes, read twice for two different questions: fontdue answers
+/// *what does glyph N look like at this size*, harfrust answers *which glyphs,
+/// in what order, at what offsets* — which for Devanagari is not the same
+/// question as "one glyph per character" (D-157).
+struct Face {
+    /// Draws a glyph. Asked by **index**, so shaped output can be drawn.
+    outlines: fontdue::Font,
+    /// The same bytes as `outlines`, read by the shaper's font library.
+    font: harfrust::FontRef<'static>,
+    /// The shaper's parsed tables. A `Shaper` borrows this and the `FontRef`
+    /// together, so it is built per call rather than stored — the caches that
+    /// cost anything to build live in here, and shaped runs are cached above
+    /// this anyway.
+    tables: harfrust::ShaperData,
+    /// Whether a run in this face is shaped before it is drawn.
+    ///
+    /// Latin is laid out one character at a time, exactly as it was before any
+    /// of this existed, so every caption in every film already rendered comes
+    /// out byte for byte the same. Devanagari cannot be: `स` + `्` + `त` is one
+    /// conjunct glyph, and `ि` is drawn to the *left* of the consonant it
+    /// follows in the text. Turning shaping on for Inter too would be one code
+    /// path instead of two and would move every caption ever burned in, which
+    /// is not a trade to make for tidiness (D-118's reasoning, D-153's).
+    shaped: bool,
+    /// The font's own coordinate system, which shaped advances are in.
+    units_per_em: f32,
+}
 
-    let (slot, bytes) = match weight {
-        Weight::Regular => (&FONTS[0], REGULAR),
-        Weight::SemiBold => (&FONTS[1], SEMIBOLD),
-        Weight::Bold => (&FONTS[2], BOLD),
-    };
-    slot.get_or_init(|| {
+impl Face {
+    fn parse(bytes: &'static [u8], shaped: bool) -> Face {
         // The bytes are `include_bytes!`d from this crate's own assets, so a
         // parse failure is a corrupt checkout, not an operator's input. There
         // is no useful recovery and no caller who could act on the error.
-        fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default())
-            .expect("a bundled Inter weight must parse; the checkout is damaged if it does not")
-    })
+        let damaged = "a bundled font must parse; the checkout is damaged if it does not";
+        let outlines =
+            fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()).expect(damaged);
+        let font = harfrust::FontRef::from_index(bytes, 0).expect(damaged);
+        let tables = harfrust::ShaperData::new(&font);
+        let units_per_em = outlines.units_per_em();
+        Face {
+            outlines,
+            font,
+            tables,
+            shaped,
+            units_per_em,
+        }
+    }
+
+    fn has(&self, ch: char) -> bool {
+        self.outlines.lookup_glyph_index(ch) != 0
+    }
 }
+
+/// The faces one weight draws with, in the order they are tried.
+///
+/// Parsing a 320 KB TTF is not free, and `render_cue` is called once per cue —
+/// several times per scene, five hundred scenes at the design point. Parsing
+/// per cue cost measured seconds across a hundred-scene film. There are six of
+/// these and they never change, so each is parsed at most once.
+fn faces(weight: Weight) -> &'static [Face] {
+    use std::sync::OnceLock;
+    static FACES: [OnceLock<Vec<Face>>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+
+    let (slot, latin, devanagari) = match weight {
+        Weight::Regular => (&FACES[0], REGULAR, DEVA_REGULAR),
+        Weight::SemiBold => (&FACES[1], SEMIBOLD, DEVA_SEMIBOLD),
+        Weight::Bold => (&FACES[2], BOLD, DEVA_BOLD),
+    };
+    slot.get_or_init(|| vec![Face::parse(latin, false), Face::parse(devanagari, true)])
+}
+
+/// Every character in `text` that no bundled face can draw (D-157).
+///
+/// What the caller does with this is tell the operator. Drawing a row of
+/// `.notdef` boxes and saying nothing is the defect this whole decision is
+/// about; drawing them *and naming the characters* at least ends with somebody
+/// able to act. Returned in first-seen order, deduplicated, because one
+/// unsupported script produces the same handful of characters hundreds of
+/// times and a list of hundreds is a list nobody reads (D-145).
+#[must_use]
+pub fn undrawable(text: &str) -> Vec<char> {
+    let faces = faces(Weight::Regular);
+    let mut seen = Vec::new();
+    for ch in text.chars() {
+        // A character with no visible form of its own is not missing: a space
+        // draws nothing wherever it comes from, and a zero-width joiner is an
+        // instruction to the shaper rather than a mark on the frame.
+        if ch.is_whitespace() || ch.is_control() || matches!(ch, '\u{200b}'..='\u{200f}') {
+            continue;
+        }
+        if faces.iter().any(|f| f.has(ch)) || seen.contains(&ch) {
+            continue;
+        }
+        seen.push(ch);
+    }
+    seen
+}
+
+/// One glyph as the shaper placed it, in font units.
+///
+/// Font units rather than pixels because [`balance`] bisects: the same run is
+/// measured at a dozen widths and, in the shrink loop, at several sizes.
+/// Shaping does not depend on the size, so it is done once and scaled.
+#[derive(Clone, Copy)]
+struct Placed {
+    glyph: u16,
+    x_advance: f32,
+    x_offset: f32,
+    y_offset: f32,
+}
+
+/// One face's shaped runs, kept for as long as the cue is being laid out.
+///
+/// `Rc` rather than a clone per lookup: [`balance`] bisects, so the same word
+/// is asked for a dozen times while the width moves, and the answer does not
+/// change with the width.
+type ShapedRuns =
+    std::cell::RefCell<std::collections::HashMap<(usize, String), std::rc::Rc<Vec<Placed>>>>;
 
 /// A weight, plus the measurements taken from it so far.
 ///
@@ -446,48 +558,183 @@ fn font(weight: Weight) -> &'static fontdue::Font {
 /// caption asked fontdue for the same glyph's advance some hundreds of times.
 /// Keyed by `(char, px)` because the shrink loop changes `px`.
 struct Fonts {
-    font: &'static fontdue::Font,
-    advance: std::cell::RefCell<std::collections::HashMap<(char, u32), f32>>,
-    kern: std::cell::RefCell<std::collections::HashMap<(char, char, u32), f32>>,
+    faces: &'static [Face],
+    advance: std::cell::RefCell<std::collections::HashMap<(usize, char, u32), f32>>,
+    kern: std::cell::RefCell<std::collections::HashMap<(usize, char, char, u32), f32>>,
+    /// Shaped runs, keyed by face and text. Not by size — see [`Placed`].
+    shaped: ShapedRuns,
+}
+
+/// A maximal span of one line drawn by one face.
+struct Run {
+    face: usize,
+    at: std::ops::Range<usize>,
 }
 
 impl Fonts {
     fn for_weight(weight: Weight) -> Fonts {
         Fonts {
-            font: font(weight),
+            faces: faces(weight),
             advance: std::cell::RefCell::new(std::collections::HashMap::new()),
             kern: std::cell::RefCell::new(std::collections::HashMap::new()),
+            shaped: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
     }
 
-    fn advance_of(&self, ch: char, px: f32) -> f32 {
+    /// Which face draws `ch`: the first that has it, else the primary.
+    ///
+    /// A character nothing has still goes to face 0, whose `.notdef` is what
+    /// gets drawn — the same box as before, now reported by [`undrawable`]
+    /// rather than left to be discovered on the finished film.
+    fn face_for(&self, ch: char) -> usize {
+        self.faces
+            .iter()
+            .position(|f| f.has(ch))
+            .unwrap_or_default()
+    }
+
+    /// Split a line into maximal spans sharing one face.
+    ///
+    /// A space is drawn by the primary face wherever it appears, so a Hindi
+    /// sentence is one run per word. That is deliberate: it keeps word spacing
+    /// identical whatever the words are, and it makes the shaping cache key a
+    /// word rather than a whole line, which is what makes re-wrapping cheap.
+    fn runs(&self, line: &str) -> Vec<Run> {
+        let mut runs: Vec<Run> = Vec::new();
+        for (at, ch) in line.char_indices() {
+            let face = self.face_for(ch);
+            match runs.last_mut() {
+                Some(run) if run.face == face => run.at.end = at + ch.len_utf8(),
+                _ => runs.push(Run {
+                    face,
+                    at: at..at + ch.len_utf8(),
+                }),
+            }
+        }
+        runs
+    }
+
+    fn advance_of(&self, face: usize, ch: char, px: f32) -> f32 {
         *self
             .advance
             .borrow_mut()
-            .entry((ch, px.to_bits()))
-            .or_insert_with(|| self.font.metrics(ch, px).advance_width)
+            .entry((face, ch, px.to_bits()))
+            .or_insert_with(|| self.faces[face].outlines.metrics(ch, px).advance_width)
     }
 
-    fn kern_between(&self, left: char, right: char, px: f32) -> f32 {
+    fn kern_between(&self, face: usize, left: char, right: char, px: f32) -> f32 {
         *self
             .kern
             .borrow_mut()
-            .entry((left, right, px.to_bits()))
-            .or_insert_with(|| self.font.horizontal_kern(left, right, px).unwrap_or(0.0))
+            .entry((face, left, right, px.to_bits()))
+            .or_insert_with(|| {
+                self.faces[face]
+                    .outlines
+                    .horizontal_kern(left, right, px)
+                    .unwrap_or(0.0)
+            })
+    }
+
+    /// Shape one run, once, in font units.
+    fn shape(&self, face: usize, text: &str) -> std::rc::Rc<Vec<Placed>> {
+        if let Some(done) = self.shaped.borrow().get(&(face, text.to_owned())) {
+            return std::rc::Rc::clone(done);
+        }
+        let mut buffer = harfrust::UnicodeBuffer::new();
+        buffer.push_str(text);
+        // The script and the direction are read out of the characters
+        // themselves — nothing above this has to know what language a caption
+        // is in, which is the whole point (D-157).
+        buffer.guess_segment_properties();
+        let shaper = self.faces[face]
+            .tables
+            .shaper(&self.faces[face].font)
+            .build();
+        let output = shaper.shape(buffer, harfrust::ShapeOptions::default());
+
+        let placed: Vec<Placed> = output
+            .glyph_infos()
+            .iter()
+            .zip(output.glyph_positions())
+            .map(|(info, pos)| Placed {
+                glyph: u16::try_from(info.glyph_id).unwrap_or(0),
+                x_advance: pos.x_advance as f32,
+                x_offset: pos.x_offset as f32,
+                y_offset: pos.y_offset as f32,
+            })
+            .collect();
+        let placed = std::rc::Rc::new(placed);
+        self.shaped
+            .borrow_mut()
+            .insert((face, text.to_owned()), std::rc::Rc::clone(&placed));
+        placed
+    }
+
+    fn scale(&self, face: usize, px: f32) -> f32 {
+        px / self.faces[face].units_per_em
+    }
+
+    /// Advance width of one run at `px`.
+    fn measure_run(&self, run: &Run, line: &str, px: f32) -> f32 {
+        let text = &line[run.at.clone()];
+        if self.faces[run.face].shaped {
+            let scale = self.scale(run.face, px);
+            return self
+                .shape(run.face, text)
+                .iter()
+                .map(|g| g.x_advance * scale)
+                .sum();
+        }
+        let mut width = 0.0;
+        let mut previous: Option<char> = None;
+        for ch in text.chars() {
+            if let Some(p) = previous {
+                width += self.kern_between(run.face, p, ch, px);
+            }
+            width += self.advance_of(run.face, ch, px);
+            previous = Some(ch);
+        }
+        width
     }
 
     /// Advance width of one line at `px`, kerning included.
     fn measure(&self, line: &str, px: f32) -> f32 {
-        let mut width = 0.0;
-        let mut previous: Option<char> = None;
-        for ch in line.chars() {
-            if let Some(p) = previous {
-                width += self.kern_between(p, ch, px);
+        self.runs(line)
+            .iter()
+            .map(|run| self.measure_run(run, line, px))
+            .sum()
+    }
+
+    /// Ascent and descent tall enough for every face these lines use.
+    ///
+    /// Taken from the faces actually drawn with, not from all of them: a Latin
+    /// caption keeps Inter's metrics exactly, so its band is the height it has
+    /// always been. A Devanagari one gets Noto's, which is taller — and has to
+    /// be, or the matras above the headline are cut off against the top of the
+    /// canvas, which is the same defect D-117 fixed for a shadow.
+    fn line_metrics(&self, lines: &[String], px: f32) -> (f32, f32) {
+        let mut used: Vec<usize> = Vec::new();
+        for line in lines {
+            for run in self.runs(line) {
+                if !used.contains(&run.face) {
+                    used.push(run.face);
+                }
             }
-            width += self.advance_of(ch, px);
-            previous = Some(ch);
         }
-        width
+        if used.is_empty() {
+            used.push(0);
+        }
+        let mut ascent: f32 = 0.0;
+        let mut descent: f32 = 0.0;
+        for face in used {
+            let metrics = self.faces[face]
+                .outlines
+                .horizontal_line_metrics(px)
+                .expect("a horizontal font has horizontal line metrics");
+            ascent = ascent.max(metrics.ascent);
+            descent = descent.max(-metrics.descent); // fontdue reports descent as negative
+        }
+        (ascent, descent)
     }
 }
 
@@ -623,11 +870,11 @@ pub fn render_cue(
     #[allow(clippy::cast_precision_loss)]
     let margin = outline_r + shadow_off + shadow_blur * SHADOW_BLUR_PASSES as f32;
 
-    let metrics = fonts
-        .font
-        .horizontal_line_metrics(px_f)
-        .expect("a horizontal font has horizontal line metrics");
-    let first_line = metrics.ascent - metrics.descent;
+    // The faces `draw` is about to use, so the clamp is computed against the
+    // band that will actually be built and not against a taller one that could
+    // shorten a Latin caption in a film that already exists (D-157).
+    let (ascent, descent) = fonts.line_metrics(&lines, px_f);
+    let first_line = ascent + descent;
 
     // `draw` builds a band of
     //   line_height * (n - 1) + ascent + descent + 2 * pad_y + 2 * margin
@@ -655,6 +902,27 @@ pub fn render_cue(
     draw(&fonts, &lines, px_f, &style, placement, output)
 }
 
+/// Lay one rasterized glyph into the mask at `(gx, gy)`.
+///
+/// Split out when a second caller appeared (D-157) — the shaped path and the
+/// per-character path place a bitmap differently and blend it identically, and
+/// two copies of a compositing loop is how the two quietly stop agreeing.
+fn blit(mask: &mut Mask, m: &fontdue::Metrics, bitmap: &[u8], gx: isize, gy: isize) {
+    for by in 0..m.height {
+        for bx in 0..m.width {
+            let v = bitmap[by * m.width + bx];
+            if v == 0 {
+                continue;
+            }
+            let tx = gx + bx as isize;
+            let ty = gy + by as isize;
+            if tx >= 0 && ty >= 0 {
+                mask.raise(tx as usize, ty as usize, v);
+            }
+        }
+    }
+}
+
 /// Everything after the text has been wrapped: geometry, masks, compositing.
 #[allow(clippy::too_many_lines)]
 fn draw(
@@ -668,12 +936,7 @@ fn draw(
     let frame_w = output.width();
     let frame_h = output.height();
 
-    let metrics = fonts
-        .font
-        .horizontal_line_metrics(px)
-        .expect("a horizontal font has horizontal line metrics");
-    let ascent = metrics.ascent;
-    let descent = -metrics.descent; // fontdue reports descent as negative
+    let (ascent, descent) = fonts.line_metrics(lines, px);
 
     let line_height = (px * style.line_spacing as f32).round();
     let text_h = (line_height * (lines.len().saturating_sub(1)) as f32 + ascent + descent).ceil();
@@ -731,32 +994,43 @@ fn draw(
         let baseline = text_top + ascent + line_height * row as f32;
         let mut previous: Option<char> = None;
 
-        for ch in line.chars() {
-            if let Some(p) = previous {
-                pen += fonts.kern_between(p, ch, px);
-            }
-            let (m, bitmap) = fonts.font.rasterize(ch, px);
-            // fontdue hands back a bitmap positioned by `xmin` from the pen and
-            // `ymin` from the baseline, measured upward — so the top edge is
-            // the baseline less the height above it.
-            let gx = (pen + m.xmin as f32).round() as isize;
-            let gy = (baseline - (m.ymin + m.height as i32) as f32).round() as isize;
+        for run in fonts.runs(line) {
+            let text = &line[run.at.clone()];
+            let face = &fonts.faces[run.face];
 
-            for by in 0..m.height {
-                for bx in 0..m.width {
-                    let v = bitmap[by * m.width + bx];
-                    if v == 0 {
-                        continue;
-                    }
-                    let tx = gx + bx as isize;
-                    let ty = gy + by as isize;
-                    if tx >= 0 && ty >= 0 {
-                        glyphs.raise(tx as usize, ty as usize, v);
-                    }
+            // A shaped run is drawn by glyph index at the offsets the shaper
+            // gave, which is the only way a conjunct or a reordered matra can
+            // land where it belongs (D-157). Everything else is drawn a
+            // character at a time, unchanged.
+            if face.shaped {
+                let scale = fonts.scale(run.face, px);
+                for placed in fonts.shape(run.face, text).iter() {
+                    let (m, bitmap) = face.outlines.rasterize_indexed(placed.glyph, px);
+                    let gx = (pen + placed.x_offset * scale + m.xmin as f32).round() as isize;
+                    let gy =
+                        (baseline - placed.y_offset * scale - (m.ymin + m.height as i32) as f32)
+                            .round() as isize;
+                    blit(&mut glyphs, &m, &bitmap, gx, gy);
+                    pen += placed.x_advance * scale;
                 }
+                previous = None;
+                continue;
             }
-            pen += m.advance_width;
-            previous = Some(ch);
+
+            for ch in text.chars() {
+                if let Some(p) = previous {
+                    pen += fonts.kern_between(run.face, p, ch, px);
+                }
+                let (m, bitmap) = face.outlines.rasterize(ch, px);
+                // fontdue hands back a bitmap positioned by `xmin` from the pen
+                // and `ymin` from the baseline, measured upward — so the top
+                // edge is the baseline less the height above it.
+                let gx = (pen + m.xmin as f32).round() as isize;
+                let gy = (baseline - (m.ymin + m.height as i32) as f32).round() as isize;
+                blit(&mut glyphs, &m, &bitmap, gx, gy);
+                pen += m.advance_width;
+                previous = Some(ch);
+            }
         }
     }
 
@@ -1416,44 +1690,194 @@ mod tests {
     /// embedded. Replace the fonts and this fails until the notice is updated,
     /// which is the point: `include_bytes!` makes the obligation invisible at
     /// the call site, and nothing else in the build would notice.
+    /// D-157. Hindi is drawn, not boxed.
+    ///
+    /// Two defects in one line of text, and this asserts both. **Coverage**:
+    /// Inter has no Devanagari at all, so every character used to come out as
+    /// Inter's `.notdef` — which is a box with the words NO GLYPH in it, so a
+    /// Hindi caption rendered as a row of little warning labels. **Shaping**:
+    /// a font with the glyphs is not enough, because `स` + `्` + `त` is one
+    /// conjunct and a matra is not drawn where its character sits.
+    #[test]
+    fn a_hindi_caption_is_drawn_by_a_face_that_has_it_and_is_shaped() {
+        let hindi = "नमस्ते दुनिया";
+        let fonts = Fonts::for_weight(Weight::Regular);
+
+        // Coverage: the primary face has none of it, a bundled face has all of
+        // it, and so nothing is reported as undrawable.
+        for ch in hindi.chars().filter(|c| !c.is_whitespace()) {
+            assert!(
+                !fonts.faces[0].has(ch),
+                "Inter has gained {ch:?}; this test's premise is gone"
+            );
+            assert!(
+                fonts.faces[fonts.face_for(ch)].has(ch),
+                "no bundled face draws {ch:?}"
+            );
+        }
+        assert!(undrawable(hindi).is_empty(), "{:?}", undrawable(hindi));
+
+        // Shaping: `नमस्ते` is six characters and five glyphs, because
+        // `स` + `्` + `त` is one. Asserted as *fewer*, not as five: the count
+        // is the font's business and a font update may change it, while "the
+        // conjunct formed" is the property.
+        let word = "नमस्ते";
+        let face = fonts.face_for('न');
+        assert!(
+            fonts.faces[face].shaped,
+            "the Devanagari face is not shaped"
+        );
+        let glyphs = fonts.shape(face, word);
+        assert!(
+            glyphs.len() < word.chars().count(),
+            "no conjunct formed: {} glyphs for {} characters — the text went \
+             through unshaped, which draws Hindi wrong even with the right font",
+            glyphs.len(),
+            word.chars().count()
+        );
+        assert!(
+            glyphs.iter().all(|g| g.glyph != 0),
+            "the shaper still produced a .notdef"
+        );
+
+        // And it reaches the frame: a Hindi cue has ink on it.
+        let image = render_cue(hindi, SubtitleTheme::Boxed, Placement::Bottom, out());
+        assert!(
+            image.canvas.bytes().chunks_exact(4).any(|p| p[3] > 0),
+            "a Hindi cue drew nothing at all"
+        );
+    }
+
+    /// D-157. Adding a script did not move a caption that already exists.
+    ///
+    /// These three numbers were taken from the build **before** the face stack
+    /// and the shaper existed, and every one of them was unchanged by it. That
+    /// is the promise: a film rendered last week re-renders to the same pixels
+    /// this week, so nobody's burned-in captions shift because Hindi was made
+    /// to work. It is why Latin is deliberately *not* shaped — one code path
+    /// would be tidier and would move every caption ever burned in.
+    #[test]
+    fn a_latin_caption_is_byte_for_byte_what_it_was_before_hindi_worked() {
+        for (text, expected) in [
+            ("Hello world, this is a test.", 0x5c11_0c32_3c57_bcc3_u64),
+            ("Wavy AVA To Yo, kerning pairs.", 0xfd9d_e51e_34a9_653d_u64),
+        ] {
+            let image = render_cue(text, SubtitleTheme::Boxed, Placement::Bottom, out());
+            let got = spoonstill_core::hash::fnv1a(image.canvas.bytes());
+            assert_eq!(
+                got, expected,
+                "{text:?} renders differently now — 0x{got:016x}. If this was \
+                 deliberate, every caption in every film already made moves too"
+            );
+        }
+    }
+
+    /// D-157. A mark above the headline is not cut off against the band.
+    ///
+    /// The band's height comes from the ascent, and the ascent used to be
+    /// Inter's whatever was being drawn. Devanagari's marks sit higher, so a
+    /// band sized for Latin clips them — D-117's defect, in a different term of
+    /// the same sum. Asserted as a property of the output: the top row of the
+    /// image is empty, so nothing ran off the edge to reach it.
+    #[test]
+    fn a_devanagari_mark_is_not_clipped_against_the_top_of_the_band() {
+        // Marks above the headline: the i-matra's hook, the anusvara dot, the
+        // chandrabindu — the tallest things this script draws.
+        let image = render_cue(
+            "ऊँची चीज़ें, हिंदी की पंक्ति",
+            SubtitleTheme::Classic,
+            Placement::Bottom,
+            out(),
+        );
+        let width = image.canvas.width() as usize;
+        let top: Vec<u8> = image
+            .canvas
+            .bytes()
+            .chunks_exact(4)
+            .take(width)
+            .map(|p| p[3])
+            .collect();
+        assert!(
+            top.iter().all(|&a| a == 0),
+            "ink reaches the first row of the band, so something taller than \
+             the band was drawn and lost its top: {} of {width} pixels lit",
+            top.iter().filter(|&&a| a > 0).count()
+        );
+    }
+
+    /// D-157. A script nothing bundled can draw is named, not silently boxed.
+    ///
+    /// This is the honest half. Bundling every Noto face is tens of megabytes
+    /// and the wrong trade for a batch renderer, so some scripts still come out
+    /// as boxes — and an operator who is shown boxes and told nothing has no
+    /// way to find out why. First-seen order and deduplicated, because one
+    /// unsupported script produces the same handful of characters hundreds of
+    /// times (D-145's one-line rule).
+    #[test]
+    fn a_character_no_bundled_face_can_draw_is_reported() {
+        assert!(undrawable("Plain English, with punctuation — and 1234.").is_empty());
+        assert!(undrawable("हिंदी में लिखा हुआ वाक्य").is_empty());
+
+        // Bengali and Chinese are not bundled. Reported once each, in the
+        // order they were met.
+        let found = undrawable("চ chapter 中 চ 中");
+        assert_eq!(found, vec!['চ', '中'], "{found:?}");
+
+        // A space draws nothing wherever it comes from, and a zero-width
+        // joiner is an instruction to the shaper rather than a mark on the
+        // frame. Neither is a missing glyph.
+        assert!(undrawable(" \t\n\u{200d}").is_empty());
+    }
+
     #[test]
     fn the_notices_file_carries_the_licence_of_the_font_that_is_embedded() {
+        let fonts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts");
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(std::path::Path::parent)
             .expect("the workspace root");
 
-        let licence = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/LICENSE-Inter.txt"),
-        )
-        .expect("the fonts ship with their licence");
-
         let notices = std::fs::read_to_string(root.join("THIRD-PARTY-NOTICES.md"))
             .expect("THIRD-PARTY-NOTICES.md is at the workspace root");
 
-        assert!(
-            notices.contains(licence.trim()),
-            "the notices file no longer contains the licence the embedded fonts \
-             are under — update THIRD-PARTY-NOTICES.md from \
-             crates/spoonstill-media/assets/fonts/LICENSE-Inter.txt"
-        );
-
-        // The copyright line specifically, because the OFL names it separately
-        // from the licence body.
-        assert!(
-            notices.contains("Copyright 2020 The Inter Project Authors"),
-            "the copyright notice is missing"
-        );
-
-        // And every weight that is actually embedded is one the notice covers.
-        for weight in ["Inter-Regular.ttf", "Inter-SemiBold.ttf", "Inter-Bold.ttf"] {
+        // Every family embedded, its licence file, and the copyright line the
+        // OFL names separately from the licence body. A second family was
+        // added by D-157, and the point of the loop is that a third cannot be
+        // added without its licence following it.
+        for (licence, copyright, weights) in [
+            (
+                "LICENSE-Inter.txt",
+                "Copyright 2020 The Inter Project Authors",
+                ["Inter-Regular.ttf", "Inter-SemiBold.ttf", "Inter-Bold.ttf"],
+            ),
+            (
+                "LICENSE-NotoSansDevanagari.txt",
+                "Copyright 2022 The Noto Project Authors",
+                [
+                    "NotoSansDevanagari-Regular.ttf",
+                    "NotoSansDevanagari-SemiBold.ttf",
+                    "NotoSansDevanagari-Bold.ttf",
+                ],
+            ),
+        ] {
+            let text = std::fs::read_to_string(fonts.join(licence))
+                .unwrap_or_else(|e| panic!("the fonts ship with {licence}: {e}"));
             assert!(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("assets/fonts")
-                    .join(weight)
-                    .exists(),
-                "{weight} is embedded by name in this file"
+                notices.contains(text.trim()),
+                "the notices file no longer contains {licence} — update \
+                 THIRD-PARTY-NOTICES.md from \
+                 crates/spoonstill-media/assets/fonts/{licence}"
             );
+            assert!(
+                notices.contains(copyright),
+                "the copyright notice for {licence} is missing"
+            );
+            for weight in weights {
+                assert!(
+                    fonts.join(weight).exists(),
+                    "{weight} is embedded by name in this file"
+                );
+            }
         }
     }
 }

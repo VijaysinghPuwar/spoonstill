@@ -918,24 +918,37 @@ async fn provider_status_inner(provider: String) -> Result<ProviderStatus, Strin
 ///
 /// The frontend passes a folder the operator chose in the system dialog and
 /// gets back the one true path — it never joins a name onto a parent itself.
+///
+/// **Making a project opens it** (D-156). Every command that writes is bound to
+/// the project this window has open (D-127), and `Session` learned that only
+/// from `validate_project` — so a folder just made here was, to Rust, no
+/// project at all, and the very first thing an operator does in it, drop their
+/// photographs onto the empty screen, was refused with "no project is open in
+/// this window". The window made the folder; it is unambiguously open on it.
 #[tauri::command]
-async fn create_project(path: String) -> Result<String, String> {
+async fn create_project(session: State<'_, Session>, path: String) -> Result<String, String> {
     let root = PathBuf::from(&path);
     journalled(
         "create_project",
         Some(&root),
-        create_project_inner(path).await,
+        create_project_inner(&session, path).await,
     )
 }
 
-async fn create_project_inner(path: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        spoonstill_app::create_project(std::path::Path::new(&path))
-            .map(|root| root.display().to_string())
-            .map_err(|e| e.to_string())
+async fn create_project_inner(session: &Session, path: String) -> Result<String, String> {
+    let root = tauri::async_runtime::spawn_blocking(move || {
+        spoonstill_app::create_project(std::path::Path::new(&path)).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("the folder could not be made: {e}"))?
+    .map_err(|e| format!("the folder could not be made: {e}"))??;
+
+    // Adopted after the folder exists, and never on the way to a failure: a
+    // refused folder must not become the one this window would write into.
+    // The lock is taken and released here, not held across the await above.
+    if let Ok(mut slot) = session.root.lock() {
+        *slot = Some(root.clone());
+    }
+    Ok(root.display().to_string())
 }
 
 /// Copy photos, recordings and scripts into a project (D-080).
@@ -950,16 +963,16 @@ async fn add_media(
     files: Vec<String>,
 ) -> Result<IngestView, String> {
     let named = PathBuf::from(&root);
-    let outcome = add_media_inner(session, root, files).await;
+    let outcome = add_media_inner(&session, root, files).await;
     journalled("add_media", Some(&named), outcome)
 }
 
 async fn add_media_inner(
-    session: State<'_, Session>,
+    session: &Session,
     root: String,
     files: Vec<String>,
 ) -> Result<IngestView, String> {
-    let root = project_root(&session, &root)?;
+    let root = project_root(session, &root)?;
     tauri::async_runtime::spawn_blocking(move || {
         let sources: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
         let report = spoonstill_app::add_media(std::path::Path::new(&root), &sources)
@@ -1954,6 +1967,82 @@ mod tests {
             project_root(&session, &spelled.display().to_string()).expect("same folder"),
             open
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D-156. Making a project opens it, so the first thing done in a brand-new
+    /// folder is not refused.
+    ///
+    /// `create_project` returned a path and told `Session` nothing, while every
+    /// command that writes asks `Session` which project this window has open
+    /// (D-127). So "New project" then dropping photographs onto the empty
+    /// screen — the whole of what an operator does first — failed with "no
+    /// project is open in this window", on the one screen that offers nothing
+    /// else to do. Opening the same folder afterwards fixed it, which is why it
+    /// read as intermittent.
+    #[test]
+    fn making_a_project_opens_it() {
+        let dir = std::env::temp_dir().join(format!("spoonstill-made-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let made = dir.join("a brand new project");
+
+        let session = Session::default();
+
+        // Nothing is open before the folder is made, and that is correct.
+        assert!(project_root(&session, &made.display().to_string()).is_err());
+
+        let root = tauri::async_runtime::block_on(create_project_inner(
+            &session,
+            made.display().to_string(),
+        ))
+        .expect("the folder is made");
+
+        // What `add_media` asks the moment a photograph is dropped in. Asked
+        // with the path the page was handed, which is the path Rust returned.
+        assert_eq!(
+            project_root(&session, &root).expect("the window is open on the project it just made"),
+            PathBuf::from(&root)
+        );
+
+        // And the drop itself — the reported sequence, end to end, with only
+        // the webview left out. `add_media` copies and pairs; it spawns
+        // nothing, so this runs on a machine with no FFmpeg like the rest.
+        let source = dir.join("from the camera");
+        std::fs::create_dir_all(&source).expect("scratch");
+        let photograph = source.join("DSC_0001.jpg");
+        std::fs::write(&photograph, b"stands in for a photograph").expect("scratch");
+
+        let report = tauri::async_runtime::block_on(add_media_inner(
+            &session,
+            root.clone(),
+            vec![photograph.display().to_string()],
+        ))
+        .expect("a photograph dropped onto a brand-new project");
+        assert_eq!(report.rows.len(), 1, "the drop copied nothing in");
+        assert!(
+            made.join("001.jpg").is_file(),
+            "the photograph is not in the project"
+        );
+
+        // A refused folder is not adopted: the window stays open on the project
+        // it has, rather than pointing at one that was never made. A folder
+        // that already holds stills is D-080's refusal.
+        let elsewhere = dir.join("somebody elses photographs");
+        std::fs::create_dir_all(&elsewhere).expect("scratch");
+        std::fs::write(elsewhere.join("001.jpg"), b"not really a photograph").expect("scratch");
+        assert!(
+            tauri::async_runtime::block_on(create_project_inner(
+                &session,
+                elsewhere.display().to_string()
+            ))
+            .is_err()
+        );
+        assert_eq!(
+            project_root(&session, &root).expect("still the project that was made"),
+            PathBuf::from(&root)
+        );
+        assert!(project_root(&session, &elsewhere.display().to_string()).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

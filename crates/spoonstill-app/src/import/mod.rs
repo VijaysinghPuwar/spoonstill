@@ -474,6 +474,10 @@ pub fn load(root: &Path, media: &dyn MediaCheck) -> Result<Project, ImportError>
         problems.push(Problem::in_project(kind));
     }
 
+    if let Some(kind) = undrawable_captions(&resolved, settings.subtitles) {
+        problems.push(Problem::in_project(kind));
+    }
+
     order_by_scene(&mut problems, &rows.drafts);
 
     Ok(Project {
@@ -693,6 +697,71 @@ pub fn undersized_sources(scenes: &[ResolvedScene], out: &OutputSpec) -> Option<
         native_short_edge: (native > 0).then_some(native),
     })
 }
+
+/// Whether any caption says something the bundled fonts cannot draw (D-157).
+///
+/// Inter covers Latin, Greek and Cyrillic; Noto Sans Devanagari was added for
+/// Hindi. Everything else — Bengali, Tamil, Arabic, Chinese, an emoji — still
+/// comes out as one empty box per character, because bundling a Noto face per
+/// script is tens of megabytes in a batch renderer. That is a defensible place
+/// to stop; being silent about it is not, since the boxes are burned into the
+/// picture and the operator meets them in the finished film.
+///
+/// **Only when subtitles are on**, because a caption that is never drawn cannot
+/// be drawn wrongly. The run's own `--subtitles` / `--no-subtitles` answer is
+/// applied later, in `film::apply_subtitle_override`, on exactly D-145's
+/// reasoning: a warning about the wrong run is worse than none.
+///
+/// **One problem for the project**, counted, with the first scene named — the
+/// same rule as [`undersized_sources`], and for the same reason: a script is
+/// unbundled for every scene that uses it.
+#[must_use]
+pub fn undrawable_captions(scenes: &[ResolvedScene], subtitles: bool) -> Option<ProblemKind> {
+    if !subtitles {
+        return None;
+    }
+    let mut affected = 0usize;
+    let mut first: Option<String> = None;
+    let mut characters: Vec<char> = Vec::new();
+    for scene in scenes {
+        let Some(caption) = scene.spec.caption.as_deref() else {
+            continue;
+        };
+        let missing = spoonstill_media::caption::undrawable(caption);
+        if missing.is_empty() {
+            continue;
+        }
+        affected += 1;
+        first.get_or_insert_with(|| scene.spec.id.as_str().to_owned());
+        for ch in missing {
+            // Capped, because a whole unbundled script is dozens of letters and
+            // a message that lists them all is a message nobody finishes.
+            if !characters.contains(&ch) && characters.len() < MAX_NAMED_CHARACTERS {
+                characters.push(ch);
+            }
+        }
+    }
+    Some(ProblemKind::UndrawableCaption {
+        scenes: affected,
+        first: first?,
+        characters: characters
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(" "),
+        drawn: DRAWN_SCRIPTS.to_owned(),
+    })
+}
+
+/// How many undrawable characters the message names before it stops.
+const MAX_NAMED_CHARACTERS: usize = 8;
+
+/// The scripts the bundled faces cover, named in the operator's terms.
+///
+/// A list rather than a font name: "Inter and Noto Sans Devanagari" answers a
+/// question about typography, and the question being asked is *why is my
+/// caption a row of boxes*.
+const DRAWN_SCRIPTS: &str = "Latin, Greek, Cyrillic and Devanagari";
 
 /// Images sitting in the project root that no manifest row mentions (D-056).
 ///

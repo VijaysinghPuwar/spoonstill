@@ -541,6 +541,37 @@ pub enum ProblemKind {
         /// being enlarged, or `None` when no legal size does.
         native_short_edge: Option<u32>,
     },
+    /// A scene's caption uses characters no bundled font can draw (D-157).
+    ///
+    /// A **warning**, and for the same reason as
+    /// [`ProblemKind::UndersizedSources`]: the film still renders, and what is
+    /// wrong is that nobody was told. Those characters burn into the picture as
+    /// empty boxes, which is irreversible, and the operator finds out by
+    /// watching the finished film.
+    ///
+    /// **Project-level and counted, not one line per scene.** A caption in an
+    /// unbundled script is unbundled for every scene that uses it, so the fix
+    /// is one decision rather than N.
+    UndrawableCaption {
+        /// How many scenes have caption text with such characters.
+        scenes: usize,
+        /// The id of the first such scene, so it can be found.
+        first: String,
+        /// The characters themselves, deduplicated, first-seen order, **one
+        /// space between each**.
+        ///
+        /// Spaced because these are by definition characters the operator's
+        /// own font may not draw either, and several scripts here combine: run
+        /// together, a lone Bengali matra stacks onto the letter before it and
+        /// the list reads as three characters instead of five. And printed
+        /// plainly rather than through `{:?}`, which escapes a combining mark
+        /// to `\u{9be}` — a message about characters that cannot be shown,
+        /// which does not show them (D-150).
+        characters: String,
+        /// The scripts that *are* drawn, named so the message ends with
+        /// something true rather than only with something wrong.
+        drawn: String,
+    },
     /// An image in the folder appears in no manifest row (D-056).
     ///
     /// A **warning**. The manifest is the complete list of scenes when it
@@ -568,7 +599,8 @@ impl ProblemKind {
         match self {
             ProblemKind::UnpairedFile { .. }
             | ProblemKind::UnlistedImage { .. }
-            | ProblemKind::UndersizedSources { .. } => Severity::Warn,
+            | ProblemKind::UndersizedSources { .. }
+            | ProblemKind::UndrawableCaption { .. } => Severity::Warn,
             _ => Severity::Error,
         }
     }
@@ -668,6 +700,18 @@ impl fmt::Display for ProblemKind {
                     None => f.write_str("no output size renders them all at their own detail"),
                 }
             }
+            ProblemKind::UndrawableCaption {
+                scenes,
+                first,
+                characters,
+                drawn,
+            } => write!(
+                f,
+                "{scenes} scene{} caption characters no bundled font can draw, \
+                 so they burn into the picture as empty boxes — the first is \
+                 scene {first}, which uses {characters}; spoonstill draws {drawn}",
+                if *scenes == 1 { " has" } else { "s have" }
+            ),
             ProblemKind::UnlistedImage { value } => write!(
                 f,
                 "{value:?} is in the folder but in no manifest row, so it will not be rendered"

@@ -21,6 +21,7 @@ pub mod captions;
 pub mod diagnostics;
 pub mod geometry;
 pub mod hash;
+pub mod language;
 pub mod motion;
 pub mod path_safety;
 pub mod project;

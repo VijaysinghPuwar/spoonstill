@@ -32,5 +32,17 @@ serde_json = "1"
 # for the cores that pool exists to budget.
 fontdue = { version = "0.9", default-features = false, features = ["std"] }
 
+# D-157: fontdue rasterizes a glyph; it does not choose which glyphs. Devanagari
+# needs a shaper — `स` + `्` + `त` is one conjunct and `ि` is drawn to the left
+# of the consonant it follows — so a Hindi caption laid out one character at a
+# time is wrong even with a font that has the glyphs.
+#
+# `harfrust` and not `rustybuzz`: both are HarfBuzz ported to Rust, and
+# rustybuzz was declared unmaintained on 2026-07-11 (RUSTSEC-2026-0206), whose
+# own advisory names harfrust — maintained, and part of the HarfBuzz project —
+# as the replacement. Adding a crate that `cargo audit --deny warnings` (D-129)
+# would refuse, and then ignoring the refusal, is the wrong way round.
+harfrust = "0.13"
+
 [lints]
 workspace = true

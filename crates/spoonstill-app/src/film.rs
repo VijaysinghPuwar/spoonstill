@@ -488,6 +488,7 @@ pub fn render_project(
         crate::import::load(&options.root, &ProbeCheck::from_env()).map_err(FilmError::Import)?;
     apply_voice_override(&mut project, options);
     apply_geometry_override(&mut project, options)?;
+    apply_subtitle_override(&mut project, options);
 
     let errors = project.errors().count();
     if errors > 0 {
@@ -939,6 +940,32 @@ fn apply_geometry_override(
         project.problems.push(Problem::in_project(kind));
     }
     Ok(())
+}
+
+/// Re-decide the undrawable-caption warning for the run that is actually
+/// happening (D-157).
+///
+/// `still validate` answers from `project.yaml`; this run may have said
+/// `--no-subtitles`, in which case nothing is drawn and there is nothing to
+/// warn about — or `--subtitles band` on a project whose settings say off, in
+/// which case the boxes are about to be burned in and validate never mentioned
+/// it. Both directions matter, which is why this replaces rather than removes.
+///
+/// The same shape as the recomputation in [`apply_geometry_override`], and the
+/// same reason: a warning that describes a different run is worse than none.
+fn apply_subtitle_override(project: &mut crate::import::Project, options: &RenderProjectOptions) {
+    let Some(subtitles) = options.subtitles else {
+        return;
+    };
+    if subtitles == project.settings.subtitles {
+        return;
+    }
+    project
+        .problems
+        .retain(|p| !matches!(p.kind, ProblemKind::UndrawableCaption { .. }));
+    if let Some(kind) = crate::import::undrawable_captions(&project.scenes, subtitles) {
+        project.problems.push(Problem::in_project(kind));
+    }
 }
 
 /// Where this run's film will be written.

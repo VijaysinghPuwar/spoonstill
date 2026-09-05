@@ -254,6 +254,16 @@ subtitles:
 In the window there is a **Subtitles** screen: pick a look and see it drawn on
 a real frame before you commit a whole film to it, or pick *No subtitles*.
 
+**Languages.** Write in Latin, Greek, Cyrillic or Devanagari and it is drawn
+properly — Hindi included, with its conjuncts and matras, which needs real text
+shaping and not one glyph per character. You do not tell it which: the script is
+read off your words. Another script — Bengali, Tamil, Arabic, Chinese — still
+comes out as empty boxes, and `still validate` says so before you render rather
+than after.
+
+The same goes for the voice: **write in Hindi and a Hindi voice reads it**,
+unless you named one yourself, in which case yours is used.
+
 The text is drawn by spoonstill itself, not by FFmpeg — so this works on the
 plain `ffmpeg` you already installed, with no extra libraries and nothing else
 to download.

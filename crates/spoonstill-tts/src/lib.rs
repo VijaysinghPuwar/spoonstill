@@ -172,7 +172,11 @@ impl std::fmt::Display for TtsError {
                 provider,
                 text,
                 detail,
-            } => write!(f, "{provider} produced no audio for {text:?}: {detail}"),
+                // Quoted by hand, not with `{:?}`: `Debug` escapes anything
+                // outside ASCII, so the one message an operator writing Hindi
+                // ever sees rendered their own sentence as `नमस\u{94d}त\u{947}`
+                // (D-158, and D-150's rule about a message nobody can act on).
+            } => write!(f, "{provider} produced no audio for \"{text}\": {detail}"),
             TtsError::Process(e) => write!(f, "{e}"),
             TtsError::Io { path, source } => {
                 write!(f, "{}: {source}", path.display())

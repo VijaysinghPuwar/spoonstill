@@ -241,6 +241,38 @@ fn every_command_that_writes_names_the_project_it_means() {
     }
 }
 
+/// D-156. A project is opened in one place, and making one goes through it.
+///
+/// `load` is what tells Rust which project this window is on (D-127), what puts
+/// it on Home (D-086), and what fills in every field the grid reads. "New
+/// project" used to build a `project` object out of the returned path instead,
+/// so the window looked open on a folder Rust had never been told about and the
+/// first drop onto it was refused — silently, in the status line, on a screen
+/// whose only job is to receive that drop.
+#[test]
+fn making_a_project_opens_it_the_same_way_opening_one_does() {
+    let js = code_only(&read("app.js"));
+
+    let at = js
+        .find("\"create_project\"")
+        .expect("the page cannot make a project at all");
+    // Close, deliberately: `load` is the next statement. A wider window reaches
+    // the definition of `load` itself, which is a few lines below and would
+    // make this pass against the very code it was written against.
+    let after = &js[at..js.len().min(at + 200)];
+
+    assert!(
+        after.contains("await load("),
+        "create_project's answer is not handed to load(), so Rust is never told \
+         which project this window has open and every write into it — the drop \
+         that follows most of all — is refused: {after}"
+    );
+    assert!(
+        !after.contains("project = {"),
+        "the page is assembling a project view of its own again: {after}"
+    );
+}
+
 /// D-143. The Output screen's shape and size boxes *send* what they say.
 ///
 /// This is D-106's own lesson, written down as a test: the subtitle position

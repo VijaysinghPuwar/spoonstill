@@ -89,6 +89,53 @@ fn the_whole_catalogue_comes_back_and_every_voice_can_be_filed_under_a_language(
     );
 }
 
+/// D-158. Every voice the script detector can choose is really offered.
+///
+/// `DEFAULT_VOICES` is a table of names written by hand, and the compiler
+/// cannot check one. A name that has been retired turns "a Hindi project now
+/// renders" into `Invalid voice`, which is a worse failure than the one the
+/// table exists to fix, and nothing local would notice. This is the check, and
+/// it is here rather than in a unit test because only the service knows.
+#[test]
+#[ignore = "talks to Microsoft; run with `make tts-live`"]
+fn every_voice_the_script_can_choose_is_one_the_service_still_offers() {
+    let Some(edge) = installed() else { return };
+    let catalogue = edge.voices().expect("the catalogue");
+
+    // Every script the detector recognises, in a line of that script.
+    for line in [
+        "नमस्ते दुनिया",
+        "চলো বাংলা",
+        "ગુજરાતી લખાણ",
+        "தமிழ் எழுத்து",
+        "తెలుగు వచనం",
+        "ಕನ್ನಡ ಪಠ್ಯ",
+        "മലയാളം എഴുത്ത്",
+        "සිංහල පෙළ",
+        "Καλημέρα κόσμε",
+        "Здравствуй мир",
+        "שלום עולם",
+        "مرحبا بالعالم",
+        "สวัสดีชาวโลก",
+        "ສະບາຍດີ",
+        "こんにちは",
+        "မင်္ဂလာပါ",
+        "გამარჯობა",
+        "ሰላም ዓለም",
+        "សួស្តី",
+        "안녕하세요",
+        "你好世界",
+        "Hello world",
+    ] {
+        let chosen = spoonstill_tts::edge::default_voice_for(line);
+        assert!(
+            catalogue.iter().any(|v| v.id == chosen),
+            "{line:?} would be spoken by {chosen}, which the service no longer \
+             offers — a project in that script fails with `Invalid voice`"
+        );
+    }
+}
+
 #[test]
 #[ignore = "talks to Microsoft; run with `make tts-live`"]
 fn a_line_becomes_audio_that_ffprobe_can_measure() {

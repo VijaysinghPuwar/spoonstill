@@ -190,6 +190,112 @@ cargo build --release -p spoonstill-cli
 cargo run --release -p spoonstill-desktop
 ```
 
+### State as of 2026-09-05 — Hindi came out as a row of boxes reading NO GLYPH
+
+**D-157 — a caption is drawn by a face that has the glyphs, and shaped.**
+Reported with a screenshot: a Hindi caption rendered as small black-and-yellow
+boxes, each reading **NO GLYPH**. That is not a rendering fault — it is
+**Inter's `.notdef` glyph**, drawn once per character, because Inter covers
+Latin, Greek and Cyrillic and has no Devanagari at all.
+
+**Coverage was the smaller half.** A font with the glyphs still draws Hindi
+wrong laid out one character at a time: `स` + `्` + `त` is one conjunct, and `ि`
+is drawn to the **left** of the consonant it follows. Three weights of **Noto
+Sans Devanagari** (OFL, 742 KB, licence in `THIRD-PARTY-NOTICES.md`) plus
+**`harfrust`** for shaping; a run is a maximal span of one face, a space always
+belongs to the primary face so a Hindi sentence is one run per word, and shaping
+is cached **per word in font units** because `balance` bisects.
+
+**Latin is deliberately not shaped, and that is the load-bearing decision.** One
+path would be tidier and would re-kern every caption ever burned in (fontdue
+reads `kern`, HarfBuzz reads GPOS). Measured, not assumed: three Latin cues
+rendered by the build before and the build after are **byte identical**, and two
+of those hashes are pinned in a test that says what breaking it costs.
+
+**The band grew where it had to** — `line_metrics` takes the max over the faces
+*these lines use*, so Devanagari's high marks are not clipped (D-117's defect in
+another term) and a Latin caption keeps Inter's numbers exactly.
+
+**What is still not drawn is said out loud.** Bengali, Tamil, Arabic, Chinese
+and emoji still box; bundling a Noto face per script is tens of megabytes.
+Stopping there is defensible, being silent is not — `caption::undrawable` names
+the characters and `ProblemKind::UndrawableCaption` carries them to `still
+validate`, the window and the render, one line for the project, re-decided for
+the run's own `--subtitles` answer.
+
+**D-129's audit gate did its job on its first new dependency since.**
+`rustybuzz` was written first and `cargo audit --deny warnings` refused it —
+unmaintained as of 2026-07-11 (RUSTSEC-2026-0206), whose own advisory names
+`harfrust` as the maintained replacement. Adding the crate and then an ignore
+entry for it is the wrong way round. The port was one commit; every test passed
+unchanged, byte-identity included.
+
+**D-158 — the script chooses the voice, when nobody else has.** Found by
+rendering the caption D-157 had just fixed: **a Hindi project could not render
+at all.** `default` means `en-US-AvaNeural`, the service accepts the request and
+returns **no audio**, and the message blamed *the operator's text* — *"a line
+with no speakable words in it"* — over a perfectly ordinary sentence.
+
+`spoonstill_core::language::of` reads a BCP-47 subtag off the characters (the
+dominant non-Latin script, so one English word in a Hindi line changes nothing)
+and the Edge provider uses it **only when the voice is `default`** — a voice the
+operator named is obeyed whatever the line says. **Latin returns `None`**, so
+every project already made keeps its voice, its cache key and its audio.
+
+A script is not a language, and this errs towards the most-written one, because
+refusing to guess here means the render *fails*. The one ambiguity worth
+resolving is: **Han with kana is Japanese, Han alone is Chinese.** The 21 voices
+are **named, not searched** (a catalogue Microsoft edits must not move a cache
+key); **Punjabi, Odia and Armenian are detected and deliberately absent**,
+because Edge has no voice for any of them and `Invalid voice` is not a better
+failure than no audio. A `make tts-live` test asserts the table has not rotted.
+
+And `wrong_script` names the real cause when a chosen voice cannot read the
+line, with the voice to use instead. The line is quoted **plainly** in both
+places — `{:?}` had been printing the operator's Hindi as `नमस\u{94d}त\u{947}`
+(D-150).
+
+**Measured end to end:** the project that failed now renders with
+`voice=hi-IN-MadhurNeural` in `runs.csv`, captions correct at 1080p.
+**`make gates` is still 37** — a real Hindi render needs the voice service, and
+D-134 already ruled a gate must not depend on that.
+
+### State as of 2026-09-05 — a new project was not a project until you opened it
+
+**D-156 — making a project opens it.** Reported from a fresh install: *New
+project → choose a folder → drag the photographs in → nothing happens*, the
+window stuck on the "Choose photos…" screen; doing it several times eventually
+worked, which made it read as flaky. It is not flaky. **`create_project`
+returned a path and told `Session` nothing**, and every command that writes is
+bound to the project `Session` says is open (D-127) — so the drop that follows
+reached `add_media` and was refused with *"no project is open in this window"*,
+in the status line, on the one screen whose whole job is to receive that drop.
+The recovery was to open the folder you had just made, which runs
+`validate_project` and adopts it.
+
+Two halves. `create_project` adopts the folder it made — **after** it exists and
+never on the way to a failure, so a refused folder leaves the window open on
+what it had. And `newProject` hands the returned path to **`load`**, the way
+`openProject` always has: **a project is opened in one place.** The page used to
+assemble a `ProjectView` of its own, which also carried none of the fields the
+grid reads, never reached `remember` (so a new project was missing from Home —
+the hole in D-086's rule), and took the name by splitting on `/`.
+
+Checked rather than assumed: a brand-new folder holds only D-153's starter
+`project.yaml`, so `import::load` returns **one** `NoScenes` problem, which is
+exactly what `ProjectView::empty` is defined by — the same fill screen as
+before, now with Rust knowing about it. An `Err` there would have bounced the
+page to the start screen, worse than the defect.
+
+**Both tests were run against the unfixed code.** `making_a_project_opens_it`
+drives the reported sequence end to end — create, then drop a photograph
+through `add_media_inner` — and fails with the operator's own message;
+`ui_contract.rs`'s half fails when the page assembles its own view. That second
+test's first version **passed against the broken page**, because its
+600-character window reached the definition of `load` a few lines below the call
+it was looking for — D-116's trap, inside a test written for D-116's shape of
+defect. **`make gates` is still 37.**
+
 ### State as of 2026-09-04 — `master` was red, and only the Windows runner could say so
 
 **D-155 — a test's stand-in child is a program, and a program is not a portable
@@ -1979,7 +2085,13 @@ the FFmpeg version line in this file**, **D-152 before touching
 before touching `MotionSeed`, `MotionSpec::seeded`, the segment filename,
 `occurrences_of`, or what `create_project` writes**, and **D-154 before starting
 M3, writing `state.db`, or assuming resume needs one**, **D-155 before writing
-a test that spawns a program, or naming a binary a `/bin/` path**, **D-144 before
+a test that spawns a program, or naming a binary a `/bin/` path**, **D-156
+before touching `create_project`, `newProject`, `Session`'s root, or anything
+that decides which project the window has open**, **D-157 before touching
+`Face`, `Fonts::runs`, the shaper, a bundled font, `caption::undrawable` or
+`ProblemKind::UndrawableCaption`**, **D-158 before touching
+`spoonstill_core::language`, `DEFAULT_VOICES`, `default_voice_for` or
+`wrong_script`**, **D-144 before
 touching `spoonstill_app::capacity`, `pool::default_jobs`, `RenderProjectOptions.jobs`,
 or anything that decides how many scenes render at once**, and **D-142 before touching
 `without_verbatim_prefix`, a `canonicalize` call site, or where the Windows

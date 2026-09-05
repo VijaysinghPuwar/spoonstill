@@ -6288,6 +6288,213 @@ found, one commit after the code was written. **Wait for the Windows leg before
 calling a session finished** — D-132 already says this for a tag, and it is the
 same sentence for `master`.
 
+### D-156 — Making a project opens it, so the first thing done in it is not refused · Accepted
+
+Reported from a fresh install: **New project, choose a folder, drag the
+photographs in — and nothing happens.** The window stays on the "Choose
+photos…" screen. Doing it again, and again, eventually works, which is what
+made it read as flaky.
+
+It is not flaky. Every command that writes into the operator's folder is bound
+to the project this window has open (D-127), and `Session` learned which
+project that is in exactly one place — `validate_project`. `create_project`
+returned a path and told `Session` nothing. So the sequence is:
+
+```
+create_project(/tmp/new)      -> "/private/tmp/new"      session.root = None
+  page: project = { root, … }                            the page thinks it is open
+drop 001.jpg                  -> add_media(root, files)
+  project_root(session, root) -> Err("no project is open in this window")
+```
+
+The refusal lands in the status line, at the bottom of the one screen whose
+entire job is to receive that drop, next to an "Add photos…" button that fails
+the same way for the same reason. **The recovery is to open the folder you just
+made** — All projects, Open a project folder, choose it — which runs
+`validate_project` and adopts it. That is the "doing it multiple times"
+in the report.
+
+**Two halves, and each is correct alone.**
+
+`create_project` now takes the session and adopts the folder it made. The
+window made the folder; there is no sense in which it is not open on it. It is
+adopted **after** the folder exists and never on the way to a failure, so a
+refused folder (D-080's *already a project*) leaves the window open on whatever
+it had — asserted, because the tempting placement is next to the call and that
+version adopts a folder that was never made.
+
+And `newProject` hands the returned path to `load`, which is how `openProject`
+has always worked. **A project is opened in one place.** The page used to build
+a `ProjectView` of its own out of the path, which was wrong in three separate
+ways beyond the one that was reported: it carried none of the fields the grid,
+the Output screen and the render button read; it never reached `remember`, so a
+brand-new project was absent from Home until something else validated it — the
+hole in D-086's *"written inside `validate_project` so there is no way to open a
+project and have it not appear"*; and it took the name by splitting the path on
+`/`, which is not how a Windows path is spelled (D-128, again).
+
+A brand-new folder is checked, not assumed, to survive the round trip:
+`create_project` writes a starter `project.yaml` (D-153) and nothing else, so
+`import::load` returns a project with **one** `NoScenes` problem, which is
+exactly the condition `ProjectView::empty` is defined by — the window lands on
+the same fill screen it landed on before, now with Rust knowing about it. Had
+that come back an `Err`, the page would have bounced to the start screen, which
+is worse than the defect being fixed.
+
+**Both halves are tested and both were run against the unfixed code.**
+`making_a_project_opens_it` in `main.rs` fails with the operator's own message,
+*"no project is open in this window"*; `ui_contract.rs`'s
+`making_a_project_opens_it_the_same_way_opening_one_does` fails when the page
+assembles its own view. The second one's first version passed against the
+broken page, because its 600-character window reached the definition of `load`
+a few lines below the call it was looking for — D-116's trap, in a test written
+to catch D-116's shape of defect. The window is 200 characters now and the
+match is `await load(`.
+
+**The lesson is the one D-127 half-wrote.** That decision bound six commands to
+the open project and added a `ui_contract` test that every one of them still
+*sends* `root`. Nothing asserted the other side: that the window is ever *told*
+what it has open. A guard whose only entry point is one command is a guard that
+fails closed on every path that command does not run, and in a webview it fails
+closed in silence.
+
+### D-157 — A caption is drawn by a face that has the glyphs, and shaped · Accepted
+
+Reported with a screenshot: a Hindi caption rendered as a row of small black
+and yellow boxes, each reading **NO GLYPH**. Reproduced in one command.
+
+That is not a rendering fault, it is Inter's `.notdef` glyph, drawn once per
+character. Inter covers Latin, Greek and Cyrillic and has no Devanagari at all,
+and `fontdue` answers a request for a character it does not have with glyph 0 —
+which in Inter is a box with those two words in it. So every Devanagari
+character in every caption became a little warning label, and nothing anywhere
+said why.
+
+**Coverage is only half of it, and the smaller half.** A font with the glyphs
+still draws Hindi wrong when it is laid out one character at a time, which is
+what this module did: `स` + `्` + `त` is a single conjunct glyph, and `ि` is
+drawn to the **left** of the consonant it follows in the text. Devanagari needs
+a shaper.
+
+- **Noto Sans Devanagari**, SIL OFL 1.1, the same three weights as Inter so a
+  theme means one thing whatever it is asked to draw. 742 KB embedded with
+  `include_bytes!`, licence in `THIRD-PARTY-NOTICES.md` (D-124), and the licence
+  test now loops over both families so a third cannot be added without its
+  licence following it.
+- **`harfrust`** — HarfBuzz ported to Rust, four new crates. `rustybuzz` was
+  the obvious choice and was written first; `cargo audit --deny warnings`
+  (D-129) refused it on the spot, because it was declared **unmaintained on
+  2026-07-11** (RUSTSEC-2026-0206) — and that advisory names `harfrust`,
+  maintained and part of the HarfBuzz project, as the replacement. Adding a
+  crate the audit gate refuses and then adding an ignore entry for it is the
+  wrong way round; the gate did exactly what D-129 built it for, on its first
+  new dependency since. The port was one commit and every test passed
+  unchanged, **including the byte-identity one**. Shaping is done in **font
+  units and cached per word**, not per size, because `balance` bisects and
+  would otherwise shape the same word a dozen times.
+- **A run is a maximal span of one face.** A space is drawn by the primary face
+  wherever it appears, so a Hindi sentence is one run per word — which keeps
+  word spacing identical whatever the words are, and makes the shaping cache
+  key a word.
+
+**Latin is deliberately not shaped, and that is the load-bearing decision.**
+One code path would be tidier. It would also re-kern every Latin caption ever
+burned in, because fontdue reads the legacy `kern` table and HarfBuzz reads
+GPOS — so every film already made would render differently on its next pass.
+Measured instead of assumed: three Latin cues were rendered by the build before
+this change and the build after it, and both are **byte identical**. Two of
+those hashes are now pinned in a test, and the test says in as many words what
+breaking it costs.
+
+**The band grew where it had to.** Its height comes from the ascent, and the
+ascent used to be Inter's whatever was being drawn — so Devanagari's marks,
+which sit higher, would have been cut off against the top of the canvas. That is
+D-117's defect in a different term of the same sum. `line_metrics` now takes the
+maximum over the faces **these lines actually use**, so a Latin caption keeps
+Inter's numbers exactly and the D-139 clamp is computed against the band that
+will really be built.
+
+**What is still not drawn is said out loud.** Bengali, Tamil, Arabic, Chinese
+and an emoji still come out as boxes; bundling a Noto face per script is tens of
+megabytes and the wrong trade for a batch renderer. Stopping there is
+defensible — being *silent* about it is the original defect one script along, so
+`caption::undrawable` names the characters and `ProblemKind::UndrawableCaption`
+carries them to `still validate`, the window and the render, one warning for the
+project with the first scene named (D-145's rule). Only when subtitles are on,
+and re-decided in `film::apply_subtitle_override` for the run that is actually
+happening, exactly as D-143's geometry warning is.
+
+The characters are printed **plainly and one space apart**, not through `{:?}`,
+which escapes a combining mark to `\u{9be}` — a message about characters that
+cannot be shown, which does not show them (D-150).
+
+**M2 is 21 gates; `make gates` is 37.** The work is covered by unit tests
+rather than a shell gate: what a gate would add over
+`a_hindi_caption_is_drawn_by_a_face_that_has_it_and_is_shaped` is a real render,
+and a real Hindi render needs the voice service, which D-134 already ruled must
+not be what a gate depends on. It was run end to end by hand: a 1080p film with
+`--subtitles boxed` and the conjuncts, matras and danda all correct.
+
+### D-158 — The script a line is written in chooses the voice, when nobody else has · Accepted
+
+Found by rendering the caption D-157 had just fixed: **a Hindi project could not
+be rendered at all.**
+
+```
+FAILED 001: cannot speak its line — edge produced no audio for
+"नमस\u{94d}त\u{947} द\u{941}निया…": the service accepted the request for
+en-US-AvaNeural and returned no audio. A line with no speakable words in it —
+only punctuation, digits or symbols — does this.
+```
+
+Three things wrong in one line. The voice is `en-US-AvaNeural` because that is
+what `default` means and nobody said otherwise. The service accepts the request
+and returns nothing, because that voice cannot read Devanagari. And the message
+blames **the operator's text**, over a perfectly ordinary sentence, sending them
+to look at the one thing that was fine.
+
+**A default is not a choice.** `spoonstill_core::language::of` reads a BCP-47
+primary subtag off the characters — the dominant non-Latin script by character
+count, so one English word inside a Hindi sentence does not change the answer —
+and the Edge provider uses it **only** when the voice is `default` or empty. A
+voice the operator named is obeyed whatever the line says, which is D-076's rule
+about an explicit `--jobs` applied to a different setting.
+
+**Latin returns `None`, deliberately.** Every project already made keeps the
+voice it had, the cache key it had and the audio it had.
+
+**A script is not a language, and the honest thing is to say which way this
+errs.** Devanagari is also Marathi, Nepali and Sanskrit; Cyrillic is a dozen
+languages; Han is Chinese and half of Japanese. This project's usual rule is to
+refuse to guess (D-111, D-152) — and here refusing means the render fails, which
+is worse than one an operator retunes with `--voice`. So the most widely written
+language of each script is taken, and the one ambiguity worth resolving properly
+is: **Han with kana is Japanese, Han without is Chinese.**
+
+**The voices are named, not searched.** Picking "the first `hi-` row in the
+catalogue" makes a render depend on a list Microsoft changes, and the voice
+reaches the audio cache key (D-043) — same reasoning as `DEFAULT_VOICE` itself.
+Each of the 21 was checked against the live catalogue; **Punjabi, Odia and
+Armenian are recognised by the detector and deliberately absent from the table,
+because Edge has no `pa-`, `or-` or `hy-` voice at all** and naming one would
+turn "no audio" into `Invalid voice`, a different wrong answer rather than a
+better one. A live test under `make tts-live` asserts every row is still
+offered, because a hand-written table of names that nothing checks is a table
+that rots.
+
+**And the message names the real cause.** `wrong_script` compares the line's
+language with the voice's primary subtag and, when they differ, says so and
+names the voice to use — or says the provider has none. The old sentence about
+an unspeakable line is still right when the line really is Latin, and is still
+what gets printed then. The line itself is quoted plainly rather than through
+`{:?}`, which had been rendering the operator's own Hindi as `नमस\u{94d}त\u{947}`
+(D-150).
+
+Measured end to end: the same project that failed above renders with
+`voice=hi-IN-MadhurNeural` in `runs.csv`, and an explicit `--voice
+en-GB-RyanNeural` now fails with *"this line is written in hi; en-GB-RyanNeural
+speaks en and cannot read it"* and the voice to use.
+
 ### D-074 — The `kenburns-batch` master brief does not exist on this machine · Accepted
 
 Searched 2026-08-26: no file matching `*kenburns*` anywhere under `~/Desktop`,

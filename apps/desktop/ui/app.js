@@ -345,12 +345,13 @@ async function newProject() {
   if (typeof chosen !== "string") return;
   try {
     const root = await invoke("create_project", { path: chosen });
-    project = { root, name: root.split("/").pop(), scenes: [] };
-    el("fill-name").textContent = project.name;
-    el("t-name").textContent = project.name;
-    el("t-path").textContent = root;
-    show("fill");
-    setStatus(root);
+    // Read back rather than assembled here (D-156). A project built by hand out
+    // of the path was missing every field the rest of the page reads, it never
+    // reached `remember`, so a new project was not on Home until something else
+    // validated it — and `name` was split on "/", which is not how a Windows
+    // path is spelled. `load` is the one way this window comes to have a
+    // project open; an empty folder lands on the same fill screen.
+    await load(root);
   } catch (error) {
     setStatus(String(error));
   }
