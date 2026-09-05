@@ -6495,6 +6495,156 @@ Measured end to end: the same project that failed above renders with
 en-GB-RyanNeural` now fails with *"this line is written in hi; en-GB-RyanNeural
 speaks en and cannot read it"* and the voice to use.
 
+### D-159 — The graphics card is detected by using it, and it is still not what renders · Accepted
+
+Asked 2026-09-05 from the Windows machine D-144 was reported from: *does it
+detect the GPU, and if not, fix it.* It did not. D-036 settled the encoder in M1
+in one sentence with three clauses — *"probe availability at runtime, expose it
+as an explicit fast draft mode, and always fall back to libx264"* — and only the
+third was ever built, by never leaving it. Through eight releases no surface
+could answer the first question an operator with a graphics card asks.
+
+**`spoonstill_media::hardware` answers it, and answers it by encoding.** The
+temptation is to grep `ffmpeg -encoders`, and that is a specific false answer
+rather than no answer. Measured on this machine — an RTX 3060 *and* an AMD
+Radeon, FFmpeg 9.0.1, the build the README's own `winget` line installs:
+
+| encoder | `-encoders` says | actually encodes |
+|---|---|---|
+| `h264_nvenc` | present | **yes** |
+| `h264_amf` | present | **yes** |
+| `h264_mf` | present | **yes** |
+| `h264_qsv` | present | no — `Error creating a MFX session: -9` |
+| `h264_vaapi` | present | no — needs a hardware frames context |
+| `h264_d3d12va` | present | no — needs a hardware frames context |
+| `h264_vulkan` | present | no — needs a hardware frames context |
+
+**Four of seven.** `-encoders` reports what the build was *compiled* with, and a
+general-purpose build is compiled with everything: `h264_qsv` is listed on a
+machine with no Intel graphics at all, and `h264_vaapi` — a Linux API — is
+listed on Windows. A detector that read that list would tell this operator they
+have seven hardware encoders. So each candidate is run, which is the rule
+already written down twice here: the spawn is the authority (D-103), and a check
+that passes by finding nothing to check is not a check (D-125).
+
+**The probe feeds software frames, and that is the whole design.** The three
+that fail with *"Impossible to convert between the formats"* are not broken
+drivers — they will only accept frames already on the GPU. Our filter graph
+produces software frames and always will (D-030 through D-037 all run on the
+CPU, which is where D-144 measured the time and all of the memory going). An
+encoder that cannot take a software frame is not a drop-in for libx264 here,
+so reporting it unusable is the correct answer rather than a limit of the probe.
+
+**Running it immediately found a defect in it.** The first draft reported
+FFmpeg's *last* stderr line. For `h264_qsv` that is
+`[out#0/null] Nothing was written into output file, because at least one of its
+streams received no packets` — the muxer complaining about a consequence three
+components downstream, which would have sent the operator to look at their
+output settings. The cause is the *first* line naming the encoder, because
+FFmpeg reports causes before cascades. `reason_from` takes that line now, and
+the test carries the real eleven-line stderr and fails against the rule this
+module was written with an hour earlier. A second defect came from a test: the
+`-encoders` legend line ` V..... = Video` also has a six-character flags column,
+so the parser reported an encoder named `=`.
+
+**It is still not what renders, and now that is measured here rather than
+inferred.** D-144 timed the encoder at 14% of a 4K render on macOS and put any
+encoder change at a 1.17x ceiling. Re-measured on Windows on the shipped chain,
+4K, 112 frames, best of three:
+
+| | wall | vs shipped |
+|---|---|---|
+| filter only, no encode | 4.53 s | — |
+| `libx264 -preset medium` (shipped) | 5.86 s | 1.00x |
+| `libx264 -preset ultrafast` | 4.66 s | 1.26x |
+| **`h264_nvenc`** (RTX 3060) | **4.78 s** | **1.23x** |
+| `h264_amf` (Radeon) | 5.00 s | 1.17x |
+
+So the encoder is **22.7% of a 4K render here, not macOS's 14%**, and NVENC is
+worth **1.23x** — more than D-144 inferred, and still nowhere near the thing an
+operator imagines when they ask why their graphics card is idle. The filter
+graph is 77% of the wall clock and NVENC reduces memory by **zero**, because the
+memory is the 11520x6480 prescale canvas on the CPU. D-036's default stands, and
+`still doctor` says so in two lines under the list, every time — because a list
+of usable encoders invites exactly one wrong conclusion.
+
+**Where it is surfaced:** `still doctor` (1.7 s, four spawns) and the
+diagnostics bundle (D-016), and nowhere on the render path — D-151's split, for
+D-151's reason. Nothing here counts towards `doctor`'s exit status: a missing
+`h264_qsv` on a machine with no Intel graphics is the correct pairing, not a
+fault to be fixed.
+
+**Checked by a test rather than a shell gate, on purpose.**
+`crates/spoonstill-media/tests/hardware_report.rs` cross-checks every claim in
+both directions — each encoder reported usable must encode, and **each encoder
+reported unusable must fail** — against an FFmpeg invocation the test builds
+itself rather than through the module under test. The second half is the half a
+`-encoders` grep could never pass, and it is what fails if `detect` is ever
+rewritten to trust the listing. It is a Rust test and not a `scripts/m2-gates.sh`
+gate for two reasons: the gates are macOS-only by D-131 and use BSD `stat -f`
+and `shasum`, so this session could not have **run** one from Windows — D-128's
+precedent for not shipping a check nobody has executed — and the interesting
+machine for this decision is precisely the one the shell gates do not run on.
+It is honestly vacuous on a machine with no FFmpeg, and says which case it ran
+in rather than passing quietly.
+
+**The fast draft mode is still not built, deliberately.** D-036 says hardware
+bands visibly on slow pans across smooth gradients, which is exactly this
+content, so a draft mode trades quality for 1.23x — and wiring it touches the
+segment cache key (D-107) and the D-041 profile assertion, which are two of the
+load-bearing invariants here. Detection was what was asked for and detection is
+what this is. The measurement above is what a decision about the draft mode
+should be made from.
+
+### D-160 — The window had no name on Windows, and the config could not give it one · Accepted
+
+Found by **running the window on Windows**, which nothing in this project had
+done: `apps/desktop` was excluded from D-132's cross-compile check because
+`tauri-winres` wanted `llvm-rc` and the Mac had no linker for it. On real
+Windows it builds in 2m08 and opens correctly — the screenshot shows the
+projects list, the theme toggle and the operator's own four projects. What it
+also shows is a **blank native title bar**, and a taskbar and Alt-Tab entry with
+no name on them.
+
+`tauri.conf.json` sets `"title": ""`, and that is right for macOS:
+`titleBarStyle: "Overlay"` makes the title bar transparent and the page draws
+its own header, so a title string there would appear twice. But **D-132 already
+established that `title_bar_style` is `#[cfg(target_os = "macos")]`** in the
+pinned `tauri-runtime-wry` — Windows keeps its native title bar, and an empty
+title leaves it empty. This is the same defect as D-132's 82px of traffic-light
+padding, one row higher up, and it survived D-132 because that decision was
+reached by *compiling* for Windows and this one needs the window on screen.
+
+**The obvious fix is wrong, and the pinned source says so.** Putting
+`"title": "spoonstill"` in the config would fix Windows and change macOS:
+`TitleBarStyle::Overlay` maps to `with_titlebar_transparent(true)` plus
+`with_fullsize_content_view(true)` and **not** to `with_title_hidden(true)`
+(read in `tauri-runtime-wry-2.11.4/src/lib.rs`, not assumed — `tao` only calls
+`setTitleVisibility(Hidden)` for the `title_hidden` flag). So the title text
+stays visible on macOS and would be drawn over the header the page draws itself.
+The title is therefore set at runtime under `#[cfg(target_os = "windows")]`,
+which is D-132's own pattern and leaves the other machine provably untouched.
+
+`the_window_names_itself_on_windows` asserts **both halves**, because each alone
+is a bug: the config must stay empty, and `main.rs` must set a title on Windows.
+Verified failing against the unfixed code and passing after, and verified on
+screen — `MainWindowTitle` was `''` before and is `'spoonstill'` now.
+
+**What this session could not establish about the window, stated rather than
+implied.** Launched repeatedly from an automated non-interactive shell, the
+window exits cleanly (code 0, no stderr, no event-log entry) about two seconds
+in, roughly two runs in three. That looked like a regression from the commits
+pulled this morning, and **it is not**: at n=5 the *installed v0.1.7* build —
+the one the operator has been using all week — does the same thing four times in
+five, and the first two trials that suggested otherwise were n=1 each. It is
+almost certainly the launch context rather than the product, and D-131 already
+records that this project has no GUI automation. What is proven is that the
+window **builds, passes its 18 tests, opens, renders its real content, and now
+has a name**; what is not proven is unattended lifetime, and nothing here should
+be read as proving it. Recorded because the next person to automate this window
+will see the same two seconds and should not spend the morning bisecting
+`master` for it, which is most of what this one cost.
+
 ### D-074 — The `kenburns-batch` master brief does not exist on this machine · Accepted
 
 Searched 2026-08-26: no file matching `*kenburns*` anywhere under `~/Desktop`,

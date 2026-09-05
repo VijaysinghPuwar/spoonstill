@@ -52,6 +52,13 @@ pub fn environment() -> Vec<EnvironmentLine> {
         ));
     }
 
+    // What hardware encoding this machine could do (D-159). In the bundle
+    // because it is a fact about a stranger's machine that nothing else here
+    // records, and because a report that a render is slow is read differently
+    // depending on whether the machine has a graphics card at all — even
+    // though the answer, per D-036 and D-144, is that it would not have helped.
+    lines.push(line("graphics", graphics_summary()));
+
     // The `PATH` this process was given, which is the whole of D-103 and
     // D-104 in one line: a window launched from Finder has launchd's four
     // directories here, and a terminal has twenty. Every report of "it works
@@ -107,6 +114,32 @@ fn configuration_of(program: &Path) -> String {
         interesting.join(" "),
         flags.len().saturating_sub(interesting.len())
     )
+}
+
+/// Every hardware encoder and what this machine made of it, on one line.
+///
+/// One line rather than a block, because [`EnvironmentLine`] is a key and a
+/// value and the bundle's shape is pinned by a test. Unusable candidates carry
+/// FFmpeg's own reason, which is the half that distinguishes "no such hardware"
+/// from "the driver needs updating".
+fn graphics_summary() -> String {
+    let found = crate::tooling::hardware();
+    if found.is_empty() {
+        return "<none probed for this platform>".to_string();
+    }
+    found
+        .iter()
+        .map(|accel| {
+            if accel.usable {
+                format!("{}: usable", accel.encoder)
+            } else if accel.present {
+                format!("{}: unusable ({})", accel.encoder, accel.detail)
+            } else {
+                format!("{}: not in this ffmpeg", accel.encoder)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Write a diagnostics bundle for the project rooted at `project_root`.

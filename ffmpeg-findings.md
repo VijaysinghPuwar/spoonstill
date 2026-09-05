@@ -790,3 +790,92 @@ inside the CPU filter graph. D-036 holds at 4K and holds harder than at 1080p.
 
 Recorded because "the machine has a GPU and nothing uses it" is the obvious
 first suspicion when a 4K render fails, and it is the wrong one.
+
+## 13. Windows, measured 2026-09-05 — the first numbers in this file that are not macOS
+
+Every number above this line is macOS arm64, and the top of `CLAUDE.md` has said
+so since D-071 put Windows in scope. These are the first measurements taken on
+Windows, on the machine D-144 was reported from.
+
+| | |
+|---|---|
+| OS | Windows 11 Pro 26200, x86_64 |
+| CPU | 16 logical cores |
+| RAM | 15.2 GB |
+| GPU | NVIDIA GeForce RTX 3060 **and** AMD Radeon (integrated) |
+| FFmpeg | 9.0.1 `full_build`, Gyan.FFmpeg via winget — the README's own install line |
+| Encoders present | `libx264`, `h264_nvenc`, `h264_amf`, `h264_qsv`, `h264_mf`, `h264_vaapi`, `h264_d3d12va`, `h264_vulkan` |
+
+Note the FFmpeg major version: **9.0.1 here against 8.0.1 above**, which is
+D-151's point about nothing in this tree having recorded the version.
+
+### 13a. D-144's memory model holds on Windows
+
+The 32-scene 4K case D-144 was written for, `--jobs` left automatic, peak summed
+working set of the FFmpeg children sampled at 250 ms:
+
+| | |
+|---|---|
+| workers chosen automatically | **3** (not 4 — the core rule says 4, the budget says 3) |
+| peak total | 7 163 MB |
+| **per worker** | **2 388 MB** |
+| the model's estimate | 2 755 MB |
+
+The model sits **15% above** the Windows measurement, against 5% above the macOS
+one. It is above both, which is the rule `capacity.rs` is built on — over-
+estimating costs a worker, under-estimating costs the machine. No freeze, and
+the pool printed why it was smaller than the core count.
+
+### 13b. The pool curve on Windows — D-076's cap of 4 survives
+
+32 scenes, 1080p, cold segment cache each time, `still render --jobs N`:
+
+| jobs | wall | vs jobs=1 |
+|---|---|---|
+| 1 | 47.2 s | 1.00x |
+| 2 | 27.4 s | 1.72x |
+| 3 | 22.2 s | 2.13x |
+| 4 | **19.9 s** | **2.37x** |
+| 6 | 18.6 s | 2.54x |
+| 8 | 18.2 s | 2.59x |
+| 12 | 19.8 s | 2.38x |
+
+Same shape as §10's macOS curve on a machine with 60% more cores: it flattens
+after four and **regresses at twelve**. Going 4 -> 8 buys 9% for twice the
+memory, which is exactly the trade D-076 declined. **The cap was derived on
+macOS and is correct on Windows** — recorded because it was worth checking and
+because a 16-core machine is where one would expect it to be wrong.
+
+### 13c. NVENC, measured rather than inferred (D-159)
+
+§12c put any encoder change at a 1.17x ceiling from `ultrafast` as a stand-in,
+because that machine has no NVIDIA hardware. This one does. Same shipped filter
+chain, 4K, 112 frames, best of three:
+
+| | wall | vs shipped |
+|---|---|---|
+| filter only, no encode | 4.53 s | — |
+| `libx264 -preset medium` (shipped) | 5.86 s | 1.00x |
+| `libx264 -preset ultrafast` | 4.66 s | 1.26x |
+| **`h264_nvenc`** | **4.78 s** | **1.23x** |
+| `h264_amf` | 5.00 s | 1.17x |
+
+The encoder is **22.7% of a 4K render here**, against 14% on macOS — so D-036's
+"filter-bound, not encoder-bound" is true on both platforms but with less room
+to spare on this one. NVENC is worth 1.23x and **zero** memory. The filter graph
+is 77% of the wall clock, and it is on the CPU.
+
+### 13d. Orchestration is not where Windows time goes
+
+The thing worth ruling out on a platform with expensive process creation and a
+real-time virus scanner over every written file. Same 32-scene project:
+
+| | |
+|---|---|
+| `still validate` | 0.25 s |
+| fully cached re-render (32 probes + join + D-041 assertion, no encoding) | 1.16 s |
+
+**36 ms per scene** of everything that is not encoding. There is no Windows-
+specific overhead to remove here; the time is in the filter graph, where this
+file has always said it is.
+

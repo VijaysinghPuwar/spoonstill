@@ -118,6 +118,61 @@ pub fn check_all() -> Vec<ToolReport> {
     all
 }
 
+/// One hardware video encoder, as a control surface sees it (D-159).
+///
+/// Flattened out of [`spoonstill_media::hardware::Support`] because D-010 keeps
+/// the window out of `spoonstill-media` entirely, so the shape that crosses
+/// into a control surface has to be owned up here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccelReport {
+    /// The FFmpeg encoder name — `h264_nvenc`.
+    pub encoder: String,
+    /// The hardware, in the operator's terms — `NVIDIA (NVENC)`.
+    pub vendor: String,
+    /// It encoded a frame on this machine. The only status that means anything.
+    pub usable: bool,
+    /// Whether this FFmpeg build has it compiled in at all.
+    ///
+    /// Separate from `usable` because the two failures need different
+    /// sentences: a build without it is a build choice, and a build with it
+    /// that will not run is a machine fact.
+    pub present: bool,
+    /// FFmpeg's own reason, when there is one. Empty when `usable`.
+    pub detail: String,
+}
+
+/// What hardware encoding this machine could do, if it were asked to.
+///
+/// Nothing here changes what renders — the encoder is D-036's `libx264` and
+/// D-144 measured why that is still right at 4K. This exists because "is it
+/// using my GPU" had no answer on any surface, and because a bundle from a
+/// stranger's machine should carry it (D-016).
+///
+/// Costs several process spawns, so it is on `still doctor` and the bundle and
+/// nowhere on the render path — D-151's split.
+#[must_use]
+pub fn hardware() -> Vec<AccelReport> {
+    use spoonstill_media::hardware::Support;
+
+    spoonstill_media::hardware::detect(&spoonstill_media::Tools::from_env())
+        .into_iter()
+        .map(|one| {
+            let (usable, present, detail) = match one.support {
+                Support::Usable => (true, true, String::new()),
+                Support::Unusable { reason } => (false, true, reason),
+                Support::Absent => (false, false, String::new()),
+            };
+            AccelReport {
+                encoder: one.candidate.encoder.to_string(),
+                vendor: one.candidate.vendor.to_string(),
+                usable,
+                present,
+                detail,
+            }
+        })
+        .collect()
+}
+
 /// Fetch one tool through this machine's own package manager.
 ///
 /// # Errors

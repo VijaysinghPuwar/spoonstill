@@ -284,6 +284,14 @@ than anything wrong with your files — and `doctor --install` fetches it.
 the first bad row. The diagnostics bundle is one text file, with credentials
 redacted, that you can attach to an issue.
 
+`doctor` also lists the **hardware encoders your machine can actually run** —
+checked by encoding a frame with each, not by reading a list of what FFmpeg was
+compiled with, which on a typical Windows build names several that do not work.
+It is there to answer the question, not because it changes anything: films
+render on the CPU, and on a 4K render the encoder is at most a fifth of the
+time, so a graphics card would not make one much faster. That number is
+measured, in `ffmpeg-findings.md` §13.
+
 **In the window**, you never need any of this: wherever spoonstill notices that
 something it needs is missing — the Voice screen, the Render screen, Settings —
 it says so in a sentence and puts an **Install it for me** button next to it.

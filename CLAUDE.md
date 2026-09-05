@@ -190,6 +190,109 @@ cargo build --release -p spoonstill-cli
 cargo run --release -p spoonstill-desktop
 ```
 
+### State as of 2026-09-05 — the first session run on Windows: the GPU question, and a window with no name
+
+**Everything below was executed on Windows 11, 16 cores, 15.2 GB, an RTX 3060
+and an AMD Radeon.** Until today every number in `ffmpeg-findings.md` was macOS
+arm64 and the top of this file said so. `ffmpeg-findings.md` **§13** is the
+first section that is not.
+
+**D-159 — the graphics card is detected by using it, and it is still not what
+renders.** The question was *does it detect the GPU, and if not fix it*, and it
+did not: D-036 settled the encoder in M1 in one sentence with three clauses —
+*"probe availability at runtime, expose it as an explicit fast draft mode, and
+always fall back to libx264"* — and only the third was ever built, by never
+leaving it. `spoonstill_media::hardware` is the first clause, and it **encodes a
+frame** rather than reading `ffmpeg -encoders`, because on this machine that
+listing names **seven** H.264 encoders of which **four** work: `h264_qsv` is
+listed on a machine with no Intel graphics, and `h264_vaapi` — a Linux API — is
+listed on Windows. A detector that grepped the list would report seven, which is
+worse than reporting nothing. The probe feeds **software** frames on purpose:
+D-030 through D-037 all run on the CPU, so an encoder that needs the frame
+already on the GPU is not a drop-in for libx264 here, and `h264_vaapi`,
+`h264_d3d12va` and `h264_vulkan` are correctly reported unusable for that
+reason. Surfaced on `still doctor` (1.7 s) and in the diagnostics bundle;
+**nowhere on the render path**, which is D-151's split. Nothing there can fail
+`doctor` — a missing `h264_qsv` on an AMD machine is the correct pairing.
+
+**Running it found two defects in it, neither of which a review would have.**
+The first draft reported FFmpeg's *last* stderr line, which for `h264_qsv` is
+the muxer saying *"Nothing was written into output file"* — a consequence three
+components downstream that would have sent the operator to look at their output
+settings. The cause is the **first** line naming the encoder, because FFmpeg
+reports causes before cascades. And a test caught the parser reading the
+`-encoders` legend line ` V..... = Video` as an encoder named `=`.
+
+**The GPU is worth 1.23x, measured rather than inferred.** D-144 put any encoder
+change at a 1.17x ceiling using `ultrafast` as a stand-in, because that machine
+has no NVIDIA hardware. This one does. 4K, 112 frames, the shipped chain: filter
+alone **4.53 s**, shipped `libx264 -preset medium` **5.86 s**, `h264_nvenc`
+**4.78 s**, `h264_amf` **5.00 s**. So the encoder is **22.7% of a 4K render
+here against macOS's 14%**, NVENC is worth **1.23x**, and it saves **zero**
+memory — the memory is the 11520x6480 prescale canvas on the CPU. D-036's
+default stands, and `still doctor` says so in two lines under the list every
+time, because a list of usable encoders invites exactly one wrong conclusion.
+**The fast draft mode is still not built**: it trades quality for 1.23x and
+would touch the segment cache key (D-107) and the D-041 profile assertion, which
+are two of the load-bearing invariants here. That is a decision to make from the
+numbers above, not a thing to slip in.
+
+**D-144 was verified on the platform it was reported from, and it holds.** The
+4K render that froze a machine now picks **3 workers rather than 4** and says
+why. Peak was **7 163 MB — 2 388 MB per worker**, against the model's 2 755 MB:
+the model sits **15% above** the Windows measurement and 5% above the macOS one,
+which is the direction `capacity.rs` is built on. No freeze.
+
+**D-076's cap of 4 was derived on macOS and is correct on Windows too.** 32
+scenes at 1080p: jobs 1 **47.2 s**, 2 **27.4**, 3 **22.2**, 4 **19.9**, 6
+**18.6**, 8 **18.2**, 12 **19.8**. Same shape as §10's macOS curve on a machine
+with 60% more cores — it flattens after four and **regresses at twelve**. Going
+4 -> 8 buys 9% for twice the memory, which is exactly the trade D-076 declined.
+Worth checking because a 16-core machine is where one would expect it to be
+wrong; it was not.
+
+**And orchestration is not where Windows time goes** — the thing to rule out on
+a platform with expensive process creation and a virus scanner over every
+written file. `still validate` on 32 scenes is **0.25 s**, and a fully cached
+re-render — 32 probes, the join and the D-041 assertion, no encoding at all — is
+**1.16 s**, or **36 ms a scene**. There is no Windows-specific overhead to
+remove; the time is in the filter graph, where this file has always said it is.
+**So "optimise for Windows" has a measured answer and it is that both levers are
+already set correctly** — which is a result, not a shrug, and the numbers above
+are what would overturn it.
+
+**D-160 — the window had no name on Windows, and the config could not give it
+one.** `apps/desktop` builds on Windows for the first time (D-132 excluded it
+because `tauri-winres` wanted `llvm-rc` on the Mac): 2m08, 18 tests green, and it
+opens and renders its real content. What it also had was a **blank native title
+bar** and a nameless taskbar and Alt-Tab entry. `tauri.conf.json` sets
+`title: ""` because macOS draws its own header under `titleBarStyle: Overlay`,
+but D-132 already established `title_bar_style` is macOS-only — so Windows keeps
+a real title bar and an empty title leaves it empty. **The obvious fix is wrong**:
+`TitleBarStyle::Overlay` maps to `titlebar_transparent` + `fullsize_content_view`
+and **not** to `title_hidden` (read in the pinned `tauri-runtime-wry`, not
+assumed), so a title in the config would be drawn over the page's own header on
+macOS. It is set at runtime under `#[cfg(target_os = "windows")]`, which is
+D-132's own pattern and leaves the other machine provably untouched.
+
+**What could not be established, stated rather than implied.** Launched
+repeatedly from an automated non-interactive shell, the window exits cleanly
+(code 0, no stderr, no event-log entry) about two seconds in, roughly two runs in
+three. That looked like a regression from the morning's commits and **it is
+not**: at n=5 the installed **v0.1.7** does the same thing four times in five,
+and the two trials that suggested otherwise were n=1 each. Almost certainly the
+launch context rather than the product, and D-131 already records that this
+project has no GUI automation. Proven: it builds, passes its tests, opens,
+renders, and now has a name. Not proven: unattended lifetime. **Do not bisect
+`master` for those two seconds** — that is most of what this session cost.
+
+**D-142's FFmpeg search is confirmed on a real winget install.** FFmpeg is
+**not on PATH** on this machine: `Gyan.FFmpeg` publishes no shim and lands under
+`WinGet/Packages/Gyan.FFmpeg_…/ffmpeg-9.0.1-full_build/bin`. `still doctor`
+finds it and reports `9.0.1-full_build-www.gyan.dev`. Note the **major version**:
+9.0.1 here against the 8.0.1 every earlier measurement used, which is D-151's
+point about nothing having recorded it.
+
 ### State as of 2026-09-05 — Hindi came out as a row of boxes reading NO GLYPH
 
 **D-157 — a caption is drawn by a face that has the glyphs, and shaped.**

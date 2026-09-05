@@ -1714,8 +1714,39 @@ fn relative(path: &std::path::Path, root: &std::path::Path) -> String {
         .to_string()
 }
 
+/// The name Windows puts in the title bar, the taskbar and Alt-Tab (D-160).
+///
+/// `tauri.conf.json` sets `title: ""` on purpose: `titleBarStyle: "Overlay"`
+/// makes the macOS title bar transparent and the page draws its own header, so
+/// a title string there would print twice. But `title_bar_style` is
+/// `#[cfg(target_os = "macos")]` in the pinned `tauri-runtime-wry` (D-132), so
+/// **Windows keeps its native title bar** — and an empty title left it blank,
+/// with a nameless entry in the taskbar and in Alt-Tab.
+///
+/// Set here rather than in the config for the reason D-132 established: the
+/// config is one value for both platforms, and this one has to differ. Checked
+/// in `tauri-runtime-wry` rather than assumed — `TitleBarStyle::Overlay` maps to
+/// `with_titlebar_transparent(true)` plus `with_fullsize_content_view(true)` and
+/// **not** to `with_title_hidden(true)`, so a non-empty title in the config
+/// would be drawn over the page's own header on macOS. This way that machine is
+/// provably unchanged.
+#[cfg(target_os = "windows")]
+const WINDOW_TITLE: &str = "spoonstill";
+
 fn main() {
     tauri::Builder::default()
+        .setup(|_app| {
+            // Windows only, and deliberately not an `else` — a platform this
+            // project does not target (D-071) keeps whatever the config said.
+            #[cfg(target_os = "windows")]
+            {
+                use tauri::Manager;
+                if let Some(window) = _app.get_webview_window("main") {
+                    let _ = window.set_title(WINDOW_TITLE);
+                }
+            }
+            Ok(())
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(Active::default())

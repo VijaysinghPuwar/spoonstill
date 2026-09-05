@@ -352,6 +352,53 @@ fn the_traffic_light_padding_is_asked_for_by_platform() {
     );
 }
 
+/// D-160. The window names itself on Windows, where the native title bar is
+/// real and the config's empty title left it blank.
+///
+/// Both halves are asserted, because each alone is the bug: the config must
+/// stay empty (a title there prints over the page's own header on macOS, since
+/// `TitleBarStyle::Overlay` does not hide the title text), and `main.rs` must
+/// set one on Windows (or the taskbar and Alt-Tab entry have no name).
+#[test]
+fn the_window_names_itself_on_windows() {
+    let config = read("../tauri.conf.json");
+    assert!(
+        config.contains(r#""title": """#),
+        "tauri.conf.json now sets a window title for both platforms — on macOS \
+         `titleBarStyle: Overlay` leaves the title text visible, so it would be \
+         drawn over the header the page draws itself (D-160)"
+    );
+
+    let main = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+    )
+    .expect("src/main.rs");
+
+    assert!(
+        main.contains("set_title(WINDOW_TITLE)"),
+        "nothing sets the window title on Windows, so the native title bar is \
+         blank and the taskbar entry has no name (D-160)"
+    );
+
+    // The constant and its guard are checked as two neighbouring lines rather
+    // than one string, because this tree checks out with CRLF on Windows and a
+    // multi-line literal would then match nothing here.
+    let guarded = main
+        .lines()
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|pair| {
+            pair[0] == r#"#[cfg(target_os = "windows")]"#
+                && pair[1].starts_with("const WINDOW_TITLE")
+        });
+    assert!(
+        guarded,
+        "WINDOW_TITLE is no longer Windows-only, so macOS is no longer provably \
+         unchanged by D-160"
+    );
+}
+
 /// D-148. Every window command that can fail has to say so somewhere an
 /// operator's report can be checked against.
 ///

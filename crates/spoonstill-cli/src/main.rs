@@ -650,9 +650,18 @@ struct DoctorArgs {
 /// the answer was always one of these two lines.
 fn doctor(args: &DoctorArgs) -> Result<(), String> {
     let mut unresolved = 0;
+    // Whether there is an FFmpeg to ask about hardware at all. Without it every
+    // candidate answers "not in this ffmpeg", which is four lines of noise
+    // underneath the one line that matters — D-103's defect exactly, where one
+    // missing binary is reported once as itself rather than many times as
+    // something else.
+    let mut ffmpeg_ready = false;
 
     for tool in spoonstill_app::tooling::check_all() {
         if tool.ready {
+            if tool.id == spoonstill_app::tooling::FFMPEG {
+                ffmpeg_ready = true;
+            }
             println!("  ok       {} — {}", tool.id, tool.purpose);
             // Which build, not just whether there is one (D-151). The version
             // is the first thing a report from a stranger's machine is checked
@@ -695,6 +704,10 @@ fn doctor(args: &DoctorArgs) -> Result<(), String> {
         }
     }
 
+    if ffmpeg_ready {
+        report_graphics();
+    }
+
     if unresolved == 0 {
         return Ok(());
     }
@@ -703,6 +716,51 @@ fn doctor(args: &DoctorArgs) -> Result<(), String> {
         if unresolved == 1 { "" } else { "s" },
         if unresolved == 1 { "is" } else { "are" }
     ))
+}
+
+/// What hardware encoding this machine could do (D-159).
+///
+/// Printed by `still doctor` because "is it using my graphics card" had no
+/// answer on any surface, and an operator who has one asks it first. It is
+/// deliberately phrased as *what this machine has*, not as a list of things
+/// that are wrong: a missing `h264_qsv` on a machine with no Intel graphics is
+/// the correct pairing, so nothing here counts towards `unresolved` and nothing
+/// here can fail `still doctor`.
+///
+/// Only called when there is an FFmpeg to ask. Without one every candidate
+/// answers "not in this ffmpeg", and printing four of those under a heading
+/// about the operator's graphics card buries the single line that actually
+/// needs acting on.
+fn report_graphics() {
+    let found = spoonstill_app::tooling::hardware();
+    if found.is_empty() {
+        return;
+    }
+
+    println!();
+    println!("  graphics — hardware encoders this machine can run");
+    for accel in &found {
+        let status = if accel.usable {
+            "usable"
+        } else if accel.present {
+            "no"
+        } else {
+            "not in this ffmpeg"
+        };
+        println!("    {status:<20} {} ({})", accel.vendor, accel.encoder);
+        if !accel.detail.is_empty() {
+            println!("      {}", accel.detail);
+        }
+    }
+
+    // Said every time, because the list above invites exactly one wrong
+    // conclusion. D-036 chose libx264 on quality grounds for this content, and
+    // the encoder is a fifth of a 4K render at most — 14% measured on macOS
+    // (D-144) and 22.7% here, with NVENC itself worth 1.23x (D-159). So a
+    // usable line above is a fact about the machine, not a setting somebody has
+    // failed to turn on.
+    println!("    Films render on the CPU with libx264 (D-036). The encoder is at most a");
+    println!("    fifth of a 4K render, so hardware would not make one much faster (D-159).");
 }
 
 /// A file's own name, for a report that lines up.
