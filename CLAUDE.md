@@ -190,6 +190,46 @@ cargo build --release -p spoonstill-cli
 cargo run --release -p spoonstill-desktop
 ```
 
+### State as of 2026-09-06 — the bundle was describing an FFmpeg that was not there
+
+**D-161 — two defects in the environment block**, which is the one surface here
+written for somebody who is **not at the machine** (D-016). Both are invisible
+on a working machine, which is why 37 gates, a green Windows CI leg and eight
+releases never showed either: the success path of each is one line and correct.
+
+**The graphics line invented a build.** D-159 put `graphics:` in the bundle and
+guarded the *same list* on `still doctor` with `ffmpeg_ready` — for a reason its
+own comment states. The bundle got the field and not the guard, so on a machine
+with no FFmpeg it read `graphics: h264_videotoolbox: not in this ffmpeg`
+directly under an `ffmpeg:` field saying the binary could not be run: a
+**specific false claim about a build that does not exist**, which sends the
+reader to their FFmpeg build when the answer is that they have no FFmpeg. The
+guard is now `tooling::ffmpeg().ready` — the same function `still doctor` reads
+— and `graphics_summary` takes it as a **parameter**, so the defect is reachable
+from a test without mutating the environment (D-144's shape).
+
+**And the line above it was cut mid-sentence.** That `ffmpeg:` value's bracket
+**opens and never closes**: `version_line` (D-151) keeps `.lines().next()`,
+right for a version banner and wrong for a `MediaError` — `BinaryMissing`
+displays as **two** lines, so *"spoonstill does not fall back to a different
+binary — a render made with an unknown build is not reproducible"* was dropped
+on the floor. That is precisely the sentence a stranger's bundle needs, since
+without it the obvious guess is that spoonstill failed to look hard enough, and
+D-103 and D-142 exist because that guess is the common one. Fixed where the
+failure is **built**, not where it is trimmed, so there is no second place that
+has to remember.
+
+**Both tests were run against the unfixed code and seen to fail.** The paired
+test — that a machine *with* FFmpeg still gets a real answer — is there for
+D-116's reason: a guard that always returned early would pass the first test
+perfectly.
+
+Also: **`.gitignore` now holds `Icon?`**. Finder's custom-folder-icon file is
+named `Icon` plus a carriage return, and six sat permanently untracked in
+`git status`; permanent noise in that listing is how a real untracked file gets
+missed. **`make gates` is still 37** — nothing here changes what renders, and a
+gate needing a machine with no FFmpeg cannot run on the machine that has one.
+
 ### State as of 2026-09-05 — the first session run on Windows: the GPU question, and a window with no name
 
 **Everything below was executed on Windows 11, 16 cores, 15.2 GB, an RTX 3060
@@ -2183,7 +2223,9 @@ touching `Backoff`, `wait_until`'s loop, `probe_jobs`, or the `Sync` bound on
 `MediaCheck`**, **D-150 before touching `Ingested::summary`, `unreadable`,
 `human_size`, `arrange::Moved`, or a cited D-number**, **D-151 before touching
 `Spoken::voice`, `tools::version_line`, the "film complete" event's fields, or
-the FFmpeg version line in this file**, **D-152 before touching
+the FFmpeg version line in this file**, **D-161 before touching
+`graphics_summary`, `version_output`'s failure arm, or anything that reports a
+missing FFmpeg in the diagnostics bundle**, **D-152 before touching
 `TEXT_EXTENSIONS`, `POSITIONAL_TEXT_EXTENSIONS` or `ingest::assign`**, **D-153
 before touching `MotionSeed`, `MotionSpec::seeded`, the segment filename,
 `occurrences_of`, or what `create_project` writes**, and **D-154 before starting

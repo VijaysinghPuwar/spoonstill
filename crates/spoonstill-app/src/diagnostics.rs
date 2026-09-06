@@ -57,7 +57,15 @@ pub fn environment() -> Vec<EnvironmentLine> {
     // records, and because a report that a render is slow is read differently
     // depending on whether the machine has a graphics card at all — even
     // though the answer, per D-036 and D-144, is that it would not have helped.
-    lines.push(line("graphics", graphics_summary()));
+    // Only when there is an FFmpeg to ask (D-103): without one every candidate
+    // answers "not in this ffmpeg", which is a specific false statement about a
+    // build that does not exist, printed two lines under the `ffmpeg:` field
+    // that already said so. `still doctor` guards the same list the same way
+    // and through the same function, so the two cannot drift (D-161).
+    lines.push(line(
+        "graphics",
+        graphics_summary(crate::tooling::ffmpeg().ready),
+    ));
 
     // The `PATH` this process was given, which is the whole of D-103 and
     // D-104 in one line: a window launched from Finder has launchd's four
@@ -122,7 +130,15 @@ fn configuration_of(program: &Path) -> String {
 /// value and the bundle's shape is pinned by a test. Unusable candidates carry
 /// FFmpeg's own reason, which is the half that distinguishes "no such hardware"
 /// from "the driver needs updating".
-fn graphics_summary() -> String {
+fn graphics_summary(ffmpeg_ready: bool) -> String {
+    // The list describes an FFmpeg build. With no FFmpeg there is no build to
+    // describe, and probing would spawn four processes that can only fail —
+    // so this defers to the field above rather than restating one missing
+    // binary as four facts about encoders (D-103, D-161).
+    if !ffmpeg_ready {
+        return "<no ffmpeg to ask — see the ffmpeg field above>".to_string();
+    }
+
     let found = crate::tooling::hardware();
     if found.is_empty() {
         return "<none probed for this platform>".to_string();
@@ -193,6 +209,41 @@ mod tests {
             spoonstill_media::tools::version_output(Path::new("/nonexistent/spoonstill/ffmpeg"));
         assert!(text.contains("could not be run"), "{text}");
         assert!(text.contains("/nonexistent/spoonstill/ffmpeg"), "{text}");
+    }
+
+    /// D-159 one layer along, and D-103's rule. A machine with no FFmpeg has
+    /// no FFmpeg build, so the graphics line must not describe one.
+    ///
+    /// Against the first version of D-159's bundle field this reads
+    /// `h264_videotoolbox: not in this ffmpeg` on a machine that has no ffmpeg
+    /// at all — a specific false claim about a build that does not exist,
+    /// printed two lines under the `ffmpeg:` field that already said the binary
+    /// could not be run. `still doctor` guards its own copy of this list the
+    /// same way; the bundle did not, and the bundle is the surface read by
+    /// somebody who is not at the machine.
+    #[test]
+    fn the_graphics_line_does_not_describe_a_build_that_is_not_there() {
+        let summary = graphics_summary(false);
+        assert!(
+            !summary.contains("not in this ffmpeg"),
+            "a missing FFmpeg is being reported as a fact about its encoders: {summary}"
+        );
+        assert!(summary.contains("ffmpeg"), "{summary}");
+    }
+
+    /// And it still answers when there is one, so the guard cannot be the
+    /// whole function.
+    #[test]
+    fn the_graphics_line_answers_when_ffmpeg_is_there() {
+        if !crate::tooling::ffmpeg().ready {
+            return; // No FFmpeg here; the other half of this pair is the test.
+        }
+        let summary = graphics_summary(true);
+        assert!(!summary.is_empty());
+        assert!(
+            summary.contains("h264_") || summary.contains("none probed"),
+            "{summary}"
+        );
     }
 
     /// The configuration line must say how much it left out, rather than

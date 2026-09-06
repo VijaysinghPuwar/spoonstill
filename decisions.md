@@ -6645,6 +6645,76 @@ be read as proving it. Recorded because the next person to automate this window
 will see the same two seconds and should not spend the morning bisecting
 `master` for it, which is most of what this one cost.
 
+### D-161 — The diagnostics bundle stops describing an FFmpeg that is not there · Accepted
+
+Two defects in the **environment block**, which is the one surface in this
+project written to be read by somebody who is **not at the machine** (D-016).
+Both are invisible on a working machine, which is why eight releases and a full
+`make gates` never showed either: the success path of each is one line long and
+correct.
+
+**The graphics line invented a build.** D-159 added `graphics:` to the bundle
+and guarded the *same list* on `still doctor` with `ffmpeg_ready`, for a reason
+its own comment states — without an FFmpeg every candidate answers "not in this
+ffmpeg", "which is four lines of noise underneath the one line that matters —
+D-103's defect exactly". The bundle got the field and not the guard, so on a
+machine with no FFmpeg it read
+
+```
+ffmpeg:                <could not be run: … No such file or directory (os error 2)
+graphics:              h264_videotoolbox: not in this ffmpeg
+```
+
+— a **specific false claim about a build that does not exist**, two lines under
+the field that already said the binary could not be run. A reader of a
+stranger's bundle would go looking at their FFmpeg build; the answer is that
+there is no FFmpeg. One missing binary is reported once, as itself.
+
+The guard is `crate::tooling::ffmpeg().ready` — **the same function** that
+`still doctor` reads through `check_all()`, and itself one call to
+`Tools::from_env().ready()`. So the two surfaces cannot drift into two ideas of
+what "there is an FFmpeg" means, which is D-151's rule and D-148's.
+`graphics_summary` takes the answer as a **parameter** rather than asking, so
+the defect is reachable from a test without mutating the environment — the same
+shape D-144 needed for its memory budget.
+
+**And the line above it was truncated mid-sentence.** Look again at that
+`ffmpeg:` value: the bracket **opens and never closes**. `version_output`
+(D-151) formats a failure as `<could not be run: {error}>` and `version_line`
+keeps `.lines().next()` — right for a version banner, whose first line is the
+whole answer, and wrong for a `MediaError`: **`BinaryMissing` displays as two
+lines**, so everything from the newline onwards was dropped on the floor,
+including
+
+> spoonstill does not fall back to a different binary — a render made with an
+> unknown build is not reproducible.
+
+That is exactly the sentence the reader of somebody else's bundle needs, because
+without it the obvious guess is that spoonstill simply failed to look hard
+enough — and D-103 and D-142 exist because that guess is the common one. Fixed
+where the failure is *built*, not where it is trimmed: the `Err` arm flattens
+whitespace, so `version_line`'s "first line of the banner" rule stays true for
+the success path and there is no second place that has to remember this.
+
+**Both tests were run against the unfixed code and seen to fail** — the graphics
+one printing `h264_videotoolbox: not in this ffmpeg`, the version one printing
+the unclosed bracket. The paired test that the guard is not the whole function
+(a machine *with* FFmpeg still gets a real answer) matters here for D-116's
+reason: a guard that returns early always would pass the first test perfectly.
+
+Measured end to end on this machine, both ways: with no FFmpeg the bundle now
+reads `<no ffmpeg to ask — see the ffmpeg field above>` and carries the whole
+two-sentence failure inside a closed bracket; with FFmpeg it is unchanged —
+`h264_videotoolbox: usable`, `ffmpeg version 9.0.1`. **`make gates` is still
+37**: nothing here changes what renders, and a gate that needs a machine with no
+FFmpeg cannot run on the machine that has one.
+
+Also here, and not a code defect: **`.gitignore` now holds `Icon?`**. Finder
+writes a custom-folder-icon file whose name is `Icon` followed by a carriage
+return, and six of them sat permanently untracked in `git status`. A status
+listing with permanent noise in it is how a real untracked file gets missed.
+
+
 ### D-074 — The `kenburns-batch` master brief does not exist on this machine · Accepted
 
 Searched 2026-08-26: no file matching `*kenburns*` anywhere under `~/Desktop`,

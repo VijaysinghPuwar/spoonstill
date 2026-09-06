@@ -30,6 +30,11 @@ __pycache__/
 
 # OS / editor
 .DS_Store
+# Finder's custom-folder-icon file. The name really is `Icon` followed by a
+# carriage return, which is why it needs the `?` — one appears in any folder
+# that has ever been given an icon, and six of them sat in `git status`
+# untracked, which is how a real untracked file gets missed.
+Icon?
 .idea/
 .vscode/
 

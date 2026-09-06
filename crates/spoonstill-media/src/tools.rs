@@ -581,8 +581,23 @@ pub fn version_output(program: &Path) -> String {
         .and_then(|child| child.wait_until(VERSION_TIMEOUT))
     {
         Ok(finished) => String::from_utf8_lossy(&finished.stdout).into_owned(),
-        Err(error) => format!("<could not be run: {error}>"),
+        // Flattened, because [`version_line`] keeps the first line and a
+        // `MediaError` is not always one: `BinaryMissing` displays as two, so
+        // an unflattened failure reached a diagnostics bundle as
+        // `<could not be run: … (os error 2)` — an unclosed bracket with the
+        // half that explains why there was no fallback silently gone. The
+        // success path never showed it, because a version banner's first line
+        // is the whole answer (D-161).
+        Err(error) => format!("<could not be run: {}>", one_line(&error.to_string())),
     }
+}
+
+/// A message of any shape as one line, for a field that is one line.
+///
+/// Collapses every run of whitespace, so a `write!` continued across source
+/// lines does not arrive carrying its own indentation.
+fn one_line(message: &str) -> String {
+    message.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The first line of [`version_output`] — the one with the version in it.
@@ -618,6 +633,32 @@ fn short_version(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D-151, one layer along. A failure to run has to reach a diagnostics
+    /// bundle whole.
+    ///
+    /// [`version_line`] keeps the *first* line, which is right for a version
+    /// banner and was wrong for a `MediaError`: `BinaryMissing` displays as two
+    /// lines, so a bundle from a machine with no FFmpeg printed
+    /// `<could not be run: … (os error 2)` — an unclosed bracket, and the
+    /// sentence explaining that spoonstill deliberately does not fall back to
+    /// another binary dropped on the floor. That sentence is the one a reader
+    /// of somebody else's bundle needs, because without it the obvious guess is
+    /// that spoonstill simply failed to look hard enough.
+    #[test]
+    fn a_failure_to_run_reaches_the_bundle_whole() {
+        let line = version_line(Path::new("/nonexistent/spoonstill/ffmpeg"));
+        assert!(line.starts_with("<could not be run:"), "{line}");
+        assert!(
+            line.ends_with('>'),
+            "the bracket opened and never closed: {line}"
+        );
+        assert!(
+            line.contains("does not fall back"),
+            "the half that says why there was no fallback is missing: {line}"
+        );
+        assert_eq!(line.lines().count(), 1, "{line}");
+    }
 
     /// D-151. The version is the first thing a report from a stranger's machine
     /// is checked against, so what it reports has to be the version and not the
