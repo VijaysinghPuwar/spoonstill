@@ -647,17 +647,50 @@ mod tests {
     /// that spoonstill simply failed to look hard enough.
     #[test]
     fn a_failure_to_run_reaches_the_bundle_whole() {
-        let line = version_line(Path::new("/nonexistent/spoonstill/ffmpeg"));
-        assert!(line.starts_with("<could not be run:"), "{line}");
+        let path = Path::new("/nonexistent/spoonstill/ffmpeg");
+        let raw = version_output(path);
+
+        // The invariant, stated structurally rather than by quoting the
+        // message: a failure is *built* as one line, so the first-line rule
+        // below cannot drop any of it. Asserting the wording instead would
+        // make this fail whenever `MediaError`'s sentence is reworded, which
+        // is not this defect.
+        assert!(raw.starts_with("<could not be run:"), "{raw}");
         assert!(
-            line.ends_with('>'),
-            "the bracket opened and never closed: {line}"
+            raw.trim_end().ends_with('>'),
+            "the bracket opened and never closed: {raw}"
         );
-        assert!(
-            line.contains("does not fall back"),
-            "the half that says why there was no fallback is missing: {line}"
+        assert_eq!(
+            raw.trim().lines().count(),
+            1,
+            "a multi-line failure still reaches version_line, which keeps only \
+             the first line of it: {raw}"
         );
-        assert_eq!(line.lines().count(), 1, "{line}");
+
+        // And nothing is lost between the two: whatever was built is what the
+        // bundle prints.
+        assert_eq!(
+            version_line(path),
+            raw.trim(),
+            "version_line dropped part of it"
+        );
+    }
+
+    /// The fix itself, on an input that is unambiguously two lines.
+    ///
+    /// Separate from the test above because that one depends on `MediaError`
+    /// staying two lines to be meaningful — if the message were ever reduced to
+    /// one, it would keep passing while testing nothing (D-116). This one
+    /// cannot: the multi-line input is written here.
+    #[test]
+    fn a_multi_line_message_is_flattened_without_losing_any_of_it() {
+        let flattened = one_line("first line\n   second line, indented by the source\n");
+        assert_eq!(flattened, "first line second line, indented by the source");
+        assert_eq!(flattened.lines().count(), 1);
+        // Every word survives — the point is flattening, not truncating.
+        for word in ["first", "second", "indented", "source"] {
+            assert!(flattened.contains(word), "{word} lost from {flattened}");
+        }
     }
 
     /// D-151. The version is the first thing a report from a stranger's machine

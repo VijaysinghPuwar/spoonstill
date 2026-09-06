@@ -224,6 +224,17 @@ test — that a machine *with* FFmpeg still gets a real answer — is there for
 D-116's reason: a guard that always returned early would pass the first test
 perfectly.
 
+**Then the tests were audited the way the code was, and three were weak.**
+`the_environment_names_the_build_under_test` did not list `graphics`, so
+deleting D-159's field outright was caught by nothing; the version test quoted a
+literal sentence from another module's `Display` instead of asserting the
+property; and the paired test **returned quietly** on a machine with no FFmpeg —
+a check that passes by finding nothing to check (D-125, D-154). All three fixed,
+and then **five mutations were run against five distinct tests: each caught
+exactly one, none redundant.** The row that earns its keep is `one_line`
+truncating rather than flattening — the *original* defect is caught without that
+test, and the most plausible **wrong fix** is not.
+
 Also: **`.gitignore` now holds `Icon?`**. Finder's custom-folder-icon file is
 named `Icon` plus a carriage return, and six sat permanently untracked in
 `git status`; permanent noise in that listing is how a real untracked file gets

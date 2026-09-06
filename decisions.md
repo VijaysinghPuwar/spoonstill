@@ -6709,6 +6709,40 @@ two-sentence failure inside a closed bracket; with FFmpeg it is unchanged —
 37**: nothing here changes what renders, and a gate that needs a machine with no
 FFmpeg cannot run on the machine that has one.
 
+**The tests were then audited the way the code was, and three of them were
+weak.** Written down because the audit found more than the first pass did:
+
+- `the_environment_names_the_build_under_test` lists the keys a bundle must
+  carry, and **`graphics` was not in it** — D-159 shipped the field with no test
+  that it is in the bundle at all, so deleting it outright was caught by
+  nothing. Added.
+- The version test asserted the literal sentence *"does not fall back"*, which
+  couples it to another module's `Display` and would fail on a rewording that is
+  not this defect. It now asserts the property **structurally** — the failure is
+  *built* as one line, and `version_line` returns it unchanged — plus a separate
+  unit test of `one_line` on an input written here as two lines. That second
+  test exists for D-116's reason: if `MediaError` were ever reduced to one line,
+  the integration test would keep passing while testing nothing.
+- The paired "the guard is not the whole function" test **returned quietly** on
+  a machine with no FFmpeg. A check that passes by finding nothing to check is
+  not a check (D-125) and a vacuous pass that looks like a real one is D-154's
+  lesson; it now says which case it ran in, as `hardware_report.rs` already
+  does, and asserts the guard's own sentence is **absent** when FFmpeg is there.
+
+**Five mutations, five distinct failures, no overlap** — each test catches
+exactly one and no test is redundant:
+
+| mutation | caught by |
+|---|---|
+| the failure is not flattened (the original defect) | `a_failure_to_run_reaches_the_bundle_whole` |
+| `one_line` truncates rather than flattens | `a_multi_line_message_is_flattened_without_losing_any_of_it` |
+| the guard is removed (the original defect) | `the_graphics_line_does_not_describe_a_build_that_is_not_there` |
+| the guard is the whole function | `the_graphics_line_answers_when_ffmpeg_is_there` |
+| the `graphics` field is deleted | `the_environment_names_the_build_under_test` |
+
+The second row is the one that justifies the extra test: the *original* defect
+is caught without it, and the most plausible **wrong fix** is not.
+
 Also here, and not a code defect: **`.gitignore` now holds `Icon?`**. Finder
 writes a custom-folder-icon file whose name is `Icon` followed by a carriage
 return, and six of them sat permanently untracked in `git status`. A status

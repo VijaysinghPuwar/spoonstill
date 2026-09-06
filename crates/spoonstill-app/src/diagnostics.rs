@@ -195,6 +195,9 @@ mod tests {
             // D-103 and D-104: which binaries this process could actually
             // reach, and the `PATH` that explains why.
             "edge tooling",
+            // D-159 arrived with no test that its field is in the bundle at
+            // all, so deleting it was caught by nothing (D-161).
+            "graphics",
             "PATH",
         ] {
             assert!(keys.contains(&expected), "{expected} missing from {keys:?}");
@@ -236,13 +239,25 @@ mod tests {
     #[test]
     fn the_graphics_line_answers_when_ffmpeg_is_there() {
         if !crate::tooling::ffmpeg().ready {
-            return; // No FFmpeg here; the other half of this pair is the test.
+            // Said out loud rather than returning quietly: a check that passes
+            // by finding nothing to check is not a check (D-125), and a
+            // vacuous pass that looks like a real one is D-154's lesson. The
+            // neighbouring test is the half that runs everywhere.
+            eprintln!("no FFmpeg on this machine — the guarded half is untestable here");
+            return;
         }
         let summary = graphics_summary(true);
-        assert!(!summary.is_empty());
+
+        // The point of this half: the guard must not be the whole function. An
+        // implementation that returned the missing-FFmpeg sentence
+        // unconditionally would satisfy the test above perfectly.
         assert!(
-            summary.contains("h264_") || summary.contains("none probed"),
-            "{summary}"
+            !summary.contains("no ffmpeg to ask"),
+            "the guard answers even when FFmpeg is present: {summary}"
+        );
+        assert!(
+            summary.contains("h264_"),
+            "no encoder was named on a machine that has FFmpeg: {summary}"
         );
     }
 
