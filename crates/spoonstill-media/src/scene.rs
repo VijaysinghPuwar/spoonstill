@@ -28,6 +28,7 @@ use crate::atomic::{ensure_parent, move_into_place, partial_path};
 use crate::caption;
 use crate::command::{FfmpegCommand, Progress};
 use crate::error::MediaError;
+use crate::hardware::VideoEncoder;
 use crate::probe::{self, DEFAULT_PROBE_TIMEOUT, ProbeResult};
 use crate::profile::{self, SegmentProfile};
 use crate::tools::Tools;
@@ -43,9 +44,24 @@ pub const CANCEL_GRACE: Duration = Duration::from_secs(2);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodeSettings {
     /// x264 preset. D-036: `medium` is the default.
+    ///
+    /// Named for x264 because that is whose ladder it is. A hardware encoder
+    /// translates it onto its own scale rather than receiving it verbatim —
+    /// see [`VideoEncoder::quality_args`].
     pub preset: String,
     /// x264 CRF. D-036: 18.
+    ///
+    /// The quantizer, in x264's units. Every other encoder spells this
+    /// differently and one of them counts the other way; the translation is in
+    /// one place (D-162).
     pub crf: u32,
+    /// Which encoder to use (D-162). Default [`VideoEncoder::Software`].
+    ///
+    /// An opt-in on both platforms. Nothing derives this from the machine — a
+    /// render that picked an encoder because of what card it found would
+    /// produce different pixels on two machines from one project, which is the
+    /// opposite of D-077.
+    pub encoder: VideoEncoder,
 }
 
 impl Default for EncodeSettings {
@@ -56,6 +72,7 @@ impl Default for EncodeSettings {
         Self {
             preset: "medium".to_string(),
             crf: 18,
+            encoder: VideoEncoder::Software,
         }
     }
 }
@@ -491,11 +508,15 @@ fn run_ffmpeg(
         // The frame count, structurally, for the second time.
         .arg("-frames:v")
         .arg(frames.to_string())
-        .args(["-c:v", "libx264"])
-        .arg("-preset")
-        .arg(&request.encode.preset)
-        .arg("-crf")
-        .arg(request.encode.crf.to_string())
+        // D-162. `libx264` unless this run explicitly asked for hardware, and
+        // the quality flags come with the encoder because only x264 has `-crf`.
+        .args(["-c:v", request.encode.encoder.name()])
+        .args(
+            request
+                .encode
+                .encoder
+                .quality_args(&request.encode.preset, request.encode.crf),
+        )
         .args(["-profile:v", "high"])
         .arg("-level:v")
         .arg(expected.video_level.to_string())

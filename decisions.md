@@ -6749,6 +6749,106 @@ return, and six of them sat permanently untracked in `git status`. A status
 listing with permanent noise in it is how a real untracked file gets missed.
 
 
+
+### D-162 — The graphics card can be asked to render, and is still not asked by default · Accepted
+
+D-036 settled the encoder in M1 in one sentence with three clauses — *"probe
+availability at runtime, expose it as an explicit fast draft mode, and always
+fall back to libx264"*. D-159 built the first and recorded that only the third
+had ever existed. **This is the second, and it changes nothing about a render
+nobody flags.**
+
+Reported the way these things actually get reported: a 50-scene 4K render with
+Task Manager beside it, CPU at 96%, memory at 15.0 of 15.2 GB, and the RTX
+3060's **Video Encode graph flat at 0%**. The observation was right and the
+inference — *"this is Mac software that was never finished for Windows"* — was
+wrong in an instructive way. `scene.rs` had **no `#[cfg]` on the encoder at
+all**: `libx264` was hardcoded for every platform, so a Mac was not using
+VideoToolbox either. Neither platform was optimised; one of them was just being
+asked about it.
+
+**What is new is a flag, not a default.** `--encoder auto|off|<name>` on `still
+render` and `still render-scene`, resolved by `resolve_encoder` in the CLI
+before the pool starts. `auto` takes the first *usable* entry from D-159's
+detection — which proves an encoder by encoding a frame, not by reading
+`ffmpeg -encoders` — and **falls back to `libx264` with a printed line rather
+than failing**, which is D-036's third clause restated as code. An explicit name
+that this machine cannot run is refused **with the usable list in the message**,
+because a refusal an operator cannot act on is D-089's defect. Absent, `off`,
+`cpu`, `software` and `libx264` all resolve without asking the machine anything,
+so an unflagged render costs exactly what it always did.
+
+**`-crf` is x264's alone, and pretending otherwise is the silent failure here.**
+NVENC spells the same idea `-cq`, AMF `-qp_i`/`-qp_p`, Quick Sync
+`-global_quality`, Media Foundation has no quantizer at all, and **VideoToolbox
+counts the other way** — `-q:v` is 1-100 and upwards is better. A passthrough
+would have meant that lowering `crf` in `project.yaml` made a **Mac** render
+worse, which is a quality regression with no error and no log line on the
+platform this work was required not to damage. The mapping is one `match` with
+no default arm that guesses, and `every_candidate_has_quality_flags_of_its_own`
+fails the build if a candidate is added to `CANDIDATES` without one. The preset
+is translated for the same reason: NVENC accepts the name `medium` and means
+something else by it, so it maps onto `p5`.
+
+**Measured on this machine before any of it was designed**, because the whole
+change is worthless if the segment profile moves. Both NVENC and AMF, through
+the shipped filter tail, produce `h264 / High / level 40 / yuv420p / tv /
+bt709 / SAR 1:1 / timebase 1/90000` — **an exact match for `SegmentProfile`**.
+So **D-041's assertion is not weakened by one field**, and a hardware segment
+joins a software one legally. That was the load-bearing unknown and it is
+retired by measurement rather than by argument.
+
+**The cache key gains a field only when it is used.** A hardware encoder makes
+different bytes from the same inputs, so `--encoder auto` must miss (or the flag
+appears to do nothing). But the **software** arm builds `"{preset}:{crf}"`
+exactly as it always has, so **every project already on disk still hits its
+cache**. D-107 and D-118 each cost every project a full re-render; this one
+costs none, and `hardware_keys_apart_and_software_keys_exactly_as_before`
+asserts it against a **second, spelled-out implementation** of the old field
+list rather than a hash taken from the new code — D-116's trap, avoided
+deliberately. Run against the naive version that always includes the encoder
+name, it fails with *"the software key changed — every project on disk would
+re-render"*.
+
+**It is an override for one run, and it is not written to `project.yaml`**
+(D-013) — for the usual reason and one more: *which encoders exist* is a fact
+about the machine, so a project naming `h264_nvenc` is a project that cannot
+render on the operator's other laptop. Nothing derives the encoder from the
+hardware on its own; a render that silently picked one because of the card it
+found would produce different pixels on two machines from one project, which is
+the opposite of D-077.
+
+**What it is worth is unchanged from D-159 and is still not much.** NVENC is
+1.23x on a 4K segment here and saves **zero** memory, because the memory is the
+11520x6480 prescale canvas in the CPU filter graph (D-144). `still doctor` keeps
+saying so under the list. The far larger lever on the reported render is D-145's
+own warning, which that project was already printing and which no flag can
+substitute for: **50 of 50 stills were 1376x768 going into a 3840x2160 frame**,
+an 8.2x larger filter canvas for pixels that contain no more detail.
+
+**Measured end to end on this machine, and the first measurement was wrong in a
+way worth writing down.** Six scenes at 4K, `--jobs 2`, audio cache warm, three
+runs each: `libx264` **19.71 / 22.06 / 21.79 s** against `h264_nvenc` **19.28 /
+17.44 / 16.91 s** — about **1.19x**, which is D-159's 1.23x confirmed rather
+than improved on.
+
+The first attempt at that measurement produced **2.96x**, and reporting it would
+have been a lie built out of real numbers. The operator's own 50-scene 4K render
+was still running in the window throughout — three FFmpeg workers at ~3 GB each,
+the machine at 99% memory — so both columns were contended and the CPU column
+was contended *worse*, because it wanted the cores the other render was already
+using. The same software render measured **114 s** under that load and **21 s**
+on an idle machine: a **5x** contention penalty, larger than the entire effect
+being measured. **A benchmark taken while the machine is doing something else
+measures the something else.** D-154's vacuous resume gate is the same mistake
+in a different costume, and the tell was identical — a number far better than
+the recorded expectation, believed because it was welcome.
+
+**Not claimed: VideoToolbox is unverified.** This session ran on Windows.
+NVENC and AMF were measured here; the macOS arm is written from Apple's
+documented `-q:v` scale and is covered by unit tests on the mapping only. The
+top of `CLAUDE.md` has always said not to claim a platform that has not been
+run, and this does not.
 ### D-074 — The `kenburns-batch` master brief does not exist on this machine · Accepted
 
 Searched 2026-08-26: no file matching `*kenburns*` anywhere under `~/Desktop`,

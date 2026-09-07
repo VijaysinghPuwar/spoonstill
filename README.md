@@ -160,7 +160,7 @@ is additionally cross-compiled for `x86_64-pc-windows-msvc` before a tag is cut
 `ffmpeg-findings.md` §13 is the first set of numbers in this project that is not
 macOS.
 
-What remains true is that the **37 `make gates` checks are macOS-only** — they
+What remains true is that the **38 `make gates` checks are macOS-only** — they
 are bash, and the Windows leg's `cargo test --workspace` covers the same media
 paths in Rust. If you are the first person to hit something,
 an [issue](https://github.com/VijaysinghPuwar/spoonstill/issues) with
@@ -584,11 +584,39 @@ makes sense.
 | `--resolution SIZE` | `720p`, `1080p`, `1440p`/`2k`, `2160p`/`4k`. |
 | `--short-edge PIXELS` | The same, as a number. Conflicts with `--resolution` on purpose. |
 | `--fps N` | Frame rate for this run. |
+| `--encoder auto\|off\|NAME` | Encode with the graphics card instead of the CPU. A draft mode — see below. |
 | `--keep-cache` | Keep every superseded segment instead of sweeping the oldest. |
 | `--force` | Kept for scripts. It cannot override a lock a *running* render holds. |
 
 Every one of these is **an override for one run**. `project.yaml` is an input;
 the renderer never writes to it.
+
+#### `--encoder`, and why it is off by default
+
+`still doctor` lists the hardware encoders this machine can actually run — it
+proves each one by **encoding a frame with it**, because `ffmpeg -encoders`
+lists encoders that do not work here. `--encoder auto` then uses the best of
+them; `--encoder h264_nvenc` (or `h264_amf`, `h264_qsv`,
+`h264_videotoolbox`) asks for one by name, and is refused with the usable list
+if this machine cannot run it.
+
+It is **a draft mode, not a better default**, for three measured reasons:
+
+- **It is worth about 1.23x.** On an RTX 3060, one 4K segment: the filter graph
+  alone is 4.53 s, shipped `libx264 -preset medium` is 5.86 s, `h264_nvenc` is
+  4.78 s. The encoder is under a quarter of the work; the rest is the Ken Burns
+  filter chain, which runs on the CPU either way.
+- **It saves no memory at all.** The memory is the prescale canvas — 11520×6480
+  at 4K — and that is held in the CPU filter graph, not on the card.
+- **Hardware H.264 bands** on slow pans across large smooth gradients, which is
+  exactly what a Ken Burns move over a photograph is.
+
+If a render feels slow, the far bigger lever is usually **rendering at the size
+your photographs actually are**. `still validate` and `still render` both say so
+when they see it, and name the number to use.
+
+Choosing it never invalidates work already done: a hardware render keys its own
+segments, and switching back reuses every one of the originals.
 
 ---
 
@@ -780,7 +808,7 @@ before it is called a test**.
 | Rust | **37,715 lines** across 6 crates + a Tauri app · edition 2024, pinned to 1.94 |
 | UI | 3,636 lines of hand-written HTML/CSS/JS — no framework, no build step |
 | Tests | **601 `#[test]` functions** — 45 unit-test modules, 15 integration suites |
-| Exit gates | **37** shell gates that render real media and assert real properties |
+| Exit gates | **38** shell gates that render real media and assert real properties |
 | Decisions | **131 numbered decisions** in `decisions.md`, each Accepted / Open / Superseded |
 | Direct dependencies | **12 third-party crates** at runtime (plus one build-time, one dev-only) — and `spoonstill-core` has **none** |
 | `unsafe` | forbidden at the workspace root |
@@ -877,7 +905,7 @@ obvious fix was wrong, and the test that fails without it.
 |---|---|---|
 | **M0** — toolchain, workspace, architecture boundary | ✅ complete | 8/8 gates |
 | **M1** — one scene, end to end | ✅ complete | 8/8 gates |
-| **M2** — whole projects: import, validation, speech, subtitles, parallel render | ✅ complete | 21/21 gates |
+| **M2** — whole projects: import, validation, speech, subtitles, parallel render | ✅ complete | 22/22 gates |
 | **M3** — state database and reporting index | goal met, deliverables owed — *resume already works, and not by a database* | — |
 | **M4** — the desktop window | shell exists, ahead of schedule | — |
 | **M5** — signing, notarization, bundled FFmpeg, auto-update | not started | — |
@@ -925,7 +953,7 @@ make tts-live   # exercise the voice provider against the real service
 make brand      # regenerate every logo asset from its one description
 ```
 
-`make gates` is the honest answer to *"does this work?"*. It runs 37 checks
+`make gates` is the honest answer to *"does this work?"*. It runs 38 checks
 across the three completed milestones and prints pass/fail for each. If all
 three are green, everything in this file is accurate.
 

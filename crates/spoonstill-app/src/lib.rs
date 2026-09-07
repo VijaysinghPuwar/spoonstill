@@ -59,6 +59,7 @@ pub mod tts {
 /// Types the control surface needs from the infrastructure layer.
 pub mod surface {
     pub use spoonstill_media::Progress;
+    pub use spoonstill_media::hardware::VideoEncoder;
     pub use spoonstill_media::scene::{Cancel, EncodeSettings, RenderedScene};
     pub use spoonstill_state::logs::LOGS_DIR;
 }

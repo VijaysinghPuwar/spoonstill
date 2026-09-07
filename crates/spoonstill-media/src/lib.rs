@@ -39,7 +39,9 @@ pub use caption::{Canvas, CaptionImage, render_cue};
 pub use command::{FfmpegChild, FfmpegCommand, Finished, Progress};
 pub use concat::{Film, concat};
 pub use error::MediaError;
-pub use hardware::{Candidate, Detected, Support, detect as detect_hardware};
+pub use hardware::{
+    Candidate, Detected, Support, VideoEncoder, best_hardware, detect as detect_hardware,
+};
 pub use probe::{ProbeResult, Stream, StreamKind, probe, probe_counting_frames};
 pub use profile::{Mismatch, SegmentProfile, assert_matches_profile};
 pub use scene::{Cancel, EncodeSettings, RenderedScene, SceneRequest, render_scene};

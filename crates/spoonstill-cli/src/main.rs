@@ -13,7 +13,7 @@ use clap::{Args, Parser, Subcommand};
 use spoonstill_app::diagnostics;
 use spoonstill_app::film::{FilmEvent, SerialEvents};
 use spoonstill_app::render::RenderSceneOptions;
-use spoonstill_app::surface::{Cancel, EncodeSettings};
+use spoonstill_app::surface::{Cancel, EncodeSettings, VideoEncoder};
 use spoonstill_core::captions::{Placement, SubtitleTheme};
 use spoonstill_core::diagnostics::{Diagnostics, Event};
 use spoonstill_core::{Anchor, Aspect, MotionKind, MotionSpec};
@@ -235,6 +235,19 @@ struct RenderArgs {
     /// Render this run at a different frame rate.
     #[arg(long, value_name = "FPS")]
     fps: Option<u32>,
+
+    /// Encode with the graphics card instead of the CPU (D-162).
+    ///
+    /// `auto` picks the best encoder this machine can actually run, `off` is
+    /// D-036's `libx264`, and a name — `h264_nvenc`, `h264_amf`,
+    /// `h264_videotoolbox` — asks for exactly that one. `still doctor` lists
+    /// what this machine has.
+    ///
+    /// A draft mode, not a better default: it is worth about 1.23x here
+    /// (D-159), it saves no memory, and hardware H.264 bands on the slow pans
+    /// across smooth gradients that this content is made of.
+    #[arg(long, value_name = "ENCODER")]
+    encoder: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -311,6 +324,19 @@ struct RenderSceneArgs {
     /// x264 CRF (D-036).
     #[arg(long, default_value_t = 18)]
     crf: u32,
+
+    /// Encode with the graphics card instead of the CPU (D-162).
+    ///
+    /// `auto` picks the best encoder this machine can actually run, `off` is
+    /// D-036's `libx264`, and a name — `h264_nvenc`, `h264_amf`,
+    /// `h264_videotoolbox` — asks for exactly that one. `still doctor` lists
+    /// what this machine has.
+    ///
+    /// A draft mode, not a better default: it is worth about 1.23x here
+    /// (D-159), it saves no memory, and hardware H.264 bands on the slow pans
+    /// across smooth gradients that this content is made of.
+    #[arg(long, value_name = "ENCODER")]
+    encoder: Option<String>,
 
     /// Project identity, used to seed the move and key the cache.
     #[arg(long, default_value = "single-scene", value_name = "ID")]
@@ -763,6 +789,87 @@ fn report_graphics() {
     println!("    fifth of a 4K render, so hardware would not make one much faster (D-159).");
 }
 
+/// Turn a `--encoder` value into the encoder a render will actually use
+/// (D-162).
+///
+/// Four answers, and only one of them touches the machine:
+///
+/// - absent, `off`, `none`, `cpu`, `software`, `libx264` — D-036's default. No
+///   detection runs at all, so an unflagged render costs exactly what it always
+///   did and behaves identically on a machine with no graphics card.
+/// - `auto` — the best encoder this machine can *run*, proven by encoding a
+///   frame (D-159). Falls back to `libx264` with a printed line rather than
+///   failing, which is D-036's third clause.
+/// - a name — exactly that encoder, refused with the usable list if this
+///   machine cannot run it.
+///
+/// A refusal here names what to use instead, because a refusal an operator
+/// cannot act on is D-089's defect.
+fn resolve_encoder(choice: Option<&str>) -> Result<VideoEncoder, String> {
+    let Some(raw) = choice else {
+        return Ok(VideoEncoder::Software);
+    };
+    let wanted = raw.trim().to_ascii_lowercase();
+
+    // The software spellings, none of which needs the machine asked.
+    if matches!(
+        wanted.as_str(),
+        "off" | "none" | "cpu" | "software" | "libx264" | ""
+    ) {
+        return Ok(VideoEncoder::Software);
+    }
+
+    let found = spoonstill_app::tooling::hardware();
+    let usable: Vec<&spoonstill_app::tooling::AccelReport> =
+        found.iter().filter(|accel| accel.usable).collect();
+
+    if wanted == "auto" {
+        return match usable.first() {
+            Some(accel) => {
+                println!(
+                    "encoding with {} ({}) — a draft mode; libx264 is the default (D-162)",
+                    accel.vendor, accel.encoder
+                );
+                Ok(VideoEncoder::Hardware(accel.encoder.clone()))
+            }
+            None => {
+                // Not an error. D-036's third clause is that the fallback is
+                // always there, and an operator who asked for `auto` on a
+                // machine with no usable encoder wants their film, not a
+                // lecture. Said out loud so the render time is not a mystery.
+                println!("no usable hardware encoder on this machine — rendering with libx264");
+                Ok(VideoEncoder::Software)
+            }
+        };
+    }
+
+    // An explicit name. Matched against what this machine proved it can run,
+    // never accepted on faith: handing FFmpeg an encoder it cannot start fails
+    // once per scene, deep in a pool, with the muxer's "Nothing was written
+    // into output file" as the last line — D-159's own lesson about which line
+    // names the cause.
+    if let Some(accel) = usable
+        .iter()
+        .find(|accel| accel.encoder.eq_ignore_ascii_case(&wanted))
+    {
+        return Ok(VideoEncoder::Hardware(accel.encoder.clone()));
+    }
+
+    let names: Vec<&str> = usable.iter().map(|accel| accel.encoder.as_str()).collect();
+    Err(if names.is_empty() {
+        format!(
+            "`--encoder {raw}`: this machine has no usable hardware encoder. \
+             Run `still doctor` to see what it found, or leave `--encoder` off \
+             to render with libx264."
+        )
+    } else {
+        format!(
+            "`--encoder {raw}`: not usable on this machine. Usable here: {}. \
+             Run `still doctor` for the details, or use `--encoder auto`.",
+            names.join(", ")
+        )
+    })
+}
 /// A file's own name, for a report that lines up.
 fn name_of(path: &std::path::Path) -> String {
     path.file_name()
@@ -1088,6 +1195,11 @@ fn render_project(args: RenderArgs) -> Result<(), String> {
             None => args.short_edge,
         },
         fps: args.fps,
+        // D-162. Resolved here rather than in `render_project` because asking
+        // the machine what it can run is a process spawn per candidate, and
+        // that is a control-surface question (D-151's split) — not something a
+        // render should do once per run behind the operator's back.
+        encoder: Some(resolve_encoder(args.encoder.as_deref())?),
         ..defaults
     };
 
@@ -1273,6 +1385,7 @@ fn render_scene(args: RenderSceneArgs) -> Result<(), String> {
         encode: EncodeSettings {
             preset: args.preset,
             crf: args.crf,
+            encoder: resolve_encoder(args.encoder.as_deref())?,
         },
         project_id: args.project_id,
         scene_index: args.scene_index,

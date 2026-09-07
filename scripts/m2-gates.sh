@@ -965,6 +965,118 @@ YAML
 }
 check "a render never writes to project.yaml" gate_settings_untouched
 
+# Gate 7h — D-162. The graphics card can be asked, and asking nothing changes
+# nothing.
+#
+# Three properties, and the third is the one worth the gate. A hardware render
+# must produce a *different* film (or the flag does nothing), it must still pass
+# the D-041 profile assertion (or a hardware segment cannot legally join a
+# software one), and — the promise to every project already on disk — a plain
+# render after a hardware one must reuse **every** software segment, because the
+# software cache key did not move.
+#
+# Skipped, not failed, on a machine with no usable hardware encoder: an AMD
+# laptop, a CI runner and a Mac Mini are all correct machines to have none, and
+# D-134's rule is that a gate which fails on somebody else's hardware is a gate
+# people learn to ignore.
+gate_hardware_encoder() {
+  # The folder name is the project id and it seeds the move (D-035, D-153), so
+  # this copy keeps the fixture's own basename or every segment name below is a
+  # different segment name. Gate 7e fell into exactly this once.
+  local proj="$WORK/renderable"
+  rm -rf "$proj"; cp -R "$RENDERABLE" "$proj"; rm -rf "$proj/$STATE"
+
+  # What this machine can actually run, taken from the product's own report
+  # rather than from `ffmpeg -encoders` — D-159's whole point is that the
+  # listing names encoders that do not work here.
+  local usable
+  usable="$("$STILL" doctor 2>/dev/null | awk '/^ *usable /{print $NF}' | tr -d '()' | head -1)"
+  if [ -z "$usable" ]; then
+    echo "no usable hardware encoder on this machine — nothing to assert"
+    return 0
+  fi
+  echo "hardware encoder under test: $usable"
+
+  # 1. The default. This is the film every earlier build made.
+  "$STILL" render "$proj" --out "$WORK/soft.mp4" --jobs 2 >"$WORK/soft.log" 2>&1 || {
+    echo "the plain render failed"; cat "$WORK/soft.log"; return 1; }
+  local soft_hash; soft_hash="$(shasum -a 256 <"$WORK/soft.mp4" | cut -d' ' -f1)"
+
+  # 2. The same project through the graphics card. That this returns at all is
+  #    the D-041 assertion passing on a hardware segment — `render` asserts the
+  #    full profile per segment and again on the join, and refuses on mismatch.
+  "$STILL" render "$proj" --out "$WORK/hard.mp4" --jobs 2 --encoder auto \
+    >"$WORK/hard.log" 2>&1 || {
+    echo "the hardware render failed"; cat "$WORK/hard.log"; return 1; }
+  local hard_hash; hard_hash="$(shasum -a 256 <"$WORK/hard.mp4" | cut -d' ' -f1)"
+
+  [ "$soft_hash" != "$hard_hash" ] || {
+    echo "the hardware film is byte-identical to the software one — the flag did nothing"
+    return 1; }
+
+  # 3. The promise. Back to the default: every software segment must still be
+  #    there, so a project rendered before D-162 existed re-encodes nothing.
+  "$STILL" render "$proj" --out "$WORK/soft2.mp4" --jobs 2 >"$WORK/soft2.log" 2>&1 || {
+    echo "the second plain render failed"; cat "$WORK/soft2.log"; return 1; }
+
+  # The scene count comes from the render's own report, not from globbing the
+  # folder: this fixture keeps its stills in `img/` behind a manifest (D-050),
+  # so a top-level glob counts zero and the gate would pass by comparing two
+  # nothings.
+  local scenes reused
+  scenes="$(grep -oE '[0-9]+ scenes,' "$WORK/soft2.log" | grep -oE '^[0-9]+' | tail -1)"
+  [ -n "$scenes" ] || { echo "the render did not report a scene count"; return 1; }
+  reused="$(grep -oE '[0-9]+ segments reused' "$WORK/soft2.log" | grep -oE '^[0-9]+' | tail -1)"
+  [ -n "$reused" ] || { echo "the render did not report how many segments it reused"
+    cat "$WORK/soft2.log"; return 1; }
+  [ "$reused" = "$scenes" ] || {
+    echo "only $reused of $scenes software segments survived the hardware render"
+    echo "— the software cache key moved, and every project on disk would re-render"
+    return 1; }
+
+  # And the film it produced is the one it produced the first time.
+  local soft2_hash; soft2_hash="$(shasum -a 256 <"$WORK/soft2.mp4" | cut -d' ' -f1)"
+  [ "$soft_hash" = "$soft2_hash" ] || {
+    echo "the reused film differs from the original software film"; return 1; }
+
+  # And the names themselves, pinned.
+  #
+  # Everything above this line passes whether or not the software key moved:
+  # all three renders in one gate run use whatever key this build computes, so
+  # they agree with each other by construction. That is D-116's trap, and this
+  # gate walked into it — it passed against a build whose software key had
+  # deliberately been changed. A within-run sequence cannot detect a key that
+  # moved between *builds*; only a constant written down outside the code can.
+  #
+  # These are the six segments `fixtures/projects/renderable` produces at the
+  # default geometry with libx264. If this list has to change, that is a
+  # decision with a one-time cost of re-encoding every project on every
+  # operator's disk (D-107, D-118) — not a gate to update.
+  local expected="seg-4fd68d806422a9bb.mp4 seg-76c44324ea1a5020.mp4 seg-a83c34345949c55f.mp4 seg-c4e7e961bba9a6b6.mp4 seg-dfbb557ee738d60b.mp4 seg-eb6d184d45f7df06.mp4"
+  local actual
+  actual="$(cd "$proj/$STATE/segments" && ls seg-*.mp4 2>/dev/null | sort | tr '
+' ' ')"
+  local want
+  want="$(echo $expected | tr ' ' '
+' | sort | tr '
+' ' ')"
+  for name in $want; do
+    case " $actual " in
+      *" $name "*) ;;
+      *) echo "the software segment $name is not there — the libx264 cache key moved,"
+         echo "so every project on every disk would re-encode. Found: $actual"
+         return 1;;
+    esac
+  done
+
+  echo "software $soft_hash"
+  echo "hardware $hard_hash"
+  echo "reused $reused of $scenes after the hardware run"
+  echo "the six pinned libx264 segment names are all present"
+}
+check "hardware encodes a different film and leaves every software segment reusable" \
+  gate_hardware_encoder
+
 # --- gates 8 and 9: the two cargo gates plan.md names -----------------------
 check "cargo test -p spoonstill-app validation" \
   cargo test --release -p spoonstill-app validation

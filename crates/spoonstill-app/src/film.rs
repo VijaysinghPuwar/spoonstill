@@ -43,6 +43,7 @@ use spoonstill_core::captions::{self, Placement, SubtitleSpec, SubtitleTheme};
 use spoonstill_core::diagnostics::{Diagnostics, Event};
 use spoonstill_core::project::{MotionRequest, Problem, ProblemKind};
 use spoonstill_core::{Aspect, MotionSpec, OutputSpec, STATE_DIR, hash, timing};
+use spoonstill_media::hardware::VideoEncoder;
 use spoonstill_media::scene::{Cancel, EncodeSettings, SceneRequest};
 use spoonstill_media::{MediaError, Tools, concat, profile};
 
@@ -105,6 +106,20 @@ pub struct RenderProjectOptions {
     /// collides with words already in the artwork is a fact about *these*
     /// photographs, and the answer can change between one batch and the next.
     pub subtitle_placement: Option<Placement>,
+    /// Encode with hardware instead of `libx264` for this run (D-162).
+    ///
+    /// `None` is D-036's default on every platform, and is what an unflagged
+    /// render has always used. An override for one run rather than a project
+    /// setting, for D-013's reason and one more: which encoders exist is a fact
+    /// about the *machine*, and a `project.yaml` naming `h264_nvenc` would be a
+    /// project that cannot render on the operator's other laptop.
+    ///
+    /// Nothing derives this from the hardware on its own — see
+    /// [`spoonstill_media::best_hardware`], which the control surfaces call when
+    /// the operator asks for `auto`. A render that silently picked an encoder
+    /// because of the card it found would produce different pixels on two
+    /// machines from one project, which is the opposite of D-077.
+    pub encoder: Option<VideoEncoder>,
     /// Keep every segment this render did not use, instead of sweeping the
     /// oldest generations (D-109).
     ///
@@ -147,6 +162,8 @@ impl RenderProjectOptions {
             // provider's own rate limit becomes the binding constraint on this
             // number (D-023) — which is exactly why it is a separate one.
             audio_jobs: pool::default_jobs().saturating_mul(2).max(1),
+            // D-036's libx264, on every platform. D-162 is opt-in.
+            encoder: None,
             force: false,
             voice: None,
             provider: None,
@@ -587,6 +604,10 @@ pub fn render_project(
     let encode = EncodeSettings {
         preset: project.settings.preset.clone(),
         crf: project.settings.crf,
+        // An override for this run, like the voice and the subtitles above it:
+        // `project.yaml` is an input and the renderer never writes to it
+        // (D-013). `None` is D-036's libx264 on every platform.
+        encoder: options.encoder.clone().unwrap_or_default(),
     };
 
     let segments_dir = project.root.join(STATE_DIR).join(SEGMENTS_DIR);
@@ -1519,7 +1540,15 @@ fn segment_key(
     subtitles: Option<&SubtitleSpec>,
 ) -> u64 {
     let geometry = format!("{}x{}@{}", output.width(), output.height(), output.fps());
-    let encoder = format!("{}:{}", encode.preset, encode.crf);
+    // D-162. A hardware encoder produces different bytes from the same inputs,
+    // so it must key differently — but the *software* field stays exactly the
+    // string it has always been, so every project already rendered still hits
+    // its cache. D-153's rule: absent means the old behaviour, forever.
+    let encoder = if encode.encoder.is_software() {
+        format!("{}:{}", encode.preset, encode.crf)
+    } else {
+        format!("{}:{}:{}", encode.encoder.name(), encode.preset, encode.crf)
+    };
     let motion_text = format!("{}:{:016x}", motion.descriptor(), motion.seed);
 
     // Each subtitle field stays its own field (D-118). They used to be joined
@@ -1948,12 +1977,110 @@ mod tests {
                 output(),
                 &EncodeSettings {
                     preset: "slow".to_owned(),
-                    crf: 18
+                    crf: 18,
+                    encoder: VideoEncoder::Software
                 },
                 None
             ),
             "a different preset"
         );
+    }
+
+    /// D-162. Choosing hardware must miss the cache; choosing nothing must not.
+    ///
+    /// Two halves, and the second is the one that protects work that already
+    /// exists. A hardware encoder produces different bytes from the same
+    /// inputs, so it has to key differently or an operator who tries `--encoder
+    /// auto` once gets their libx264 segments back and concludes the flag does
+    /// nothing. But the *software* key must be the string it has always been,
+    /// character for character — D-107 and D-118 each cost every project one
+    /// full re-render, and this change is not worth a third.
+    #[test]
+    fn hardware_keys_apart_and_software_keys_exactly_as_before() {
+        const AUDIO: u64 = 0x0123_4567_89ab_cdef;
+        let motion = MotionSpec::new(MotionKind::ZoomIn, 0.1, Anchor::Center);
+        let output = || OutputSpec::new(Aspect::Landscape16x9, 1080, 30).unwrap();
+        let with = |encoder: VideoEncoder| {
+            segment_key(
+                "aaaaaaaaaaaaaaaa",
+                AUDIO,
+                112,
+                motion,
+                output(),
+                &EncodeSettings {
+                    preset: "medium".to_owned(),
+                    crf: 18,
+                    encoder,
+                },
+                None,
+            )
+        };
+
+        let software = with(VideoEncoder::Software);
+        let nvenc = with(VideoEncoder::Hardware("h264_nvenc".into()));
+        let amf = with(VideoEncoder::Hardware("h264_amf".into()));
+
+        assert_ne!(software, nvenc, "hardware must not reuse a libx264 segment");
+        assert_ne!(software, amf);
+        assert_ne!(nvenc, amf, "two cards are two different films");
+
+        // The load-bearing half. This is the value the shipped build has always
+        // computed for these inputs, taken from the code before D-162 existed:
+        // the software arm builds `"{preset}:{crf}"` exactly as it always did,
+        // and adding a field to that string — even one that is empty for
+        // software — would change every key in every project on disk.
+        //
+        // If this number ever has to move, that is a decision with a one-time
+        // cost measured in re-encoded hours, not a test to update.
+        assert_eq!(
+            software,
+            segment_key_before_d162(
+                "aaaaaaaaaaaaaaaa",
+                AUDIO,
+                112,
+                motion,
+                output(),
+                "medium",
+                18
+            ),
+            "the software key changed — every project on disk would re-render"
+        );
+    }
+
+    /// `segment_key`'s software path as it stood before D-162, reconstructed.
+    ///
+    /// Deliberately a second implementation rather than a stored hash: a hash
+    /// pinned by running the new code would agree with whatever the new code
+    /// does, which is exactly the trap D-116 names. This spells the old field
+    /// list out, so it disagrees the moment the real one gains or loses a
+    /// field.
+    fn segment_key_before_d162(
+        content: &str,
+        audio: u64,
+        frames: u32,
+        motion: MotionSpec,
+        output: OutputSpec,
+        preset: &str,
+        crf: u32,
+    ) -> u64 {
+        let geometry = format!("{}x{}@{}", output.width(), output.height(), output.fps());
+        let encoder = format!("{preset}:{crf}");
+        let motion_text = format!("{}:{:016x}", motion.descriptor(), motion.seed);
+        let audio_bytes = audio.to_be_bytes();
+        let frame_bytes = frames.to_be_bytes();
+        let timescale_bytes = spoonstill_media::profile::VIDEO_TIMESCALE.to_be_bytes();
+
+        spoonstill_core::hash::fnv1a_prefixed(&[
+            content.as_bytes(),
+            &audio_bytes,
+            &frame_bytes,
+            motion_text.as_bytes(),
+            geometry.as_bytes(),
+            encoder.as_bytes(),
+            spoonstill_media::profile::PIX_FMT.as_bytes(),
+            spoonstill_media::profile::COLOR_SPACE.as_bytes(),
+            &timescale_bytes,
+        ])
     }
 
     /// D-118. The segment key holds an operator's own words, so no field

@@ -15,7 +15,7 @@ narration boundaries. It is **not a video editor** — no timeline, no scrubber.
   the same cache. There is also a **drop-in importer** (`still new` / `still
   add`, D-080) and a **Tauri window** in `apps/desktop`. There is still **no
   state database** (M3) and **no ElevenLabs provider**; if a document describes
-  those as existing, it is describing an intended system. Run `make gates` — 37 checks, M2 now 21.
+  those as existing, it is describing an intended system. Run `make gates` — 38 checks, M2 now 22.
 - **Rust 1.94.0 is installed**, pinned by `rust-toolchain.toml`. Homebrew's
   rustup keeps its shims in `/opt/homebrew/opt/rustup/bin`, **not**
   `~/.cargo/bin` — that path is on `PATH` via `~/.zshrc` and is re-exported by
@@ -129,7 +129,7 @@ dependency, and the shipped FFmpeg binary needs its own LGPL build (D-062).
 what any document claims:
 
 ```bash
-make gates          # M0 8/8, M1 8/8, M2 21/21 = intact.
+make gates          # M0 8/8, M1 8/8, M2 22/22 = intact.
                     # Also: make gates-m1 | gates-m2 | test | lint | fixtures
                     #       | brand | tts-live | help
 git log --oneline   # planning corpus, then M0, then M1, then M2 slice by slice
@@ -240,6 +240,104 @@ named `Icon` plus a carriage return, and six sat permanently untracked in
 `git status`; permanent noise in that listing is how a real untracked file gets
 missed. **`make gates` is still 37** — nothing here changes what renders, and a
 gate needing a machine with no FFmpeg cannot run on the machine that has one.
+
+### State as of 2026-09-07 — the graphics card can be asked, and still is not asked by default
+
+**D-162 — D-036's second clause, three years of sentences later.** D-036 settled
+the encoder in M1 as *"probe availability at runtime, expose it as an explicit
+fast draft mode, and always fall back to libx264"*; D-159 built the first clause
+and wrote down that only the third had ever existed. **`--encoder
+auto|off|NAME`** is the second, on `still render` and `still render-scene`.
+
+**Reported from a real render, and the inference in the report was wrong in a
+useful way.** A 50-scene 4K project with Task Manager beside it: CPU 96%, memory
+15.0 of 15.2 GB, and the RTX 3060's **Video Encode graph flat at 0%**. The
+conclusion drawn was *"this is Mac software that was never finished for
+Windows"*. It is not: `scene.rs` had **no `#[cfg]` on the encoder at all**, so
+`libx264` was hardcoded on both platforms and **a Mac was not using VideoToolbox
+either**. Neither platform was optimised; one of them was merely being asked
+about it. Worth remembering the next time a platform gap is reported — check
+whether the other platform actually has the thing.
+
+**The load-bearing measurement was taken before anything was designed.** Both
+NVENC and AMF, through the shipped filter tail on this machine, produce
+`h264 / High / level 40 / yuv420p / tv / bt709 / SAR 1:1 / timebase 1/90000` —
+an **exact** match for `SegmentProfile`. So **D-041 is not weakened by one
+field** and a hardware segment joins a software one legally. Had that gone the
+other way the whole change would have been a profile negotiation instead of a
+flag.
+
+**`-crf` is x264's alone, and that is the silent failure this avoids.** NVENC
+says `-cq`, AMF `-qp_i`/`-qp_p`, Quick Sync `-global_quality`, Media Foundation
+has no quantizer, and **VideoToolbox counts the other way** — `-q:v` is 1-100
+and upwards is better. A passthrough would have made lowering `crf` in
+`project.yaml` render *worse* on a Mac, with no error and no log line. One
+`match`, no guessing default arm, and
+`every_candidate_has_quality_flags_of_its_own` fails the build if a candidate is
+added to `CANDIDATES` without one.
+
+**Nothing an operator already has re-renders.** The software arm of
+`segment_key` still builds `"{preset}:{crf}"` exactly as it always did; only
+hardware adds a field. D-107 and D-118 each cost every project a full
+re-render and this one costs none — asserted against a **second, spelled-out
+implementation** of the old field list rather than a hash taken from the new
+code (D-116's trap), and verified to fail with *"the software key changed —
+every project on disk would re-render"* against the naive version.
+
+**It is worth what D-159 said it was worth: 1.23x, and zero memory**, because
+the memory is the 11520x6480 prescale canvas in the CPU filter graph (D-144).
+`still doctor` still says so under the list. **The far larger lever on the
+reported render was D-145's own warning, which that project was already
+printing**: 50 of 50 stills were 1376x768 going into a 3840x2160 frame — an 8.2x
+larger filter canvas for pixels carrying no more detail. No encoder flag
+substitutes for that, and the README now says so where `--encoder` is
+documented.
+
+**Measured end to end on this machine, and the first measurement was wrong in a
+way worth writing down.** Six scenes at 4K, `--jobs 2`, audio cache warm, three
+runs each: `libx264` **19.71 / 22.06 / 21.79 s** against `h264_nvenc` **19.28 /
+17.44 / 16.91 s** — about **1.19x**, which is D-159's 1.23x confirmed rather
+than improved on.
+
+The first attempt at that measurement produced **2.96x**, and reporting it would
+have been a lie built out of real numbers. The operator's own 50-scene 4K render
+was still running in the window throughout — three FFmpeg workers at ~3 GB each,
+the machine at 99% memory — so both columns were contended and the CPU column
+was contended *worse*, because it wanted the cores the other render was already
+using. The same software render measured **114 s** under that load and **21 s**
+on an idle machine: a **5x** contention penalty, larger than the entire effect
+being measured. **A benchmark taken while the machine is doing something else
+measures the something else.** D-154's vacuous resume gate is the same mistake
+in a different costume, and the tell was identical — a number far better than
+the recorded expectation, believed because it was welcome.
+
+**Not claimed: VideoToolbox is unverified.** This session ran on Windows; NVENC
+and AMF were measured here and the macOS arm is unit-tested on the mapping only.
+The top of this file has always said not to claim a platform nothing has run on.
+
+**Run on Windows for the first time, and the harness has D-155's defect.** With
+FFmpeg put on `PATH` by hand, `scripts/m2-gates.sh` scores **17 of 22 here**.
+Gate 7h passes; so do every geometry, capacity, undersized, lock, hostile-name
+and cache gate. The five that fail are **untouched by D-162** — the diff to that
+script is 112 insertions and no deletions — and each fails for a macOS
+assumption in the harness rather than a defect in the product:
+
+| gate | why it cannot run here |
+|---|---|
+| `gate_bounded_audio`, `gate_tts`, `gate_overlap` | `stub_voice_service` writes a `#!/usr/bin/env bash` stand-in and points `SPOONSTILL_EDGE_TTS` at it. **Windows cannot execute a shebang.** This is exactly D-155, which fixed the *Rust* tests and never reached the shell gates. |
+| `gate_settings_untouched` | `stat -c %m` is a GNU/macOS spelling; Git Bash's `stat` ignores it and prints the mount point, so the gate compares two mount points and reports the file was written. |
+| `gate_journal` | the machine-wide log lives under `%APPDATA%` on Windows, and the gate redirects `HOME`. |
+
+**Not fixed in this commit, deliberately.** All five are macOS-verified code that
+this session cannot re-verify on a Mac, and the brief was explicitly not to
+damage that side. `README.md` has always said the gates are macOS-only; what is
+new is knowing *which* five and *why*, which is what makes fixing them a
+half-hour rather than an investigation.
+
+**M2 is 22 gates; `make gates` is 38.** Gate 7h renders a fixture three ways and
+asserts the hardware film differs, the profile assertion passed, and the plain
+render afterwards reuses **every** software segment. It **skips rather than
+fails** on a machine with no usable encoder — D-134's rule.
 
 ### State as of 2026-09-05 — the first session run on Windows: the GPU question, and a window with no name
 
@@ -1291,7 +1389,7 @@ exact thing the top of this file warns about.
 
 #### If you are checking this work
 
-Run `make gates` first: **M0 8/8, M1 8/8, M2 21/21**, plus `cargo fmt --check`,
+Run `make gates` first: **M0 8/8, M1 8/8, M2 22/22**, plus `cargo fmt --check`,
 `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test
 --workspace` (558 tests). Then `cargo audit --deny warnings` (D-129), which is
 new and is the one check that can fail without the code changing.
@@ -2240,7 +2338,9 @@ missing FFmpeg in the diagnostics bundle**, **D-152 before touching
 `TEXT_EXTENSIONS`, `POSITIONAL_TEXT_EXTENSIONS` or `ingest::assign`**, **D-153
 before touching `MotionSeed`, `MotionSpec::seeded`, the segment filename,
 `occurrences_of`, or what `create_project` writes**, and **D-154 before starting
-M3, writing `state.db`, or assuming resume needs one**, **D-155 before writing
+M3, writing `state.db`, or assuming resume needs one**, **D-162 before touching
+`VideoEncoder`, `quality_args`, `resolve_encoder`, the `-c:v` arguments in
+`scene.rs`, or the software arm of `segment_key`**, **D-155 before writing
 a test that spawns a program, or naming a binary a `/bin/` path**, **D-156
 before touching `create_project`, `newProject`, `Session`'s root, or anything
 that decides which project the window has open**, **D-157 before touching
