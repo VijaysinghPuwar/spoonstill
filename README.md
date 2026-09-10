@@ -289,6 +289,8 @@ because your padding is a decision and a provider's is an artifact.
 ```bash
 still voices                                        # everything the provider has
 still voices en-GB                                  # filter by name or locale
+still voices --use en-GB-RyanNeural                 # and use it for every project here
+still voices --forget                               # stop doing that
 still render ~/holiday --out ~/film.mp4 --voice en-GB-RyanNeural
 ```
 
@@ -562,7 +564,7 @@ makes sense.
 | `still validate DIR` | Check everything and print every problem at once. `--list` to see all scenes, `--no-probe` to skip the file checks. |
 | `still render DIR` | Render the whole project to one film. The main command — flags below. |
 | `still render-scene` | Render one `--image` + `--audio` pair to one segment. Useful for trying a `--motion` or a `--preset`. |
-| `still voices [FILTER]` | List a provider's voices. `--install` fetches the provider's tooling first. |
+| `still voices [FILTER]` | List a provider's voices. `--install` fetches the provider's tooling first. `--use VOICE` makes one the fallback for every project on this machine, `--forget` clears it. |
 | `still subtitles` | The six themes and what each is for. |
 | `still resolutions` | Every size in every shape, with pixel dimensions. Alias: `formats`. |
 | `still doctor` | Every external program this needs, plus the hardware encoders this machine can actually run. `--install` fetches what is missing. |

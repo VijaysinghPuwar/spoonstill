@@ -6909,6 +6909,92 @@ a fallback saved nothing is stopped at all.
 
 **M2 is 22 gates; `make gates` is 38.**
 
+### D-164 — The machine's voice is one setting, in one place, reachable from both surfaces · Accepted
+
+The reported workflow is *several projects*, and the answer to it is the
+fallback voice D-092 built. D-162 found that it had never run. Setting out to
+put a control for it on the Voice screen — where somebody has just found the
+voice they want for all ten parts — found the deeper reason it had not: **the
+setting was somewhere the command line could not reach.**
+
+**Two directories on the same disk.** `AppSettings` was written to Tauri's
+`app_config_dir()` — `~/Library/Application Support/`**`com.spoonstill.desktop`**`/`
+— while every other piece of machine state this project keeps is in
+`spoonstill_state::runs::config_dir()`, `…/`**`spoonstill`**`/`, whose own doc
+comment reads *"where this machine keeps what belongs to the operator rather
+than to any one project"*. On this machine both exist and neither knows about
+the other. So a fallback voice set in the window changed nothing about `still
+render`, which is this project's own rule broken outright: **if the CLI cannot
+do it, it does not exist.** The rule is in `CLAUDE.md` and has been since M0;
+D-092 shipped past it because a *window-only* setting reads as a window
+preference until somebody asks the terminal the same question.
+
+`spoonstill_app::machine` is the one file now — `settings.yaml`, beside
+`runs.csv`. YAML and not JSON, and **no new dependency for it**: `serde_yaml_ng`
+is already here for `project.yaml`, which is the format an operator of this tool
+has already read. A pre-D-164 `app-settings.json` is **adopted once** on the
+window's next launch, as a read rather than a move — a machine that runs an
+older build again still finds its setting where that build left it.
+
+**One rule, four callers.** D-162 put `resolve_voice` in `apps/desktop`, and it
+lasted one session: the fallback is read inside it, so a rule only the window
+could call was a setting only the window could honour. It is
+`spoonstill_app::voice` now, and `apply_voice_override` calls the same
+`resolve` per scene — so the Voice screen's promise and the render's behaviour
+are one function, not two that agree.
+
+**The two surfaces ask differently and must not answer differently.** The
+window resolves first, because it has to *show* which voice will speak before
+the render starts, and passes the answer as `voice`. The terminal passes the
+raw inputs — `--voice` and `RenderProjectOptions::fallback_voice` — and lets
+`apply_voice_override` decide. `the_window_and_the_terminal_reach_the_same_voice`
+walks six combinations through both routes and asserts one destination; nothing
+else would notice them parting.
+
+**`fallback_voice` is deliberately not folded into `voice`.** The obvious CLI
+change is `voice: args.voice.or(machine_fallback)`, and it is wrong: `voice`
+overrides *every* scene, so a fallback would overrule a project's own
+`tts.voice` — the one thing a fallback must never do. Precedence stays in one
+place and it is the renderer's.
+
+**On the command line:** `still voices --use NAME` sets it, `still voices
+--forget` clears it, and the listing marks the fallback row with `*` and names
+it in a line underneath. `--use` is **checked against the catalogue** that
+command has just fetched, because a misspelt voice is otherwise a setting that
+silently fails every render on the machine until somebody remembers making it.
+`--forget` runs **before the provider is asked anything**: an operator whose
+renders are failing must be able to undo the setting that is failing them on a
+machine that has lost its network.
+
+**On the Voice screen:** one button beside the chosen voice, and it is a
+**toggle** — the same control that sets the fallback clears it. A setting an
+operator cannot find their way back out of is worse than no setting. Clearing
+it can return a project to "nobody chose", which D-163 holds Render on, so the
+button re-asks the blocker. `VoiceChoice::is_fallback` is what it reads, and it
+is **not** `origin == Fallback`: a voice picked for this run can also be the
+machine's, and a control that could not tell those apart would offer to set
+something already set.
+
+**Step 2's warning gained the third fix, and it is named first** — `still
+voices --use NAME` before `--voice` and `tts.voice:`, because the report is
+several projects and only the first of the three answers that.
+
+Measured on this machine with `HOME` redirected: no fallback → the warning and
+`voice=en-US-AvaNeural`; `--use en-GB-RyanNeural` → no warning and
+`voice=en-GB-RyanNeural`; a project naming `en-US-GuyNeural` → `voice=en-US-GuyNeural`,
+the fallback correctly overruled by the project; `--voice ja-JP-KeitaNeural` →
+that, overruling both. Gate 7h asserts the first three, in a **fresh `HOME`**
+so it tests the rule and not the machine it runs on, and does the fallback half
+**before** the `project.yaml` half in a voice no other step uses — written the
+other way round it would have rendered a project that already named that voice
+and passed without the fallback doing anything (D-154). The half that needs the
+voice service says which case it ran in rather than passing quietly.
+
+The window half was driven through the real `app.js` in node behind a stub DOM:
+pin, unpin, and the render held again afterwards.
+
+**M2 is 22 gates; `make gates` is 38.**
+
 
 
 ### D-162 — The graphics card can be asked to render, and is still not asked by default · Accepted

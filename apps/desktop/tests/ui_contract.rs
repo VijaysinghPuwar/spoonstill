@@ -363,10 +363,16 @@ fn the_voice_shown_is_the_voice_sent() {
 /// a fifth answer in Rust and forgetting the page gives a blank column on the
 /// one screen that exists to say whose voice you will hear — the failure this
 /// decision started from, one variant along.
+///
+/// It reads across crates since D-164 moved the rule into `spoonstill-app` to
+/// share it with the command line, which makes the seam wider rather than
+/// narrower: the enum is now edited by people not looking at this window.
 #[test]
 fn the_page_has_a_word_for_every_origin_rust_can_return() {
-    let rust = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
-        .expect("reading main.rs");
+    let rust = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/spoonstill-app/src/voice.rs"),
+    )
+    .expect("reading the shared voice module");
 
     let at = rust
         .find("enum VoiceOrigin {")
@@ -443,6 +449,81 @@ fn a_render_with_no_voice_chosen_is_stopped_and_told_why() {
         choose.contains("updateRender()"),
         "choosing a voice does not re-ask whether Render can run, so the \
          button stays disabled after the operator has fixed it"
+    );
+}
+
+/// The machine's fallback is settable from where voices are chosen (D-164).
+///
+/// It existed under Settings, one level up and behind Home — a long way from
+/// the screen on which somebody has just found the voice they want for all ten
+/// parts of their film, and far enough that D-162 found the setting had never
+/// once been used. A control is only as good as the distance to it.
+///
+/// It is a toggle on purpose: the same button that sets it clears it. A
+/// setting an operator cannot find their way back out of is worse than no
+/// setting, and clearing this one can put a project back into the state
+/// D-163 holds Render on — so it has to re-ask, which is the last assertion.
+#[test]
+fn the_fallback_voice_can_be_set_from_the_voice_screen() {
+    let js = code_only(&read("app.js"));
+
+    let at = js
+        .find("async function pinVoice()")
+        .expect("there is no way to set the fallback from the Voice screen");
+    let pin = &js[at..js.len().min(at + 1200)];
+
+    assert!(
+        pin.contains("invoke(\"set_default_voice\""),
+        "the pin does not reach the setting it exists to change"
+    );
+    assert!(
+        pin.contains("isFallback") || code_only(&read("app.js")).contains("isFallback"),
+        "nothing reads whether this voice is already the machine's, so the \
+         control cannot tell setting from clearing"
+    );
+    assert!(
+        pin.contains("voice: pinned ? null : voice"),
+        "the pin is one-way — an operator who sets a fallback by accident has \
+         to go and find Settings to undo it"
+    );
+    assert!(
+        pin.contains("updateRender()"),
+        "clearing the fallback can put the project back into \"nobody chose\", \
+         which Render is held on (D-163), and nothing re-asks"
+    );
+
+    // And it is wired, which in a webview fails silently (D-105's lesson).
+    assert!(
+        js.contains("el(\"pin-voice\").addEventListener"),
+        "the pin has no listener, so it is a button that does nothing"
+    );
+}
+
+/// The terminal can do it too (D-164).
+///
+/// *If the CLI cannot do it, it does not exist* is this project's rule, and
+/// the fallback voice broke it for a whole milestone: `AppSettings` was written
+/// under Tauri's own config directory, which `still` has never been able to
+/// read. Asserted here rather than in the CLI's own tests because this is the
+/// file that knows what the window offers.
+#[test]
+fn everything_the_voice_screen_can_set_the_terminal_can_set() {
+    let cli = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/spoonstill-cli/src/main.rs"),
+    )
+    .expect("reading the CLI");
+
+    for flag in ["long = \"use\"", "forget"] {
+        assert!(
+            cli.contains(flag),
+            "`still voices` cannot {flag} — the window can set a fallback \
+             voice the command line cannot"
+        );
+    }
+    assert!(
+        cli.contains("machine::load().default_voice"),
+        "`still render` never reads the machine's fallback, so setting one \
+         changes the window's renders and not the terminal's"
     );
 }
 

@@ -1110,22 +1110,78 @@ gate_voice_unchosen() {
     echo "$out"; echo "two unchosen scenes did not warn"; return 1; }
   # One line for the project, not one per scene (D-145's rule): 500 scenes
   # must not print 500 copies of a fix that is one setting.
-  [ "$(grep -c 'name no voice' <<<"$out")" -eq 1 ] || {
+  [ "$(grep -cE 'names? no voice' <<<"$out")" -eq 1 ] || {
     echo "$out"; echo "the warning was printed more than once"; return 1; }
   # Both ways out are named, because the two control surfaces answer it
   # differently and the message is read on only one of them.
-  grep -q -- '--voice' <<<"$out" && grep -q 'tts.voice' <<<"$out" || {
+  grep -q -- 'still voices --use' <<<"$out" && grep -q -- '--voice' <<<"$out" \
+    && grep -q 'tts.voice' <<<"$out" || {
     echo "$out"; echo "the warning named no way to answer it"; return 1; }
+
+  # And the third way out works, which is the whole of D-164: a fallback set
+  # once, on this machine, answers a project that names nothing — without
+  # overruling one that names its own. HOME is redirected so this asserts the
+  # rule and not whatever the machine running it happens to be set to.
+  local fake="$WORK/unchosen-home"
+  rm -rf "$fake"; mkdir -p "$fake"
+  HOME="$fake" "$STILL" voices --use en-GB-RyanNeural >/dev/null 2>&1 || {
+    echo "could not set a fallback voice"; return 1; }
+  out=$(HOME="$fake" "$STILL" render "$proj" --out "$WORK/un5.mp4" 2>&1)
+  grep -q 'names\? no voice' <<<"$out" && {
+    echo "$out"; echo "a machine fallback did not silence the warning"; return 1; }
+  grep -q 'voice=en-GB-RyanNeural' "$fake/Library/Application Support/spoonstill/runs.csv" || {
+    echo "the fallback was not the voice that spoke"; return 1; }
 
   # And answering it works. Either spelling, and neither may still warn —
   # a warning that survives its own fix is worse than no warning.
   out=$("$STILL" render "$proj" --out "$WORK/un2.mp4" --voice en-GB-RyanNeural 2>&1)
-  grep -q 'name no voice' <<<"$out" && {
+  grep -qE 'names? no voice' <<<"$out" && {
     echo "$out"; echo "--voice did not silence it"; return 1; }
+
+  # And the third way out works, which is the whole of D-164: a fallback set
+  # once, on this machine, answers a project that names nothing.
+  #
+  # Deliberately **before** the `project.yaml` step below, and in a voice none
+  # of the other steps uses. Written after it, this would render a project that
+  # already names en-GB-RyanNeural and would pass without the fallback doing
+  # anything at all — a gate that passes by finding nothing to check (D-154).
+  local fake="$WORK/unchosen-home"
+  rm -rf "$fake"; mkdir -p "$fake"
+  HOME="$fake" "$STILL" voices --use en-AU-NatashaNeural >/dev/null 2>&1 || {
+    echo "could not set a fallback voice"; return 1; }
+  local rc=0
+  out=$(HOME="$fake" "$STILL" render "$proj" --out "$WORK/un5.mp4" 2>&1) || rc=$?
+  grep -qE 'names? no voice' <<<"$out" && {
+    echo "$out"; echo "a machine fallback did not silence the warning"; return 1; }
+  # The warning is silenced only by the scenes actually carrying the fallback,
+  # so the line above is the assertion even on a machine with no `edge-tts`.
+  # What such a machine cannot show is the voice that *spoke*, so that half runs
+  # only where the render finished, and says which case it was.
+  if [ "$rc" -eq 0 ]; then
+    grep -q 'voice=en-AU-NatashaNeural' \
+      "$fake/Library/Application Support/spoonstill/runs.csv" || {
+      echo "the fallback was not the voice that spoke"; return 1; }
+  else
+    echo "    (no voice service here — asserted the warning, not the audio)"
+  fi
+
+  # A fallback must never overrule a project that names its own voice.
+  local named="$WORK/unchosen-named"
+  rm -rf "$named"; mkdir -p "$named"
+  cp fixtures/generated/land.jpg "$named/001.jpg" || return 1
+  printf 'One line.' > "$named/001.txt"
+  printf 'tts:\n  voice: en-US-GuyNeural\n' > "$named/project.yaml"
+  rc=0
+  out=$(HOME="$fake" "$STILL" render "$named" --out "$WORK/un6.mp4" 2>&1) || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    grep -q 'voice=en-US-GuyNeural' \
+      "$fake/Library/Application Support/spoonstill/runs.csv" || {
+      echo "the machine's fallback overruled a project's own voice"; return 1; }
+  fi
 
   printf 'tts:\n  voice: en-GB-RyanNeural\n' > "$proj/project.yaml"
   out=$("$STILL" render "$proj" --out "$WORK/un3.mp4" 2>&1)
-  grep -q 'name no voice' <<<"$out" && {
+  grep -qE 'names? no voice' <<<"$out" && {
     echo "$out"; echo "tts.voice in project.yaml did not silence it"; return 1; }
 
   # A project with nothing to speak has no voice to choose, and being asked
@@ -1136,7 +1192,7 @@ gate_voice_unchosen() {
   "$FFMPEG" -y -loglevel error -f lavfi -i "sine=frequency=440:duration=1" \
     -ar 48000 -ac 1 "$silent/001.wav" || return 1
   out=$("$STILL" render "$silent" --out "$WORK/un4.mp4" 2>&1)
-  grep -q 'name no voice' <<<"$out" && {
+  grep -qE 'names? no voice' <<<"$out" && {
     echo "$out"; echo "a project with nothing to speak was asked for a voice"; return 1; }
 
   return 0

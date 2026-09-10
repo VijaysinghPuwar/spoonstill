@@ -82,6 +82,16 @@ pub struct RenderProjectOptions {
     pub audio_jobs: usize,
     /// Take the lock even if another run appears to hold it.
     pub force: bool,
+    /// The voice for scenes that name none — the machine's fallback (D-092,
+    /// D-164), which is not an override: a project that asks for a voice keeps
+    /// it, and so does a `--voice` on the same run.
+    ///
+    /// The window leaves this `None` and passes its already-resolved answer in
+    /// [`Self::voice`] instead, because it has to **display** which voice will
+    /// speak before the render starts and a terminal has no such requirement.
+    /// Both routes end at the same scene voices, and a test says so.
+    pub fallback_voice: Option<String>,
+
     /// Speak every spoken scene in this voice instead of the project's own.
     ///
     /// `project.yaml` is an input and the renderer never writes to it (D-013),
@@ -166,6 +176,7 @@ impl RenderProjectOptions {
             encoder: None,
             force: false,
             voice: None,
+            fallback_voice: None,
             provider: None,
             subtitles: None,
             subtitle_theme: None,
@@ -910,7 +921,7 @@ fn prune(
 /// cache key is computed — so switching voices is a cache miss, as it must be,
 /// and switching back is a hit (D-043).
 fn apply_voice_override(project: &mut crate::import::Project, options: &RenderProjectOptions) {
-    if options.voice.is_none() && options.provider.is_none() {
+    if options.voice.is_none() && options.provider.is_none() && options.fallback_voice.is_none() {
         return;
     }
     for scene in &mut project.scenes {
@@ -918,8 +929,20 @@ fn apply_voice_override(project: &mut crate::import::Project, options: &RenderPr
             provider, voice, ..
         } = &mut scene.spec.source
         {
-            if let Some(chosen) = &options.voice {
-                *voice = spoonstill_core::project::VoiceId(chosen.clone());
+            // D-092's precedence, for one scene, in the one place the render
+            // path expresses it: this run's voice, then the scene's own, then
+            // the machine's fallback. `resolve` is the same function the
+            // window draws its Voice screen from (D-162, D-164), so a screen
+            // that promises a voice and a render that uses another one cannot
+            // happen by one of them being edited alone.
+            let choice = crate::voice::resolve(
+                options.voice.as_deref(),
+                &voice.0,
+                options.fallback_voice.as_deref(),
+                "",
+            );
+            if let Some(chosen) = choice.override_for_render {
+                *voice = spoonstill_core::project::VoiceId(chosen);
             }
             if let Some(chosen) = &options.provider {
                 *provider = spoonstill_core::project::ProviderId(chosen.clone());
@@ -963,10 +986,14 @@ fn unchosen_voice_warning(project: &crate::import::Project) -> Option<String> {
         return None;
     }
 
+    // The fallback is named first and the two per-run answers second, because
+    // the report this warning comes from is *several projects*, and only the
+    // first of the three fixes that (D-164).
     Some(format!(
         "{unchosen} spoken scene{} name{} no voice, so each line is read in \
-         whatever voice its own script suggests — pass `--voice NAME`, or set \
-         `tts.voice:` in project.yaml, to keep several projects sounding the same",
+         whatever voice its own script suggests — `still voices --use NAME` \
+         sets one for every project on this machine; `--voice NAME` or \
+         `tts.voice:` in project.yaml answers just this one",
         if unchosen == 1 { "" } else { "s" },
         if unchosen == 1 { "s" } else { "" },
     ))
@@ -1822,6 +1849,88 @@ mod tests {
         }
     }
 
+    /// The window and the command line reach the same voices (D-164).
+    ///
+    /// They ask differently and they must not answer differently. The window
+    /// resolves first — it has to *show* which voice will speak before the
+    /// render starts — and passes the answer as `voice`. The terminal passes
+    /// the two raw inputs and lets `apply_voice_override` decide. Two routes,
+    /// one destination, and nothing but this test would notice them parting.
+    #[test]
+    fn the_window_and_the_terminal_reach_the_same_voice() {
+        let root = scratch("two-routes");
+        let cases = [
+            // run pick, project.yaml's voice, machine fallback → what speaks
+            (None, "default", None, "default"),
+            (None, "default", Some("fall"), "fall"),
+            (None, "proj", Some("fall"), "proj"),
+            (Some("run"), "default", Some("fall"), "run"),
+            (Some("run"), "proj", Some("fall"), "run"),
+            (Some("run"), "proj", None, "run"),
+        ];
+
+        for (chosen, project_voice, fallback, expected) in cases {
+            // The terminal: both inputs handed over as they were given.
+            let mut terminal = project_of(&root, vec![spoken_scene("001", "A line.", "edge")]);
+            set_voice(&mut terminal, project_voice);
+            apply_voice_override(
+                &mut terminal,
+                &RenderProjectOptions {
+                    voice: chosen.map(str::to_owned),
+                    fallback_voice: fallback.map(str::to_owned),
+                    ..RenderProjectOptions::for_project(&root)
+                },
+            );
+
+            // The window: resolved first, then handed over as one answer —
+            // exactly what `voice_choice` returns to the page.
+            let shown = crate::voice::resolve(chosen, project_voice, fallback, "");
+            let mut window = project_of(&root, vec![spoken_scene("001", "A line.", "edge")]);
+            set_voice(&mut window, project_voice);
+            apply_voice_override(
+                &mut window,
+                &RenderProjectOptions {
+                    voice: shown.override_for_render.clone(),
+                    fallback_voice: None,
+                    ..RenderProjectOptions::for_project(&root)
+                },
+            );
+
+            assert_eq!(
+                (voice_of(&terminal), voice_of(&window)),
+                (expected.to_owned(), expected.to_owned()),
+                "chosen={chosen:?} project={project_voice:?} fallback={fallback:?}"
+            );
+
+            // And the voice the window *displayed* is the one that speaks —
+            // except where nobody chose, where there is deliberately nothing to
+            // display and D-158 answers per line instead.
+            if shown.origin != crate::voice::VoiceOrigin::Unchosen {
+                assert_eq!(
+                    shown.voice,
+                    voice_of(&window),
+                    "the Voice screen named a voice the render did not use"
+                );
+            }
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Point a project's only scene at a voice.
+    fn set_voice(project: &mut Project, voice: &str) {
+        if let AudioSource::Tts { voice: v, .. } = &mut project.scenes[0].spec.source {
+            *v = spoonstill_core::project::VoiceId(voice.to_owned());
+        }
+    }
+
+    /// What its only scene would be spoken in.
+    fn voice_of(project: &Project) -> String {
+        match &project.scenes[0].spec.source {
+            AudioSource::Tts { voice, .. } => voice.0.clone(),
+            other => panic!("not a spoken scene: {other:?}"),
+        }
+    }
+
     /// A spoken scene with `voice: default` is the reported workflow (D-163).
     ///
     /// One line for the project, naming both fixes, and silent the moment
@@ -1849,8 +1958,16 @@ mod tests {
             "{warning}"
         );
         assert!(
-            warning.contains("--voice") && warning.contains("tts.voice"),
-            "both ways out have to be named, one per surface: {warning}"
+            warning.contains("still voices --use")
+                && warning.contains("--voice")
+                && warning.contains("tts.voice"),
+            "all three ways out have to be named, and the one that answers \
+             several projects at once has to be first: {warning}"
+        );
+        assert!(
+            warning.find("still voices --use") < warning.find("tts.voice"),
+            "the fix for the reported workflow is buried behind the per-run \
+             ones: {warning}"
         );
         assert_eq!(
             warning.lines().count(),

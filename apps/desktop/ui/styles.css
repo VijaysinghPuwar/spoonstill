@@ -974,6 +974,14 @@ button.small { padding: 3px 9px; font-size: 11px; }
    is a legal render — so it is warned, not marked bad. D-162. */
 .chosen-tag.unchosen { border-color: var(--warn); color: var(--warn); }
 
+/* The pin, when this voice is already the machine's. Same accent as a chosen
+   row, because it is the same kind of fact: somebody decided this. D-164. */
+#pin-voice.on {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
 /* The sentence under the name: what this answer means and what to do about it.
    Wraps, unlike the name above it, because it is prose. */
 .chosen-why {

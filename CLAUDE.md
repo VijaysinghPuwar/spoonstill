@@ -269,11 +269,56 @@ Measured: two unchosen scenes warn once and render; `--voice` silences it;
 driven through the real `app.js` in node behind a stub DOM, both ways.
 **M2 is 22 gates; `make gates` is 38.**
 
-**Two steps of four remain:** a "use for every project" control on the Voice
-row, so the fallback is settable from where voices are actually auditioned
-rather than one level up under Settings; and `still new` writing the fallback
-into the starter `project.yaml`, so each of ten parts records the voice it uses
-and is reproducible without depending on a machine setting.
+**D-164 — and the setting it all rests on was somewhere the CLI could not
+reach.** Setting out to put a "use for every project" button on the Voice
+screen found the deeper reason D-092's fallback had never run: `AppSettings`
+was written to Tauri's `app_config_dir()` — `com.spoonstill.desktop/` — while
+every other piece of machine state is in `spoonstill_state::runs::config_dir()`,
+`spoonstill/`. **Two directories on the same disk, neither aware of the other**,
+so a fallback set in the window changed nothing about `still render`. That is
+this project's own rule broken outright: *if the CLI cannot do it, it does not
+exist.*
+
+`spoonstill_app::machine` is the one file now — `settings.yaml` beside
+`runs.csv`, YAML because `serde_yaml_ng` is already here for `project.yaml` and
+that is the format an operator has already read. A pre-D-164 `app-settings.json`
+is **adopted once**, as a read rather than a move.
+
+**`resolve_voice` lasted one session in `apps/desktop`.** The fallback is read
+inside it, so a rule only the window could call was a setting only the window
+could honour. It is `spoonstill_app::voice` now and `apply_voice_override` calls
+the same `resolve` per scene — the Voice screen's promise and the render's
+behaviour are one function. The two surfaces still *ask* differently (the window
+resolves first, because it must **show** the answer before rendering; the
+terminal passes raw inputs), and
+`the_window_and_the_terminal_reach_the_same_voice` walks six combinations
+through both routes to one destination.
+
+**`fallback_voice` is deliberately not folded into `voice`** on the CLI: `voice`
+overrides *every* scene, so that would overrule a project's own `tts.voice`,
+which is the one thing a fallback must never do.
+
+`still voices --use NAME` sets it (**checked against the catalogue** — a
+misspelt voice is otherwise a setting that silently fails every render until
+somebody remembers making it), `--forget` clears it (**before the provider is
+asked anything**, so an operator with no network can undo the setting that is
+failing them), and the listing marks the fallback with `*`. On the Voice screen
+it is one **toggle** beside the chosen voice — the control that sets it clears
+it — reading `VoiceChoice::is_fallback`, which is **not** `origin == Fallback`:
+a voice picked for this run can also be the machine's.
+
+Measured with `HOME` redirected: no fallback → `voice=en-US-AvaNeural`;
+`--use en-GB-RyanNeural` → that; a project naming `en-US-GuyNeural` → that, the
+fallback correctly overruled; `--voice ja-JP-KeitaNeural` → that, overruling
+both. Gate 7h asserts it in a **fresh `HOME`**, and does the fallback half
+**before** the `project.yaml` half in a voice no other step uses — the other way
+round it would have passed without the fallback doing anything (D-154). Two
+mutations caught: `still render` not reading the setting, and the fallback
+folded into `voice`. **`make gates` is still 38.**
+
+**One step of four remains:** `still new` writing the fallback into the starter
+`project.yaml`, so each of ten parts records the voice it uses and is
+reproducible a month later without depending on a machine setting.
 
 ### State as of 2026-09-06 — the bundle was describing an FFmpeg that was not there
 
@@ -2417,10 +2462,12 @@ touching `Backoff`, `wait_until`'s loop, `probe_jobs`, or the `Sync` bound on
 `MediaCheck`**, **D-150 before touching `Ingested::summary`, `unreadable`,
 `human_size`, `arrange::Moved`, or a cited D-number**, **D-151 before touching
 `Spoken::voice`, `tools::version_line`, the "film complete" event's fields, or
-the FFmpeg version line in this file**, **D-162 and D-163 before touching
-`resolve_voice`, `VoiceOrigin`, the `voice_choice` command, `refreshVoice`,
-`VOICE_MARK`, `renderBlocker`, `unchosen_voice_warning`, or anything that
-decides, displays, or blocks on which voice a render uses**, **D-161 before touching
+the FFmpeg version line in this file**, **D-162, D-163 and D-164 before touching
+`spoonstill_app::voice`, `spoonstill_app::machine`, `VoiceOrigin`, the
+`voice_choice` command, `refreshVoice`, `VOICE_MARK`, `renderBlocker`,
+`unchosen_voice_warning`, `apply_voice_override`, `RenderProjectOptions.fallback_voice`,
+`still voices --use`, the pin control, or anything that decides, displays, or
+blocks on which voice a render uses**, **D-161 before touching
 `graphics_summary`, `version_output`'s failure arm, or anything that reports a
 missing FFmpeg in the diagnostics bundle**, **D-152 before touching
 `TEXT_EXTENSIONS`, `POSITIONAL_TEXT_EXTENSIONS` or `ingest::assign`**, **D-153

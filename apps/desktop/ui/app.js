@@ -1217,6 +1217,7 @@ function drawVoiceChoice() {
   tag.className = "chosen-tag" + (origin === "run" ? " on" : "")
     + (origin === "unchosen" ? " unchosen" : "");
   el("chosen-why").textContent = voiceState?.detail ?? "";
+  drawPin();
 
   el("voice-default").disabled = !chosenVoice;
   // The rail is what an operator reads at the moment they reach for Render, so
@@ -1227,6 +1228,52 @@ function drawVoiceChoice() {
   el("rail-voice-said").textContent = voiceState?.said ?? "";
   el("go-voice").classList.toggle("unchosen", origin === "unchosen");
   el("go-voice").title = voiceState?.detail ?? "";
+}
+
+// The machine's fallback, offered where the operator is already choosing a
+// voice (D-164). It lived only under Settings, one level up and behind Home,
+// which is a long way from the screen where somebody has just found the voice
+// they want for all ten parts of their film.
+//
+// A toggle, not a one-way switch: the same control that sets it is the one
+// that clears it, because a setting an operator cannot find their way back out
+// of is worse than no setting.
+function drawPin() {
+  const button = el("pin-voice");
+  const voice = effectiveVoice();
+  const pinned = Boolean(voiceState?.isFallback);
+  button.disabled = !voice;
+  button.textContent = pinned ? "\u2713 Used for every project" : "Use for every project";
+  button.className = pinned ? "on" : "";
+  button.title = !voice
+    ? "Choose a voice first."
+    : pinned
+      ? `Every project on this machine that names no voice is read by ${voice}. `
+        + "Click to stop."
+      : `Read every project that names no voice in ${voice}. `
+        + "A project with its own tts.voice still wins.";
+}
+
+async function pinVoice() {
+  const voice = effectiveVoice();
+  if (!voice) return;
+  const pinned = Boolean(voiceState?.isFallback);
+  const button = el("pin-voice");
+  button.disabled = true;
+  try {
+    await invoke("set_default_voice", { voice: pinned ? null : voice });
+    await refreshVoice();
+    drawVoiceChoice();
+    drawVoices();
+    // Clearing it can put a project back into "nobody chose", which is a state
+    // Render is held on (D-163) — so the button has to be re-asked here too.
+    updateRender();
+    setStatus(voiceState?.detail ?? "");
+  } catch (error) {
+    setStatus(String(error));
+  } finally {
+    drawPin();
+  }
 }
 
 // An audition. It goes through the same cache and the same normalization the
@@ -1735,6 +1782,7 @@ el("reveal").addEventListener("click", () => guard(invoke("reveal_project")));
 el("reveal-2").addEventListener("click", () => guard(invoke("reveal_project")));
 
 el("preview").addEventListener("click", () => preview(null));
+el("pin-voice").addEventListener("click", () => guard(pinVoice()));
 el("voice-default").addEventListener("click", () => chooseVoice(null));
 el("voice-search").addEventListener("input", drawVoices);
 el("subs-default").addEventListener("click", resetSubtitles);

@@ -187,221 +187,68 @@ struct RecentProject {
 /// Where the window remembers the operator's projects.
 const RECENT_FILE: &str = "recent-projects.json";
 
-/// Where the window remembers the answers that are about this machine rather
-/// than about any one project (D-092). Same reasoning as `RECENT_FILE`: a
-/// fallback voice is not a fact about a project, so it does not live in one.
-const SETTINGS_FILE: &str = "app-settings.json";
+/// The file the window used to keep its machine settings in, under Tauri's
+/// `app_config_dir()` — `com.spoonstill.desktop/`, which the CLI has never
+/// been able to see. Kept only to read a setting made by a build before D-164
+/// and carry it across; nothing writes it any more.
+const LEGACY_SETTINGS_FILE: &str = "app-settings.json";
 
-/// The machine's own answers. Every field is optional, because every field has
-/// a working default and a first run has none of them.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct AppSettings {
-    /// The voice a project that names none falls back to.
-    ///
-    /// **A fallback, never a write.** `project.yaml` is an input (D-013), so
-    /// choosing here changes what the *next render* asks for and nothing on
-    /// disk. A project that names its own voice still wins, and the Voice
-    /// screen's per-run override wins over both.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    default_voice: Option<String>,
-}
-
-fn settings_file(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let dir = app.path().app_config_dir().ok()?;
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir.join(SETTINGS_FILE))
-}
-
-/// Read them, or the defaults. As with the recent list, every failure here is
-/// "there are none yet", which is normal and never an error in front of anyone.
+/// Read the machine's answers, adopting a pre-D-164 file once if there is one.
+///
+/// The migration is a **read**, not a copy-and-delete: the old file is left
+/// where it is, so a machine that runs an older build again still finds its
+/// setting. It costs one stat on a path that normally does not exist.
 #[tauri::command]
-fn app_settings(app: tauri::AppHandle) -> AppSettings {
-    settings_file(&app)
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+fn app_settings(app: tauri::AppHandle) -> spoonstill_app::machine::Machine {
+    let current = spoonstill_app::machine::load();
+    if current != spoonstill_app::machine::Machine::default() {
+        return current;
+    }
+    let Some(legacy) = app
+        .path()
+        .app_config_dir()
+        .ok()
+        .map(|dir| dir.join(LEGACY_SETTINGS_FILE))
+    else {
+        return current;
+    };
+    let Some(adopted) = std::fs::read_to_string(legacy)
+        .ok()
+        .and_then(|text| serde_json::from_str::<spoonstill_app::machine::Machine>(&text).ok())
+    else {
+        return current;
+    };
+    if adopted == spoonstill_app::machine::Machine::default() {
+        return current;
+    }
+    // Best effort: a machine whose config directory cannot be written still
+    // gets the setting for this session, which is better than losing it.
+    let _ = spoonstill_app::machine::save(&adopted);
+    adopted
 }
 
 /// Set the fallback voice, or clear it by passing nothing.
 #[tauri::command]
-fn set_default_voice(app: tauri::AppHandle, voice: Option<String>) -> Result<AppSettings, String> {
+fn set_default_voice(voice: Option<String>) -> Result<spoonstill_app::machine::Machine, String> {
     journalled(
         "set_default_voice",
         None,
-        set_default_voice_inner(app, voice),
+        spoonstill_app::machine::set_default_voice(voice.as_deref()),
     )
 }
 
-fn set_default_voice_inner(
-    app: tauri::AppHandle,
-    voice: Option<String>,
-) -> Result<AppSettings, String> {
-    let mut settings = app_settings(app.clone());
-    settings.default_voice = voice.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
-
-    let path = settings_file(&app).ok_or("this machine has no config directory")?;
-    let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))?;
-    Ok(settings)
-}
-
-/// Which of the four answers decided the voice, so a surface can say *whose*
-/// choice the operator is looking at (D-162).
+/// The voice the next render will use, and who chose it (D-162).
 ///
-/// The window has always been able to name the voice and never able to say
-/// where the name came from, and the two that matter most looked identical:
-/// a project that asks for a voice and a project that asks for nothing both
-/// displayed a real voice id, so `en-US-AvaNeural` read as somebody's decision
-/// when it was the absence of one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum VoiceOrigin {
-    /// The Voice screen's pick, for this render only.
-    Run,
-    /// `project.yaml`'s own `tts.voice`.
-    Project,
-    /// The machine's fallback, from Settings (D-092).
-    Fallback,
-    /// Nothing named one. The renderer picks per line from the script it is
-    /// written in (D-158), so there is no single answer to display.
-    Unchosen,
-}
-
-/// The voice a render will use, and who said so.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct VoiceChoice {
-    /// The voice that will speak. Empty only when nobody named one *and* the
-    /// provider could not be reached to say what it would fall back to.
-    voice: String,
-    origin: VoiceOrigin,
-    /// The `voice` field of a render request: `Some` only for the two answers
-    /// that are the window's to make. `None` hands the question back to the
-    /// renderer, which reads `project.yaml` and then D-158's script rule —
-    /// so the window never has to restate a rule it does not own.
-    ///
-    /// **This is why the type exists.** The Render screen used to display
-    /// `effectiveVoice()` and the render request used to build
-    /// `chosenVoice || (projectNamesNoVoice() ? appDefaultVoice : null)` —
-    /// two spellings of one rule, in two files, with nothing asserting they
-    /// agreed. What is shown is now computed from the same value that is sent.
-    #[serde(rename = "overrideForRender")]
-    override_for_render: Option<String>,
-    /// Where it came from, in three or four words, for a tag beside the name.
-    said: String,
-    /// The same fact as a sentence, for the operator who wants to know what to
-    /// do about it. `Remedy`'s shape (D-105): a short form to read at a glance
-    /// and a long one to act on.
-    detail: String,
-}
-
-/// A voice named by nobody. `project.yaml` spells that `default`
-/// (`spoonstill_app::import::settings::DEFAULT_VOICE`), and an empty string is
-/// the same statement from a page that has not loaded one yet.
-fn names_a_voice(value: &str) -> bool {
-    let trimmed = value.trim();
-    !trimmed.is_empty() && trimmed != "default"
-}
-
-/// Resolve the four answers into one, in the order D-092 set: this run's pick,
-/// then the project's own, then the machine's fallback, and only then nothing.
-///
-/// Pure, and every input is a string the page already holds — the point is not
-/// that Rust can reach them, it is that the rule is written **once** and can be
-/// tested (D-010).
-fn resolve_voice(
-    chosen: Option<&str>,
-    project_voice: &str,
-    fallback: Option<&str>,
-    provider_default: &str,
-) -> VoiceChoice {
-    if let Some(voice) = chosen.filter(|v| names_a_voice(v)) {
-        return VoiceChoice {
-            voice: voice.trim().to_owned(),
-            origin: VoiceOrigin::Run,
-            override_for_render: Some(voice.trim().to_owned()),
-            said: "Chosen for this render".to_owned(),
-            detail: "This voice reads every written line in the next render. \
-                     Nothing here writes to project.yaml, so it lasts until you \
-                     choose again."
-                .to_owned(),
-        };
-    }
-
-    if names_a_voice(project_voice) {
-        return VoiceChoice {
-            voice: project_voice.trim().to_owned(),
-            origin: VoiceOrigin::Project,
-            override_for_render: None,
-            said: "Named in project.yaml".to_owned(),
-            detail: "This project asks for this voice itself, so every render of \
-                     it sounds the same on any machine."
-                .to_owned(),
-        };
-    }
-
-    if let Some(voice) = fallback.filter(|v| names_a_voice(v)) {
-        return VoiceChoice {
-            voice: voice.trim().to_owned(),
-            origin: VoiceOrigin::Fallback,
-            override_for_render: Some(voice.trim().to_owned()),
-            said: "Your fallback voice".to_owned(),
-            detail: "This project names no voice, so the one set in Settings is \
-                     used. Every project that names none gets this same voice."
-                .to_owned(),
-        };
-    }
-
-    // The one case the window could not say out loud. `provider_default` is
-    // what an English line gets; a line in another script gets that script's
-    // voice instead (D-158), so naming one voice here would be a guess at the
-    // project's content. The sentence says what to do about it, because this
-    // is the state that renders ten parts of one film in ten voices.
-    let detail = if provider_default.is_empty() {
-        "Nothing has named a voice. Each line will be read in whatever voice \
-         its own script suggests. Choose one here, or set a fallback in \
-         Settings, to keep several projects sounding the same."
-            .to_owned()
-    } else {
-        format!(
-            "Nothing has named a voice. English lines will be read by \
-             {provider_default}, and a line written in another script gets that \
-             script's voice. Choose one here, or set a fallback in Settings, to \
-             keep several projects sounding the same."
-        )
-    };
-    VoiceChoice {
-        voice: provider_default.trim().to_owned(),
-        origin: VoiceOrigin::Unchosen,
-        override_for_render: None,
-        said: "Nobody chose this".to_owned(),
-        detail,
-    }
-}
-
-/// The voice the next render will use, and who chose it.
-///
-/// **The fallback is read here rather than passed in**, and that is a fix, not
-/// tidiness. `appDefaultVoice` in the page was filled only by
-/// `loadFallbackVoice`, which only the Settings screen calls — so on any launch
-/// where the operator went straight from Home into a project, the machine's
-/// fallback voice was `null` and every project that named no voice was spoken
-/// by the provider's own. The setting existed, was saved, was displayed
-/// correctly in Settings, and did nothing. A page cannot forget to load
-/// something it never holds.
+/// The rule itself is `spoonstill_app::voice`, shared with the command line
+/// (D-164) — the window used to own it, which is how the machine's fallback
+/// came to be a thing only the window could honour.
 #[tauri::command]
 fn voice_choice(
-    app: tauri::AppHandle,
     chosen: Option<String>,
     project_voice: String,
     provider_default: String,
-) -> VoiceChoice {
-    let settings = app_settings(app);
-    resolve_voice(
-        chosen.as_deref(),
-        &project_voice,
-        settings.default_voice.as_deref(),
-        &provider_default,
-    )
+) -> spoonstill_app::voice::VoiceChoice {
+    spoonstill_app::voice::for_run(chosen.as_deref(), &project_voice, &provider_default)
 }
 
 /// Write down what a window command did (D-148).
@@ -1969,191 +1816,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The four answers, in the order D-092 set them, each one displacing the
-    /// one below it (D-162).
-    ///
-    /// Written as a table because the defect this exists to prevent is a
-    /// *precedence* change — someone adding a fifth answer, or moving the
-    /// fallback above the project — and a precedence change is invisible in
-    /// any test that supplies only one input at a time.
-    #[test]
-    fn the_voice_is_decided_by_the_first_answer_that_names_one() {
-        let cases = [
-            // chosen        project         fallback      provider   → voice, origin
-            (
-                Some("run"),
-                "proj",
-                Some("fall"),
-                "prov",
-                "run",
-                VoiceOrigin::Run,
-            ),
-            (
-                None,
-                "proj",
-                Some("fall"),
-                "prov",
-                "proj",
-                VoiceOrigin::Project,
-            ),
-            (
-                None,
-                "default",
-                Some("fall"),
-                "prov",
-                "fall",
-                VoiceOrigin::Fallback,
-            ),
-            (None, "default", None, "prov", "prov", VoiceOrigin::Unchosen),
-            // `default` is the word `project.yaml` uses for "nobody said", and
-            // it is not a voice (D-086). An empty string is the same statement
-            // from a page that has not loaded the project yet.
-            (
-                None,
-                "",
-                Some("fall"),
-                "prov",
-                "fall",
-                VoiceOrigin::Fallback,
-            ),
-            (Some(""), "proj", None, "prov", "proj", VoiceOrigin::Project),
-            (
-                Some("default"),
-                "default",
-                None,
-                "prov",
-                "prov",
-                VoiceOrigin::Unchosen,
-            ),
-            (
-                None,
-                "default",
-                Some(" "),
-                "prov",
-                "prov",
-                VoiceOrigin::Unchosen,
-            ),
-            // A voice id is not a path, so trimming one is safe — unlike a
-            // folder name, which D-089 says is never trimmed.
-            (Some(" run "), "proj", None, "prov", "run", VoiceOrigin::Run),
-        ];
-
-        for (chosen, project, fallback, provider, voice, origin) in cases {
-            let got = resolve_voice(chosen, project, fallback, provider);
-            assert_eq!(
-                (got.voice.as_str(), got.origin),
-                (voice, origin),
-                "chosen={chosen:?} project={project:?} fallback={fallback:?}"
-            );
-        }
-    }
-
-    /// What is displayed and what is sent come out of one call, and the two
-    /// answers the window does not own are handed back rather than restated.
-    ///
-    /// `Project` and `Unchosen` both send `None`: the renderer reads
-    /// `project.yaml` itself, and D-158 picks a voice per line from the script
-    /// it is written in. Sending `provider_default` for `Unchosen` would look
-    /// identical on this screen and would speak a Hindi project in English.
-    #[test]
-    fn only_the_two_answers_the_window_owns_are_sent_as_an_override() {
-        assert_eq!(
-            resolve_voice(Some("run"), "proj", Some("fall"), "prov").override_for_render,
-            Some("run".to_owned())
-        );
-        assert_eq!(
-            resolve_voice(None, "default", Some("fall"), "prov").override_for_render,
-            Some("fall".to_owned())
-        );
-        assert_eq!(
-            resolve_voice(None, "proj", Some("fall"), "prov").override_for_render,
-            None,
-            "project.yaml's own voice is the renderer's to read"
-        );
-        assert_eq!(
-            resolve_voice(None, "default", None, "prov").override_for_render,
-            None,
-            "sending the provider's default would overrule D-158's script rule"
-        );
-
-        // And an override, when there is one, is the voice being displayed.
-        for (chosen, project, fallback) in [
-            (Some("run"), "proj", Some("fall")),
-            (None, "default", Some("fall")),
-        ] {
-            let got = resolve_voice(chosen, project, fallback, "prov");
-            assert_eq!(
-                got.override_for_render.as_deref(),
-                Some(got.voice.as_str()),
-                "the render would use a voice the screen does not name"
-            );
-        }
-    }
-
-    /// Every answer says which it is, and the one that means "nobody decided"
-    /// does not read like a decision.
-    ///
-    /// This is the defect (D-091's class): the Voice screen tagged an
-    /// unchosen voice `From project.yaml`, which is a *false* statement about
-    /// a file, and the ten-parts-of-one-film case is exactly the case where
-    /// believing it costs a re-render.
-    #[test]
-    fn an_unchosen_voice_does_not_claim_anybody_chose_it() {
-        let unchosen = resolve_voice(None, "default", None, "en-US-AvaNeural");
-        assert!(
-            !unchosen.said.contains("project.yaml") && !unchosen.detail.contains("asks for"),
-            "an unchosen voice is claiming the project named it: {unchosen:?}"
-        );
-        assert!(
-            unchosen.detail.contains("Settings"),
-            "the state that renders ten projects in ten voices has to say what \
-             to do about it: {}",
-            unchosen.detail
-        );
-        // The provider's own fallback is named, because an operator who does
-        // nothing will hear it — but as an example, not as the whole answer.
-        assert!(
-            unchosen.detail.contains("en-US-AvaNeural"),
-            "{}",
-            unchosen.detail
-        );
-        assert!(
-            unchosen.detail.contains("script"),
-            "D-158 means there is no single voice to promise here: {}",
-            unchosen.detail
-        );
-
-        // No two answers share a tag, or the tag distinguishes nothing.
-        let said: std::collections::BTreeSet<String> = [
-            resolve_voice(Some("run"), "proj", Some("fall"), "prov"),
-            resolve_voice(None, "proj", Some("fall"), "prov"),
-            resolve_voice(None, "default", Some("fall"), "prov"),
-            unchosen,
-        ]
-        .into_iter()
-        .map(|choice| choice.said)
-        .collect();
-        assert_eq!(said.len(), 4, "two origins read the same: {said:?}");
-    }
-
-    /// A provider that cannot be reached has no default voice to offer, and
-    /// the sentence still has to be a sentence.
-    ///
-    /// Reachable: `provider_status` leaves `default_voice` empty when
-    /// `edge-tts` is missing (D-105), which is the first run on a new machine.
-    #[test]
-    fn an_unreachable_provider_still_gets_a_readable_answer() {
-        let choice = resolve_voice(None, "default", None, "");
-        assert_eq!(choice.origin, VoiceOrigin::Unchosen);
-        assert!(choice.voice.is_empty());
-        assert!(
-            !choice.detail.contains("  ") && !choice.detail.contains("read by ,"),
-            "an empty provider default left a hole in the sentence: {}",
-            choice.detail
-        );
-        assert!(choice.detail.contains("Settings"), "{}", choice.detail);
-    }
 
     /// The window holds a folder and a file name in two boxes and this is the
     /// only thing that puts them back together, so it is the only thing that

@@ -18,10 +18,12 @@ pub mod film;
 pub mod formats;
 pub mod import;
 pub mod ingest;
+pub mod machine;
 pub mod pool;
 pub mod render;
 pub mod subtitles;
 pub mod tooling;
+pub mod voice;
 
 pub use audio::{AudioCache, AudioError, ResolvedAudio};
 pub use film::{FilmError, FilmEvent, RenderProjectOptions, RenderedFilm, render_project};

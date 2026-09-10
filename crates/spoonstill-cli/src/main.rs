@@ -268,6 +268,20 @@ struct VoicesArgs {
     /// everything the window can (D-010), so it is here first.
     #[arg(long)]
     install: bool,
+
+    /// Use this voice for every project on this machine that names none.
+    ///
+    /// A fallback, never a write: `project.yaml` is an input (D-013), so a
+    /// project that asks for a voice keeps it and `--voice` on a single render
+    /// still wins. This is the answer to ten parts of one film in ten folders
+    /// (D-164).
+    #[arg(long = "use", value_name = "VOICE", conflicts_with = "forget")]
+    use_voice: Option<String>,
+
+    /// Stop using a fallback voice, and go back to letting each line's own
+    /// script choose (D-158).
+    #[arg(long)]
+    forget: bool,
 }
 
 #[derive(Debug, Args)]
@@ -883,6 +897,15 @@ fn name_of(path: &std::path::Path) -> String {
 /// D-002: the operator finds out that a provider is unreachable here, in one
 /// second, rather than at scene 340 of 500.
 fn list_voices(args: &VoicesArgs) -> Result<(), String> {
+    // Before the provider is asked anything: forgetting a setting must work on
+    // a machine that has lost its network, or an operator whose renders are
+    // failing cannot undo the setting that is failing them.
+    if args.forget {
+        spoonstill_app::machine::set_default_voice(None)?;
+        println!("  no fallback voice — each line is read in the voice its own script suggests");
+        return Ok(());
+    }
+
     let provider = spoonstill_app::tts::provider(&args.provider).map_err(|e| e.to_string())?;
 
     if let spoonstill_app::tts::Availability::Missing(remedy) = provider.availability() {
@@ -898,6 +921,26 @@ fn list_voices(args: &VoicesArgs) -> Result<(), String> {
 
     let wanted = args.filter.as_deref().map(str::to_lowercase);
     let voices = provider.voices().map_err(|e| e.to_string())?;
+
+    // Checked against the catalogue we have just fetched rather than accepted
+    // on trust: a misspelt voice is otherwise a setting that silently fails
+    // every render on this machine until somebody remembers making it.
+    if let Some(wanted) = &args.use_voice {
+        if !voices.iter().any(|voice| voice.id == *wanted) {
+            return Err(format!(
+                "{} does not offer a voice called {wanted:?}\n  \
+                 try `still voices {}` to see what it has",
+                provider.id(),
+                wanted.split('-').take(2).collect::<Vec<_>>().join("-"),
+            ));
+        }
+        spoonstill_app::machine::set_default_voice(Some(wanted))?;
+        println!("  {wanted} reads every project on this machine that names no voice");
+        println!("  a project's own `tts.voice:` still wins, and so does `--voice`");
+        return Ok(());
+    }
+
+    let fallback = spoonstill_app::machine::load().default_voice;
     let mut shown = 0;
     for voice in &voices {
         if let Some(filter) = &wanted
@@ -907,13 +950,29 @@ fn list_voices(args: &VoicesArgs) -> Result<(), String> {
             continue;
         }
         shown += 1;
-        println!("  {:<34} {:<8} {}", voice.id, voice.gender, voice.note);
+        // Which one this machine falls back to, marked where the operator is
+        // already looking — the terminal half of D-162's rule that a voice
+        // says who chose it.
+        let mark = if fallback.as_deref() == Some(voice.id.as_str()) {
+            " *"
+        } else {
+            "  "
+        };
+        println!("{mark}{:<34} {:<8} {}", voice.id, voice.gender, voice.note);
     }
     println!(
         "  {shown} of {} voices from {}",
         voices.len(),
         provider.id()
     );
+    match &fallback {
+        Some(voice) => {
+            println!("  * {voice} is this machine's fallback — `still voices --forget` undoes it")
+        }
+        None => println!(
+            "  no fallback voice — `still voices --use NAME` sets one for every project here"
+        ),
+    }
     Ok(())
 }
 
@@ -1183,6 +1242,11 @@ fn render_project(args: RenderArgs) -> Result<(), String> {
         force: args.force,
         keep_cache: args.keep_cache,
         voice: args.voice.clone(),
+        // This machine's standing answer, for the scenes that name none
+        // (D-164). Not folded into `voice` above it: that would overrule a
+        // project's own `tts.voice`, which is the one thing a fallback must
+        // never do. `apply_voice_override` holds the precedence.
+        fallback_voice: spoonstill_app::machine::load().default_voice,
         provider: args.provider.clone(),
         subtitles,
         subtitle_theme,
