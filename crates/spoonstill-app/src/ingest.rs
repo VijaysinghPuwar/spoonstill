@@ -303,9 +303,12 @@ impl std::error::Error for IngestError {}
 /// permanently). Writing one line at creation is what makes the fix reach a
 /// project without reaching any existing film.
 ///
-/// It is deliberately **one key**, not a template of every setting. An absent
+/// It is deliberately the **fewest keys that answer a question the folder
+/// cannot answer for itself**, not a template of every setting. An absent
 /// setting is a valid setting (D-056), and a scaffold full of commented
-/// defaults is a file an operator edits by accident.
+/// defaults is a file an operator edits by accident. Since D-164 there is a
+/// second such question — which voice — and it is written only when this
+/// machine has an answer to it.
 ///
 /// A failure to write it is not a failure to create the project: the folder is
 /// real and usable, and the only consequence is that it renders under `v1`.
@@ -315,6 +318,21 @@ impl std::error::Error for IngestError {}
 /// [`IngestError::AlreadyAProject`] if stills are already there,
 /// [`IngestError::CannotCreate`] if the folder cannot be made.
 pub fn create_project(path: &Path) -> Result<PathBuf, IngestError> {
+    create_project_with(path, crate::machine::load().default_voice.as_deref())
+}
+
+/// [`create_project`], with this machine's fallback voice stated rather than
+/// read (D-165).
+///
+/// A parameter and not a lookup, for D-144's reason: every test of what a new
+/// project says would otherwise depend on whether the machine running it
+/// happens to have a fallback voice set, which is the kind of test that passes
+/// here and fails on a colleague's laptop for a reason nobody can see.
+///
+/// # Errors
+///
+/// As [`create_project`].
+fn create_project_with(path: &Path, fallback_voice: Option<&str>) -> Result<PathBuf, IngestError> {
     if path.is_dir() {
         let stills = media_in(path, Kind::Image).len();
         if stills > 0 {
@@ -338,23 +356,49 @@ pub fn create_project(path: &Path) -> Result<PathBuf, IngestError> {
     // Never over an existing file, and never fatal (D-153).
     let settings = root.join(spoonstill_core::MANIFEST_FILE);
     if !settings.exists() {
-        let _ = fs::write(&settings, STARTER_SETTINGS);
+        let _ = fs::write(&settings, starter_settings(fallback_voice));
     }
     Ok(root)
 }
 
-/// What a brand-new project's `project.yaml` says, and all it says (D-153).
+/// What a brand-new project's `project.yaml` says, and all it says (D-153,
+/// D-165).
 ///
-/// The comment is there because the value is not one an operator would guess
+/// Each comment is there because the value is not one an operator would guess
 /// the meaning of, and because the honest thing to say about a versioned rule
 /// is that older projects are on the older one.
-const STARTER_SETTINGS: &str = "\
+fn starter_settings(fallback_voice: Option<&str>) -> String {
+    let mut text = String::from(
+        "\
 # How each scene's Ken Burns move is chosen (D-153). `v2` makes the move a
 # property of the photograph, so reordering the film re-renders nothing and
 # changes no other scene's motion. Projects made before this key existed have
 # no `motion_seed:` line and render under `v1`, exactly as they always have.
 motion_seed: v2
-";
+",
+    );
+
+    // Only when this machine has an answer. A folder that says nothing about
+    // its voice is still a valid project — D-158 reads each line's own script —
+    // and writing `voice: default` would be writing down the absence of a
+    // decision as though it were one (D-086).
+    if let Some(voice) = fallback_voice.filter(|v| crate::voice::names_a_voice(v)) {
+        use std::fmt::Write as _;
+        let _ = write!(
+            text,
+            "
+# Who reads every written line (D-164, D-165). Copied from this machine's
+# fallback voice at the moment this project was made, so the folder says what
+# it sounds like and renders the same on a machine that has never heard of it.
+# Ten parts of one film, made together, stay matched even if the machine's
+# fallback changes afterwards. Edit it here; `--voice` overrides one run.
+tts:
+  voice: {voice}
+"
+        );
+    }
+    text
+}
 
 /// Copy media into a project folder, numbered and paired.
 ///
@@ -1054,6 +1098,85 @@ mod tests {
         assert!(create_project(&path).is_ok());
     }
 
+    /// A project made on a machine with a fallback voice records it (D-165).
+    ///
+    /// The reported workflow is ten folders made in one sitting. A machine
+    /// fallback keeps them matched only while the machine keeps that setting;
+    /// writing it into each folder at creation keeps them matched **forever**,
+    /// and makes each one render the same on a machine that has never heard of
+    /// this one. That is the difference between a preference and a project.
+    #[test]
+    fn a_new_project_records_the_voice_it_was_made_with() {
+        let temp = Temp::new("startervoice");
+        let root = create_project_with(&temp.0.join("film"), Some("en-GB-RyanNeural"))
+            .expect("a new project");
+
+        let text = fs::read_to_string(root.join(spoonstill_core::MANIFEST_FILE))
+            .expect("a starter settings file");
+
+        // It has to parse as the thing the renderer reads, not merely contain
+        // the right characters — an indent wrong by two spaces is a file that
+        // looks correct and names no voice.
+        let parsed: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&text).expect("the starter file is not valid YAML");
+        assert_eq!(
+            parsed.get("tts").and_then(|tts| tts.get("voice")),
+            Some(&serde_yaml_ng::Value::from("en-GB-RyanNeural")),
+            "{text}"
+        );
+
+        // And it still says the other thing it exists to say.
+        assert!(text.contains("motion_seed: v2"), "{text}");
+    }
+
+    /// `default` is not a voice (D-086), so it is not written down as one.
+    ///
+    /// Writing `voice: default` would record the *absence* of a decision as
+    /// though it were one — and would then make D-163 stop asking, because a
+    /// project that names a voice is a project that has been answered.
+    #[test]
+    fn a_machine_with_no_answer_writes_no_voice() {
+        for nothing in [None, Some(""), Some("  "), Some("default")] {
+            let text = starter_settings(nothing);
+            assert!(
+                !text.contains("tts:") && !text.contains("voice:"),
+                "{nothing:?} was written down as a voice:\n{text}"
+            );
+            assert!(text.contains("motion_seed: v2"), "{text}");
+        }
+    }
+
+    /// The whole point, in one assertion: the folder answers for itself.
+    ///
+    /// A project made with a voice must resolve to `Project` — not `Fallback`
+    /// — because that is what "reproducible on another machine" means. Asked
+    /// through the same function every surface asks (D-164).
+    #[test]
+    fn a_recorded_voice_is_the_projects_own_and_not_the_machines() {
+        let temp = Temp::new("startervoice-origin");
+        let root = create_project_with(&temp.0.join("film"), Some("en-GB-RyanNeural"))
+            .expect("a new project");
+        // An empty folder loads as a project with one `NoScenes` problem, not
+        // as an error (D-156) — nothing here is probed, so the real checker is
+        // the honest one to use.
+        let project = crate::import::load(&root, &crate::import::ProbeCheck::from_env())
+            .expect("a new project reads back as a project");
+
+        assert_eq!(
+            project.settings.voice.0, "en-GB-RyanNeural",
+            "the renderer does not read back what creation wrote"
+        );
+
+        // On a machine with a *different* fallback — or none at all — the
+        // answer is unchanged, which is the property that keeps ten parts
+        // matched after somebody changes their mind.
+        for machine in [None, Some("ja-JP-KeitaNeural")] {
+            let choice = crate::voice::resolve(None, &project.settings.voice.0, machine, "prov");
+            assert_eq!(choice.origin, crate::voice::VoiceOrigin::Project);
+            assert_eq!(choice.voice, "en-GB-RyanNeural");
+        }
+    }
+
     #[test]
     /// D-153. A new project says which motion rule it renders under, because a
     /// folder that says nothing renders under the old one **forever** — and
@@ -1061,15 +1184,18 @@ mod tests {
     /// when it was written.
     fn a_new_project_declares_the_motion_seed_rule() {
         let temp = Temp::new("nosettings");
-        let root = create_project(&temp.0.join("film")).expect("a new project");
+        // `None` stated rather than read: `create_project` asks this machine
+        // for its fallback voice (D-165), and a test that called it would say
+        // "one key" here and "two" on a machine that has one set.
+        let root = create_project_with(&temp.0.join("film"), None).expect("a new project");
 
         let settings = root.join(spoonstill_core::MANIFEST_FILE);
         let text = fs::read_to_string(&settings).expect("a starter settings file");
         assert!(text.contains("motion_seed: v2"), "{text}");
 
-        // One key, not a template of every setting: an absent setting is a
-        // valid setting (D-056), and a scaffold full of commented-out defaults
-        // is a file somebody edits by accident.
+        // One key when this machine has nothing else to say: an absent
+        // setting is a valid setting (D-056), and a scaffold full of
+        // commented-out defaults is a file somebody edits by accident.
         let keys = text
             .lines()
             .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())

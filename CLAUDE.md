@@ -316,9 +316,45 @@ round it would have passed without the fallback doing anything (D-154). Two
 mutations caught: `still render` not reading the setting, and the fallback
 folded into `voice`. **`make gates` is still 38.**
 
-**One step of four remains:** `still new` writing the fallback into the starter
-`project.yaml`, so each of ten parts records the voice it uses and is
-reproducible a month later without depending on a machine setting.
+**D-165 — and a new project records the voice it was made with.** D-164's
+fallback keeps ten folders matched *while the machine keeps that setting*.
+Change it — a different film, a new laptop — and the ten stop matching on the
+next render of any of them, silently, because none of them says anything about
+its own voice. `still new` copies the fallback into the starter `project.yaml`
+at the moment the folder is made, so the folder says what it sounds like.
+
+Only when there is an answer: no fallback means no `tts:` block, and `default`
+is refused explicitly, because writing it down would record the absence of a
+decision as though it were one (D-086) and would stop D-163 asking. Still
+D-153's narrow exception on D-153's terms — nothing touches a file that exists,
+`add_media` writes none, and the starter is the fewest keys that answer a
+question the folder cannot answer for itself.
+
+**The cost, stated rather than discovered:** a project made before a fallback
+was set stays on `default`, and changing your mind about ten already-made
+projects means editing ten files. A folder that cannot drift is a folder that
+cannot be re-pointed from one place. That is the right way round here, where
+the parts are cut from one session and are meant to be identical forever.
+
+`create_project_with` takes the voice as a **parameter** (D-144's shape), or
+every test of what a new project says would depend on the machine running it —
+`a_new_project_declares_the_motion_seed_rule` asserts "exactly one key" and had
+that exposure, and so did **gate 4g's `still new`**, which now runs under a
+redirected `HOME`. The starter file is asserted by **parsing** it: an indent
+wrong by two spaces is a file that looks correct and names no voice.
+
+Measured with `HOME` redirected: a project made under `en-GB-RyanNeural` still
+renders `voice=en-GB-RyanNeural` after the machine moves to
+`ja-JP-KeitaNeural`, while a folder with no `project.yaml` renders
+`voice=ja-JP-KeitaNeural`. In gate 7h, with the "no answer writes none" half on
+a **second** fresh `HOME` so it cannot pass by inheriting the first's state.
+**`make gates` is still 38** — gate 7h grew; no gate was added.
+
+**All four steps of the reported workflow are done.** What is deliberately not
+built is the operator's original proposal — no default voice at all, a manual
+pick before every render — and D-162 records why in full: it prevents forgetting
+to change the voice and not choosing differently, and would make `still render
+DIR` fail without `--voice`, breaking every project already made and D-158.
 
 ### State as of 2026-09-06 — the bundle was describing an FFmpeg that was not there
 
@@ -2462,7 +2498,8 @@ touching `Backoff`, `wait_until`'s loop, `probe_jobs`, or the `Sync` bound on
 `MediaCheck`**, **D-150 before touching `Ingested::summary`, `unreadable`,
 `human_size`, `arrange::Moved`, or a cited D-number**, **D-151 before touching
 `Spoken::voice`, `tools::version_line`, the "film complete" event's fields, or
-the FFmpeg version line in this file**, **D-162, D-163 and D-164 before touching
+the FFmpeg version line in this file**, **D-162, D-163, D-164 and D-165 before touching
+`ingest::starter_settings`, `create_project_with`, and
 `spoonstill_app::voice`, `spoonstill_app::machine`, `VoiceOrigin`, the
 `voice_choice` command, `refreshVoice`, `VOICE_MARK`, `renderBlocker`,
 `unchosen_voice_warning`, `apply_voice_override`, `RenderProjectOptions.fallback_voice`,

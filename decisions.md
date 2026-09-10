@@ -6995,6 +6995,62 @@ pin, unpin, and the render held again afterwards.
 
 **M2 is 22 gates; `make gates` is 38.**
 
+### D-165 — A new project records the voice it was made with · Accepted
+
+The last of the four steps the reported workflow asked for, and the one that
+turns a preference into a property of the film.
+
+D-164's machine fallback keeps ten folders matched **while the machine keeps
+that setting**. Change it — a different film, a different client, a new
+laptop — and the ten parts stop matching on the next render of any of them,
+silently, because each still says nothing about its own voice. `still new` now
+copies the fallback into the starter `project.yaml` at the moment the folder is
+made, so the folder says what it sounds like and renders the same on a machine
+that has never heard of this one.
+
+**Only when there is an answer to record.** No fallback set means no `tts:`
+block, and `default` is refused explicitly through `voice::names_a_voice`,
+because writing `voice: default` would record the *absence* of a decision as
+though it were one (D-086) — and would then stop D-163 asking, since a project
+that names a voice is a project that has been answered.
+
+**It stays D-153's narrow exception, on D-153's terms.** `project.yaml` is an
+input the renderer never writes to (D-013). Nothing here touches a file that
+exists, `add_media` still writes none, and the starter file is still the fewest
+keys that answer a question the folder cannot answer for itself — there are now
+two such questions, the motion rule and the voice, and neither is a commented
+scaffold of defaults an operator edits by accident (D-056).
+
+**The cost, stated rather than discovered.** A project made before a fallback
+was set stays on `default` and keeps following the machine; changing your mind
+about ten already-made projects means editing ten files. That is the trade being
+bought: a folder that cannot drift is a folder that cannot be re-pointed from
+one place. It is the right way round for the reported workflow, where the films
+are cut from one recording session and are supposed to be identical forever.
+
+**`create_project_with` takes the voice as a parameter**, D-144's shape: a test
+of what a new project says would otherwise depend on whether the machine running
+it happens to have a fallback, which is the kind of test that passes here and
+fails on a colleague's laptop for a reason nobody can see. The pre-existing
+`a_new_project_declares_the_motion_seed_rule` — which asserts the starter file
+has exactly one key — was changed to state `None` for exactly that reason, and
+**gate 4g's `still new` had the same exposure** and now runs under a redirected
+`HOME`.
+
+The starter file is asserted by **parsing** it, not by matching characters: an
+indent wrong by two spaces is a file that looks correct and names no voice.
+
+Measured with `HOME` redirected: with no fallback, a new project writes one key
+and no `tts:`; with `en-GB-RyanNeural` set it writes the block; and after the
+machine is moved to `ja-JP-KeitaNeural` that project still renders
+`voice=en-GB-RyanNeural` while a folder with no `project.yaml` renders
+`voice=ja-JP-KeitaNeural`. Both halves are in gate 7h, in a fresh `HOME`, with
+the "no answer writes none" half on a **second** fresh `HOME` so it cannot pass
+by inheriting the first one's state. Two mutations caught by both a unit test
+and the gate: `still new` not recording, and `default` recorded as a voice.
+
+**`make gates` is still 38** — gate 7h grew; no gate was added.
+
 
 
 ### D-162 — The graphics card can be asked to render, and is still not asked by default · Accepted

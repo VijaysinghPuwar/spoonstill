@@ -484,8 +484,12 @@ gate_reorder() {
 
   # And `still new` says which rule it made the project under, so a folder is
   # not silently on the old one forever.
-  rm -rf "$WORK/reorder-fresh"
-  "$STILL" new "$WORK/reorder-fresh" "$media/p1.jpg" >/dev/null 2>&1 || return 1
+  # HOME redirected because `still new` reads this machine's fallback voice
+  # since D-165: without it, what this gate creates would depend on whoever is
+  # running it.
+  rm -rf "$WORK/reorder-fresh" "$WORK/reorder-home"; mkdir -p "$WORK/reorder-home"
+  HOME="$WORK/reorder-home" "$STILL" new "$WORK/reorder-fresh" "$media/p1.jpg" \
+    >/dev/null 2>&1 || return 1
   grep -q '^motion_seed: v2$' "$WORK/reorder-fresh/project.yaml" || {
     echo "a new project does not declare its motion seed"; return 1; }
 
@@ -1183,6 +1187,38 @@ gate_voice_unchosen() {
   out=$("$STILL" render "$proj" --out "$WORK/un3.mp4" 2>&1)
   grep -qE 'names? no voice' <<<"$out" && {
     echo "$out"; echo "tts.voice in project.yaml did not silence it"; return 1; }
+
+  # And a project made while a fallback is set records it, so it keeps that
+  # voice after the machine changes its mind — which is what keeps ten parts of
+  # one film matched a month later, on a machine that has never heard of this
+  # one (D-165).
+  local made="$WORK/unchosen-made"
+  rm -rf "$made"
+  printf 'A line to speak.' > "$WORK/unchosen-line.txt"
+  HOME="$fake" "$STILL" new "$made" fixtures/generated/land.jpg \
+    "$WORK/unchosen-line.txt" >/dev/null 2>&1 || {
+    echo "still new failed"; return 1; }
+  grep -q 'voice: en-AU-NatashaNeural' "$made/project.yaml" || {
+    cat "$made/project.yaml"; echo "a new project did not record the voice"; return 1; }
+
+  # The machine changes its mind; the folder does not.
+  HOME="$fake" "$STILL" voices --use en-US-GuyNeural >/dev/null 2>&1 || return 1
+  rc=0
+  out=$(HOME="$fake" "$STILL" render "$made" --out "$WORK/un7.mp4" 2>&1) || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    grep -q 'voice=en-AU-NatashaNeural' \
+      "$fake/Library/Application Support/spoonstill/runs.csv" || {
+      echo "the project did not keep the voice it was made with"; return 1; }
+  fi
+
+  # A machine with no answer writes none: `default` is not a voice (D-086), and
+  # writing it would record the absence of a decision as though it were one.
+  local bare="$WORK/unchosen-bare"
+  rm -rf "$bare"; rm -rf "$WORK/unchosen-home2"; mkdir -p "$WORK/unchosen-home2"
+  HOME="$WORK/unchosen-home2" "$STILL" new "$bare" fixtures/generated/land.jpg \
+    >/dev/null 2>&1 || { echo "still new failed on a bare machine"; return 1; }
+  grep -q 'voice:' "$bare/project.yaml" && {
+    cat "$bare/project.yaml"; echo "a machine with no fallback wrote a voice"; return 1; }
 
   # A project with nothing to speak has no voice to choose, and being asked
   # for one would be a nuisance on every render of every recorded film.
