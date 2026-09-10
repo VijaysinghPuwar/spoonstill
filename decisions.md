@@ -6959,12 +6959,26 @@ place and it is the renderer's.
 
 **On the command line:** `still voices --use NAME` sets it, `still voices
 --forget` clears it, and the listing marks the fallback row with `*` and names
-it in a line underneath. `--use` is **checked against the catalogue** that
-command has just fetched, because a misspelt voice is otherwise a setting that
+it in a line underneath. `--use` is **checked against the catalogue** when there
+is one to check against, because a misspelt voice is otherwise a setting that
 silently fails every render on the machine until somebody remembers making it.
-`--forget` runs **before the provider is asked anything**: an operator whose
-renders are failing must be able to undo the setting that is failing them on a
-machine that has lost its network.
+When there is not — no provider installed yet, a machine offline — it **sets it
+anyway and says it could not check**, naming the two commands that confirm it
+later. `--forget` runs **before the provider is asked anything**, for the same
+reason: an operator whose renders are failing must be able to undo the setting
+that is failing them.
+
+**That second path is a fix, and CI found it.** `--use` first shipped requiring
+the catalogue outright, so setting a *preference* needed the voice service —
+and the macOS exit-gates leg, which deliberately has no `edge-tts` (D-137),
+failed on that line while this machine passed. Reproduced locally with
+`SPOONSTILL_EDGE_TTS` pointed at nothing. The gate now drives the no-provider
+path on **every** machine rather than only where it happens to be the real one,
+and asserts three things: that it succeeds, that it does not claim to have
+checked a catalogue it never saw, and that the voice really reached
+`settings.yaml`. Neither the whole `Remedy` nor its `need` is quoted in that
+line, because both end in *"Press Install"* — the window's button, and not a
+thing a terminal has (D-105).
 
 **On the Voice screen:** one button beside the chosen voice, and it is a
 **toggle** — the same control that sets the fallback clears it. A setting an

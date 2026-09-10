@@ -298,11 +298,18 @@ through both routes to one destination.
 overrides *every* scene, so that would overrule a project's own `tts.voice`,
 which is the one thing a fallback must never do.
 
-`still voices --use NAME` sets it (**checked against the catalogue** — a
-misspelt voice is otherwise a setting that silently fails every render until
-somebody remembers making it), `--forget` clears it (**before the provider is
-asked anything**, so an operator with no network can undo the setting that is
-failing them), and the listing marks the fallback with `*`. On the Voice screen
+`still voices --use NAME` sets it (**checked against the catalogue when there
+is one** — a misspelt voice is otherwise a setting that silently fails every
+render until somebody remembers making it — and set anyway, saying it could not
+check, when no provider is installed), `--forget` clears it (**before the
+provider is asked anything**, so an operator with no network can undo the
+setting that is failing them), and the listing marks the fallback with `*`.
+
+**The no-provider path is a fix CI found**: `--use` first shipped requiring the
+catalogue, so setting a *preference* needed the voice service, and the macOS
+exit-gates leg — which deliberately has no `edge-tts` (D-137) — failed on that
+line while this machine passed. The gate now drives that path on **every**
+machine, with `SPOONSTILL_EDGE_TTS` pointed at nothing. On the Voice screen
 it is one **toggle** beside the chosen voice — the control that sets it clears
 it — reading `VoiceChoice::is_fallback`, which is **not** `origin == Fallback`:
 a voice picked for this run can also be the machine's.

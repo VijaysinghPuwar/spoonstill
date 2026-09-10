@@ -1153,6 +1153,24 @@ gate_voice_unchosen() {
   rm -rf "$fake"; mkdir -p "$fake"
   HOME="$fake" "$STILL" voices --use en-AU-NatashaNeural >/dev/null 2>&1 || {
     echo "could not set a fallback voice"; return 1; }
+
+  # Setting the preference must not need the voice service. This gate first
+  # shipped requiring it, and CI — which deliberately has no `edge-tts`
+  # (D-137) — failed on exactly that line while this machine passed. So the
+  # no-provider path is asserted here on **every** machine rather than only
+  # where it happens to be the real one (D-168).
+  local nohome="$WORK/unchosen-noprovider"
+  rm -rf "$nohome"; mkdir -p "$nohome"
+  HOME="$nohome" SPOONSTILL_EDGE_TTS=/nonexistent/edge-tts \
+    "$STILL" voices --use en-AU-NatashaNeural >"$WORK/nouse.log" 2>&1 || {
+    cat "$WORK/nouse.log"
+    echo "a fallback voice could not be set without the voice service"; return 1; }
+  grep -q 'not checked' "$WORK/nouse.log" || {
+    cat "$WORK/nouse.log"
+    echo "it set the voice but claimed to have checked a catalogue it never saw"; return 1; }
+  grep -q 'default_voice: en-AU-NatashaNeural' \
+    "$nohome/Library/Application Support/spoonstill/settings.yaml" || {
+    echo "it said it set the voice and did not"; return 1; }
   local rc=0
   out=$(HOME="$fake" "$STILL" render "$proj" --out "$WORK/un5.mp4" 2>&1) || rc=$?
   grep -qE 'names? no voice' <<<"$out" && {

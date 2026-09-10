@@ -909,6 +909,27 @@ fn list_voices(args: &VoicesArgs) -> Result<(), String> {
     let provider = spoonstill_app::tts::provider(&args.provider).map_err(|e| e.to_string())?;
 
     if let spoonstill_app::tts::Availability::Missing(remedy) = provider.availability() {
+        // Setting a preference is not the same as using it. A machine with no
+        // provider installed — a CI runner, a laptop before `--install`, a
+        // machine that has lost its network — can still be told which voice to
+        // use once it has one, and refusing here made `--use` the one half of
+        // this setting that needed the service. `--forget` already had this
+        // rule written down two branches up; `--use` had it by omission.
+        if let Some(wanted) = &args.use_voice {
+            spoonstill_app::machine::set_default_voice(Some(wanted))?;
+            println!("  {wanted} reads every project on this machine that names no voice");
+            // Neither the whole `Remedy` nor its `need`: both end in "Press
+            // Install", which is the window's button and not a thing a
+            // terminal has (D-105). This line says what happened; the next
+            // says what to do about it, in this surface's own words.
+            let _ = &remedy;
+            println!(
+                "  not checked against a catalogue — {} is not installed here",
+                provider.id()
+            );
+            println!("  `still voices --install`, then `still voices {wanted}` confirms it exists");
+            return Ok(());
+        }
         if !args.install {
             return Err(format!("{remedy}\n  try `still voices --install`"));
         }
@@ -925,6 +946,8 @@ fn list_voices(args: &VoicesArgs) -> Result<(), String> {
     // Checked against the catalogue we have just fetched rather than accepted
     // on trust: a misspelt voice is otherwise a setting that silently fails
     // every render on this machine until somebody remembers making it.
+    // Checked here, where the catalogue is in hand. The unchecked path above
+    // says so out loud rather than pretending it verified anything (D-168).
     if let Some(wanted) = &args.use_voice {
         if !voices.iter().any(|voice| voice.id == *wanted) {
             return Err(format!(
