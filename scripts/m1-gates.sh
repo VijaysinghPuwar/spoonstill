@@ -6,13 +6,27 @@
 # drift into checking something easier than what was promised.
 set -uo pipefail
 
-cd "$(dirname "$0")/.."
+# `set -e` is deliberately absent — these gates aggregate failures rather than
+# stopping at the first — so `cd` needs its own guard or a failure here runs
+# every gate in the caller's directory, where `target/release/still` is not,
+# and reports a product that is fine as broken (D-175).
+cd "$(dirname "$0")/.." || exit 1
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 
 GREEN=$'\033[32m'; RED=$'\033[31m'; DIM=$'\033[2m'; OFF=$'\033[0m'
 pass=0; fail=0
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+# `set -u` does not catch this: a failed `mktemp` leaves WORK **set and empty**,
+# and every `rm -rf "$WORK/..."` below then names an absolute path off the root.
+# Low probability, unrecoverable if it fires, so it is stated rather than
+# assumed (D-175).
+case "$WORK" in
+  "${TMPDIR:-/tmp}"*|/tmp/*|/var/folders/*) ;;
+  *) echo "refusing to run: mktemp gave '$WORK', which is not a temporary directory" >&2
+     exit 1;;
+esac
+[ -d "$WORK" ] || { echo "refusing to run: '$WORK' is not a directory" >&2; exit 1; }
+trap 'rm -rf "${WORK:?}"' EXIT
 
 check() { # description, then a command
   local what="$1"; shift
@@ -113,7 +127,13 @@ gate_five() {
   # plan.md: "absent, or present and marked partial — never a valid-looking stub".
   [ ! -f "$WORK/c.mp4" ] || { echo "the destination was written"; return 1; }
   # And nothing partial left littering the directory either.
-  ! ls -a "$WORK" | grep -q partial
+  # A glob, not `ls | grep`: a partial file is named after the operator's own
+  # output path, which this suite deliberately makes hostile (D-175, D-090).
+  local leftovers=0 path
+  for path in "$WORK"/*partial* "$WORK"/.*partial*; do
+    [ -e "$path" ] && leftovers=$((leftovers+1))
+  done
+  [ "$leftovers" -eq 0 ] || { ls -a "$WORK"; echo "a partial file was left"; return 1; }
 }
 check "Ctrl-C leaves no valid-looking stub and no partial file" gate_five
 

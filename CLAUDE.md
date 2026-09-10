@@ -190,6 +190,63 @@ cargo build --release -p spoonstill-cli
 cargo run --release -p spoonstill-desktop
 ```
 
+### State as of 2026-09-10 — the harness that runs `rm -rf` was checked by nothing
+
+**D-175 — a destructive harness fails closed, and a stated number is a counted
+one.** Two housekeeping findings, taken together because they are one lesson:
+**the parts of this tree no gate covers are where things rot.** D-136 learned it
+once when `.github/` turned out to be the one corner nothing checked; `scripts/`
+was the other.
+
+`shellcheck -S warning scripts/*.sh` reported **15**. All fixed, none silenced.
+
+**The `cd` pair is the one that would actually fire**, and it is now
+demonstrated rather than argued. `set -e` is deliberately absent from these
+scripts — they aggregate failures rather than stopping at the first — which is
+exactly why `cd` needs its own guard. Run from a directory that is not the repo
+with the `cd` broken, the old script prints:
+
+```
+  FAIL  the CLI does not build
+```
+
+A product that is fine, reported as broken. With `|| exit 1` it exits 1 and says
+nothing else.
+
+**`set -u` does not catch the `rm -rf` sites.** A failed `mktemp -d` leaves
+`WORK` **set and empty**, and every `rm -rf "$WORK/..."` then names an absolute
+path off the root. `mktemp`'s answer is now checked for being non-empty, a
+directory, and under the temporary root — measured: forcing `WORK=""` refuses
+with *"mktemp gave '', which is not a temporary directory"* and exits 1. Every
+removal is `${WORK:?}` / `${proj:?}`.
+
+**The six `ls | grep` are harmless where they stand and wrong in this suite**,
+which is the argument for changing them: `gate_hostile_names` exists *because*
+this project renders files with spaces and Unicode in their names, and a
+filename with a newline counts as several lines through `ls` and as one file
+through a glob.
+
+**`install.sh` got the guard rather than the suppression the audit suggested.**
+Their read is right — `src` is checked non-empty four lines above, so shellcheck
+cannot see it — but `${apps:?}` is the form the tool asks for, self-documents,
+and means **`make lint` carries no suppressions at all**. A file of exceptions
+is a file people add to; a clean run means a new finding is a new defect.
+
+**`make shell` runs it, wired into `make lint`**, naming the tool when it is
+missing — D-136's pattern for D-136's reason.
+
+**And the README's stated numbers were counted by nothing**: 601 `#[test]`
+functions claimed against **646**, and 131 numbered decisions claimed — in
+**two** places — against 141. Both derived by `readme_claims.rs` now, both run
+against the stale README and seen to fail. The decision counter then caught
+**itself**: writing D-175 made it 142 and the test failed until the README said
+so, which is the whole point. `CLAUDE.md`'s own "558 tests" is **630 passed, 10
+ignored**.
+
+**`make gates` is 39 of 39; `make lint` now checks the workflows and the
+scripts.**
+
+
 ### State as of 2026-09-10 — the setting was saved, then lost, and nothing said so
 
 **D-171 — machine state is replaced, not overwritten, and a broken file is
@@ -1827,7 +1884,8 @@ exact thing the top of this file warns about.
 
 Run `make gates` first: **M0 8/8, M1 8/8, M2 23/23**, plus `cargo fmt --check`,
 `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test
---workspace` (558 tests). Then `cargo audit --deny warnings` (D-129), which is
+--workspace` (630 tests, 10 ignored — `make lint` also runs `shellcheck`
+since D-175). Then `cargo audit --deny warnings` (D-129), which is
 new and is the one check that can fail without the code changing.
 
 Each decision names its own reproduction, and most can be re-run in a scratch

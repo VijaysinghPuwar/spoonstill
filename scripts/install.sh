@@ -192,7 +192,11 @@ else
     apps="/Applications"
     [ -w "$apps" ] || apps="$HOME/Applications"
     mkdir -p "$apps"
-    rm -rf "$apps/$(basename "$src")"
+    # `src` is checked non-empty above and `apps` is one of two literals, so
+    # this cannot expand to `/` — but the guard is written rather than argued,
+    # because the argument lives four lines away and the cost of being wrong is
+    # the operator's Applications folder (D-175).
+    rm -rf "${apps:?}/$(basename "${src:?}")"
     cp -R "$src" "$apps/" || die "Could not copy the app into $apps."
 
     hdiutil detach "$mnt" -quiet 2>/dev/null || true

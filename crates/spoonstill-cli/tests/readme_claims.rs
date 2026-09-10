@@ -88,6 +88,97 @@ fn every_gate_count_in_the_readme_is_the_same_number() {
     );
 }
 
+/// Every `#[test]` in the tree, counted the way a reader would.
+///
+/// Walks `crates/` and `apps/` rather than asking `cargo`, so it needs no build
+/// and no test binary: the number the README states is *how many test functions
+/// are written down*, which is a fact about the source.
+fn test_functions() -> usize {
+    fn walk(dir: &Path, found: &mut usize) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // `target/` is build output, and a vendored copy of anything
+                // would be somebody else's tests.
+                if path.file_name().is_some_and(|n| n == "target") {
+                    continue;
+                }
+                walk(&path, found);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                *found += text
+                    .lines()
+                    .filter(|line| line.trim_start().starts_with("#[test]"))
+                    .count();
+            }
+        }
+    }
+    let mut found = 0;
+    walk(&root().join("crates"), &mut found);
+    walk(&root().join("apps"), &mut found);
+    found
+}
+
+/// D-175. Two more numbers this README states and nothing counted.
+///
+/// Measured at the time of writing: **601 claimed against 626 real**, and 131
+/// decisions claimed — in two separate places — against 136. Same shape as the
+/// gate count above, and the same reason it drifted: a number in prose is not
+/// checked by anything. Derived here so it cannot.
+#[test]
+fn the_readme_counts_the_tests_that_exist() {
+    let counted = test_functions();
+    let readme = read("README.md");
+    let phrase = format!("**{counted} `#[test]` functions**");
+    assert!(
+        readme.contains(&phrase),
+        "README.md should say {phrase:?}; it says: {:?}",
+        readme
+            .lines()
+            .find(|l| l.contains("`#[test]` functions"))
+            .unwrap_or("(no such line)"),
+    );
+}
+
+/// And the decision count, which is written **twice** — the trap
+/// `every_gate_count_in_the_readme_is_the_same_number` was added for.
+#[test]
+fn every_decision_count_in_the_readme_is_the_same_number() {
+    let counted = read("decisions.md")
+        .lines()
+        .filter(|line| {
+            line.starts_with("### D-")
+                && line
+                    .trim_start_matches("### D-")
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit())
+        })
+        .count();
+
+    let readme = read("README.md");
+    let mentions: Vec<&str> = readme
+        .lines()
+        .filter(|l| l.contains("numbered decisions"))
+        .collect();
+    assert!(
+        mentions.len() >= 2,
+        "the README used to state this number in two places; if that changed, \
+         this test should change with it: {mentions:?}"
+    );
+    let phrase = format!("{counted} numbered decisions");
+    for line in mentions {
+        assert!(
+            line.contains(&phrase),
+            "decisions.md holds {counted} numbered decisions, but the README says:\n  {line}",
+        );
+    }
+}
+
 /// The per-milestone table on the same page is the same claim, split three ways.
 #[test]
 fn the_readme_milestone_table_counts_the_same_gates() {

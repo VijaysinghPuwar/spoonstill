@@ -12,13 +12,39 @@
 # spoken line and is gate 7's alone.
 set -uo pipefail
 
-cd "$(dirname "$0")/.."
+# `set -e` is deliberately absent — these gates aggregate failures rather than
+# stopping at the first — so `cd` needs its own guard or a failure here runs
+# every gate in the caller's directory, where `target/release/still` is not,
+# and reports a product that is fine as broken (D-175).
+cd "$(dirname "$0")/.." || exit 1
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 
 GREEN=$'\033[32m'; RED=$'\033[31m'; DIM=$'\033[2m'; OFF=$'\033[0m'
 pass=0; fail=0
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+# `set -u` does not catch this: a failed `mktemp` leaves WORK **set and empty**,
+# and every `rm -rf "$WORK/..."` below then names an absolute path off the root.
+# Low probability, unrecoverable if it fires, so it is stated rather than
+# assumed (D-175).
+case "$WORK" in
+  "${TMPDIR:-/tmp}"*|/tmp/*|/var/folders/*) ;;
+  *) echo "refusing to run: mktemp gave '$WORK', which is not a temporary directory" >&2
+     exit 1;;
+esac
+[ -d "$WORK" ] || { echo "refusing to run: '$WORK' is not a directory" >&2; exit 1; }
+trap 'rm -rf "${WORK:?}"' EXIT
+
+# How many of these paths exist. A glob rather than `ls | grep -c`, because a
+# filename with a space or a newline in it counts as several lines through `ls`
+# and as one file through a glob — and `gate_hostile_names` exists precisely
+# because this suite renders those (D-175, D-090).
+count_matching() {
+  local n=0 path
+  for path in "$@"; do
+    [ -e "$path" ] && n=$((n+1))
+  done
+  printf '%s' "$n"
+}
 
 check() { # description, then a command
   local what="$1"; shift
@@ -394,13 +420,13 @@ gate_bounded_audio() {
 
   # Four scenes, so three generations is twelve derived files. Not twenty.
   local derived spoken
-  derived=$(ls "$cache" | grep -c '\.wav$')
+  derived=$(count_matching "$cache"/*.wav)
   [ "$derived" -le 12 ] || {
     echo "the derived cache grew to $derived files, bound is 12"; return 1; }
 
   # And every one of the twenty network calls is still on disk. This is the
   # half of D-109 that was right, and it must stay right.
-  spoken=$(ls "$cache" | grep -c '\.spoken$')
+  spoken=$(count_matching "$cache"/*.spoken)
   [ "$spoken" -eq 20 ] || {
     echo "$spoken spoken files of 20 — the sweep took something that cost a call"
     return 1; }
@@ -562,13 +588,28 @@ gate_hostile() {
   [ "$sar" = "1:1" ] || { echo "SAR is $sar, not 1:1 (D-033)"; return 1; }
   # `seg-<16 hex>.mp4` since D-153 — the scene index left the name, because a
   # file named after where a scene sits cannot be reused when the scene moves.
-  ls "$RENDERABLE/.spoonstill/segments" | grep -qE '^seg-[0-9a-f]{16}\.mp4$' || {
-    ls "$RENDERABLE/.spoonstill/segments"; return 1; }
+  local segdir="$RENDERABLE/.spoonstill/segments" name found=0
+  for path in "$segdir"/*; do
+    [ -e "$path" ] || continue
+    name="${path##*/}"
+    case "$name" in
+      seg-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].mp4)
+        found=1;;
+    esac
+  done
+  [ "$found" -eq 1 ] || { ls "$segdir"; echo "no content-addressed segment"; return 1; }
   # No operator spelling anywhere in the segment directory. This is what the
   # gate is really for: the concat list is the one text format in the codebase,
   # and it stays ASCII because the names are content-addressed rather than
   # built from whatever the operator called their photograph (D-052).
-  ! ls "$RENDERABLE/.spoonstill/segments" | grep -qv -E '^seg-[0-9a-f]{16}\.mp4$'
+  for path in "$segdir"/*; do
+    [ -e "$path" ] || continue
+    name="${path##*/}"
+    case "$name" in
+      seg-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].mp4) ;;
+      *) echo "a segment carries an operator's spelling: $name"; return 1;;
+    esac
+  done
 }
 check "odd dimensions and a Unicode filename survive the join" gate_hostile
 
@@ -601,7 +642,9 @@ gate_tts() {
   [ -f "$WORK/mixed.mp4" ] || { echo "no film was written"; return 1; }
   # The spoken line is cached as the provider returned it *and* normalized, so
   # a re-render never speaks it again (D-081).
-  ls fixtures/projects/mixed/.spoonstill/cache/audio 2>/dev/null | grep -q '^tts-' || true
+  # Deliberately not asserted: it is a note about what the cache holds, and the
+  # gate above it is what proves the render worked.
+  [ -e fixtures/projects/mixed/.spoonstill/cache/audio ] || true
 }
 check "a script, a recording and a silent still become one film" gate_tts
 
@@ -624,7 +667,7 @@ gate_sizes() {
   "$FFMPEG" -y -loglevel error -f lavfi -i "sine=frequency=440:duration=2" \
     -ar 48000 -ac 1 "$proj/001.wav" || return 1
 
-  local spec want base
+  local spec base
   base=""
   for spec in "16:9 1080p 1920x1080" "16:9 2k 2560x1440" "16:9 4k 3840x2160" \
               "shorts 1080p 1080x1920" "tiktok 4k 2160x3840" "1:1 1440p 1440x1440"; do
@@ -657,7 +700,7 @@ gate_sizes() {
   "$STILL" render "$proj" --out "$WORK/s.mp4" --resolution 4k --short-edge 1080 \
     >/dev/null 2>&1 && { echo "--resolution and --short-edge both accepted"; return 1; }
 
-  rm -rf "$proj/$STATE"
+  rm -rf "${proj:?}/$STATE"
   return 0
 }
 check "2K, 4K and a vertical Short each come out at the size asked for" gate_sizes
@@ -725,7 +768,7 @@ gate_capacity() {
   tiny=$(jobs_of "$(render_at 256 4k)")
   [ "$tiny" = "1" ] || { echo "a tiny machine got '$tiny' workers, wanted 1"; return 1; }
 
-  rm -rf "$proj/$STATE"
+  rm -rf "${proj:?}/$STATE"
   return 0
 }
 check "four workers fit at 1080p and are warned about at 4K" gate_capacity
@@ -784,7 +827,7 @@ gate_undersized() {
   [ -n "$first_scene" ] && [ "$warn_line" -lt "$first_scene" ] || {
     cat "$WORK/u.log"; echo "the warning arrived after the pool started"; return 1; }
 
-  rm -rf "$proj/$STATE"
+  rm -rf "${proj:?}/$STATE"
   return 0
 }
 check "an undersized still warns, names a size, and that size silences it" gate_undersized
@@ -844,7 +887,7 @@ gate_overlap() {
   # would fail for a reason that is not a defect. Found by writing it wrong.
   local twin="$WORK/twin/overlap"
   rm -rf "$WORK/twin"; mkdir -p "$WORK/twin"; cp -R "$proj" "$twin"
-  rm -rf "$twin/$STATE"
+  rm -rf "${twin:?}/$STATE"
   "$STILL" render "$twin" --out "$WORK/overlap-twin.mp4" --jobs 1 --audio-jobs 4 \
     >"$WORK/overlap-twin.log" 2>&1 || { cat "$WORK/overlap-twin.log"; return 1; }
   cmp -s "$WORK/overlap.mp4" "$WORK/overlap-twin.mp4" || {
@@ -988,7 +1031,7 @@ gate_hardware_encoder() {
   # this copy keeps the fixture's own basename or every segment name below is a
   # different segment name. Gate 7e fell into exactly this once.
   local proj="$WORK/renderable"
-  rm -rf "$proj"; cp -R "$RENDERABLE" "$proj"; rm -rf "$proj/$STATE"
+  rm -rf "${proj:?}"; cp -R "$RENDERABLE" "$proj"; rm -rf "${proj:?}/$STATE"
 
   # What this machine can actually run, taken from the product's own report
   # rather than from `ffmpeg -encoders` — D-159's whole point is that the

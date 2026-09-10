@@ -7067,6 +7067,67 @@ and the gate: `still new` not recording, and `default` recorded as a voice.
 
 
 
+### D-175 — A destructive harness fails closed, and a stated number is a counted one · Accepted
+
+Two housekeeping findings from the audit, taken together because they are one
+lesson: **the parts of this tree that no gate covers are where things rot.**
+D-136 already learned it once — `.github/` was the one corner nothing checked,
+and a workflow GitHub rejected ran no jobs at all. `scripts/` was the other
+corner.
+
+**`shellcheck -S warning scripts/*.sh` reported 15**, and the audit's read of
+which ones matter is right:
+
+| code | where | judged |
+|---|---|---|
+| SC2164 — `cd` with no guard | `m1-gates.sh:9`, `m2-gates.sh:15` | **the real one** |
+| SC2115 — `rm -rf` on an unguarded var | 5 in `m2-gates.sh`, 1 in `install.sh` | low odds, unrecoverable |
+| SC2010 — `ls \| grep` | 1 in `m1-gates.sh`, 5 in `m2-gates.sh` | harmless *here*, wrong in this suite |
+| SC2034 — an unused local | `m2-gates.sh` gate 7b | noise, and noise is the point |
+
+**The `cd` pair is the one that would actually fire.** `set -e` is deliberately
+absent from these scripts — they aggregate failures rather than stopping at the
+first — which is correct and is exactly why `cd` needs its own guard: a failure
+there runs every gate in the caller's directory, where `target/release/still` is
+not, and reports a product that is fine as broken.
+
+**`set -u` does not catch the `rm -rf` sites**, which is why they are worth the
+four characters. A failed `mktemp -d` leaves `WORK` **set and empty**, and every
+`rm -rf "$WORK/..."` then names an absolute path off the root. The mktemp result
+is now checked for being non-empty, a directory, and under the temporary root;
+every removal is `${WORK:?}` / `${proj:?}`.
+
+**The `ls | grep` six are harmless where they stand and wrong in this suite**,
+which is the whole argument for changing them: `gate_hostile_names` exists
+*because* this project renders files with spaces and Unicode in their names, and
+a filename with a newline counts as several lines through `ls` and as one file
+through a glob. Six globs, and a `count_matching` helper beside `check` so the
+counting is done once.
+
+**`install.sh` got the guard rather than a suppression.** The audit's read is
+correct — `src` is checked non-empty four lines above, so shellcheck simply
+cannot see it — and their advice was a `# shellcheck disable` with the reason.
+`${apps:?}/$(basename "${src:?}")` is better: it is the form the tool asks for,
+it self-documents, and it means **`make lint` carries no suppressions at all**.
+A file of exceptions is a file people add to; a clean run means a new finding is
+a new defect.
+
+**`make shell` runs it, wired into `make lint`** beside `make workflows`, and
+names the tool when it is missing — D-136's own pattern, for D-136's own reason.
+
+**And the README's stated numbers were counted by nothing.** 601 `#[test]`
+functions claimed against **646**; 131 numbered decisions claimed — in **two**
+places — against **141**. Same shape as the gate count `readme_claims.rs`
+already derives, and the same reason it drifted: a number in prose is checked by
+nothing. Both are derived now, the decision count in both places, which is the
+trap `every_gate_count_in_the_readme_is_the_same_number` was added for. Both
+tests were run against the stale README and seen to fail.
+
+**The alternative was to delete the numbers**, and it is defensible and cheaper.
+It is refused because this README's whole manner is to state a checkable number:
+removing them to avoid maintaining them would make the page less useful in order
+to make it easier to be right about.
+
 ### D-171 — Machine state is replaced, not overwritten, and a broken file is reported · Accepted
 
 `machine::load` was
