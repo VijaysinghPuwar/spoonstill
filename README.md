@@ -947,17 +947,24 @@ Working on it:
 ```bash
 make help       # every entry point
 make test       # the whole workspace
-make lint       # clippy with warnings denied, a format check, and the workflows
+make lint       # clippy denied, a format check, the workflows, and the scripts
 make fixtures   # synthesize the test media
 make gates      # every milestone's exit gates — the real state of the build
 make demo       # rebuild the GIF at the top, from a real render
 make tts-live   # exercise the voice provider against the real service
 make brand      # regenerate every logo asset from its one description
+make clean      # remove build output and the generated fixtures
 ```
 
 `make gates` is the honest answer to *"does this work?"*. It runs 39 checks
 across the three completed milestones and prints pass/fail for each. If all
 three are green, everything in this file is accurate.
+
+**A word on disk.** These gates render real media and the workspace builds six
+crates plus a Tauri app, so `target/` grows: **37 GB** on this machine, of which
+32 GB is `target/debug`, 2.6 GB `target/release`, and 1.0 GB the Windows
+cross-check (D-132). `make clean` takes all of it, and the generated fixtures
+with it — `make fixtures` puts those back in seconds.
 
 To see one render for yourself, which is faster than reading about it:
 

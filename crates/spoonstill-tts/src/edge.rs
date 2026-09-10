@@ -230,6 +230,33 @@ fn speak_timeout(characters: usize) -> Duration {
 /// This is **not** a protocol limit. `edge-tts` splits its own websocket
 /// payloads and knows the real byte ceiling far better than we do. This limit
 /// exists to bound what one failure costs.
+///
+/// ## One process per *line*, not per chunk — and the tax is 0.10 s
+///
+/// Read by an outside audit as "a subprocess for every text chunk", wanting a
+/// persistent process or a native Rust client. The framing is wrong and the
+/// recommendation reopens a settled decision.
+///
+/// For an ordinary narration line there is **exactly one piece** — nine
+/// thousand characters is about 8.7 minutes of speech — so this is a subprocess
+/// per line in every project this tool has ever rendered. Measured here:
+/// `edge-tts --help`, which is the whole process-plus-Python-import tax, is
+/// **0.10 s**; a real one-line speak, warm, is 0.51-0.58 s. So the tax is ~19%
+/// of a short call and less of a long one, and it is paid **once per distinct
+/// line ever**, because the speech cache is content-keyed (D-081, D-084) and a
+/// second render speaks nothing. Across a 500-scene cold render at
+/// `--audio-jobs 8` that is roughly six seconds, once, against D-154's measured
+/// 151-161 s for the whole film.
+///
+/// **D-081 took the alternative the other way, on the record**: the CLI is
+/// spawned rather than the protocol reimplemented. `edge-tts` has no daemon
+/// mode, so a persistent process would mean owning a protocol between
+/// spoonstill and a long-lived Python child to save six seconds per project.
+///
+/// **What would change the answer**, stated so it is checkable rather than
+/// dismissed: a provider that charges per request, or profiling that ever
+/// showed process startup above ~20% of a *cold* render's wall time. Either is
+/// an amendment to D-081, with a measurement, in the same commit.
 pub const CHUNK_CHARS: usize = 9_000;
 
 /// A line at or under this length that comes back with no audio has nothing

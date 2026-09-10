@@ -190,6 +190,54 @@ cargo build --release -p spoonstill-cli
 cargo run --release -p spoonstill-desktop
 ```
 
+### State as of 2026-09-10 — four places where the next audit finds a number instead of an invitation
+
+**No behaviour changed here.** Four comments and a README section, each carrying
+a measurement taken **on this machine in this session** rather than copied from
+the plan that proposed them — because a permanent comment asserting a number is
+worth exactly what the number is worth.
+
+**The caption `.clone()` is faster than not cloning**, which is the opposite of
+what an outside audit concluded from reading it. Three runs each, 4K, ms/cue:
+
+| variant | Punch | Classic |
+|---|---|---|
+| **`.clone()`, as shipped** | **58.3 / 58.6 / 58.8** | **44.8 / 45.1 / 45.6** |
+| `&[u8]` shared borrow | 62.9 / 63.0 / 63.1 | 48.6 / 48.6 / 48.7 |
+| `&mut Vec<u8>` from the entry | 70.3 / 73.3 / 75.1 | 52.9 / 53.0 / 53.1 |
+
+Borrowing costs **7.5%**; borrowing the way the obvious fix is written costs
+**17-23%**. The likely reason is that the owned local is provably not aliased
+with `out.a` so the inner maximum loop optimises — that part is a hypothesis and
+is labelled as one. The measurement is the fact. Reproduce with
+`cargo test --release -p spoonstill-media --test caption_bench -- --ignored`.
+
+**The subtitle band write is a low volume of large writes, not the reverse.**
+Read as "high volume of small file writes" wanting a named pipe. D-116's
+`MIN_CUE_SECONDS` bounds cues by duration, so an ordinary scene has one to
+three, each 1.28 MB at 1080p and 5.13 MB at 4K. Measured: **0.38 ms at best,
+1.66 ms mean** to write one, against **58.8 ms to draw** it — under 3% of the
+rasterization. And the proposed fix contradicts D-106 outright: *no path ever
+enters the filter graph* is the single reason this is the same design on both
+platforms.
+
+**`CHUNK_CHARS` is one process per line, not per chunk.** Nine thousand
+characters is ~8.7 minutes of speech, so every ordinary narration is one piece.
+Measured: the whole process-plus-Python-import tax is **0.10 s**, against a warm
+one-line speak of 0.51-0.58 s — and it is paid once per distinct line *ever*,
+because the cache is content-keyed. About six seconds across a 500-scene cold
+render, once. D-081 already took the "write it natively" alternative the other
+way; what would reopen it is written down beside the constant.
+
+**And `target/` is 37 GB here** — 32 debug, 2.6 release, 1.0 the Windows
+cross-check. `make clean` is in the README's command list now, next to
+`make gates`, which is what generates most of it.
+
+**`make gates` 39/39, `make lint` green (workflows and scripts), `cargo test
+--workspace` green.** The caption output is byte-identical, which D-130's own
+tests assert.
+
+
 ### State as of 2026-09-10 — the harness that runs `rm -rf` was checked by nothing
 
 **D-175 — a destructive harness fails closed, and a stated number is a counted

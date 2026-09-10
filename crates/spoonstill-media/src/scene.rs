@@ -215,6 +215,24 @@ impl Captions {
             return Ok(captions);
         };
 
+        // **A file per cue, and the write is not where the time goes.** Read by
+        // an outside audit as "a high volume of small file writes" wanting a
+        // named pipe; it is the opposite — a low volume of large ones. D-116's
+        // `MIN_CUE_SECONDS` bounds cues by duration, so an ordinary scene has
+        // one to three, each a full-width band: 1.28 MB at 1080p, 5.13 MB at 4K.
+        //
+        // Measured here: writing a 4K-sized band takes **0.38 ms at best and
+        // 1.66 ms on average**, against **58.8 ms to draw** that same band
+        // (`caption_bench`, 4K punch). Under 3% of the rasterization, which is
+        // itself a fraction of the encode. There is no pressure here to relieve.
+        //
+        // And the fix that was proposed contradicts D-106 outright: **no path
+        // ever enters the filter graph**, which is the single reason this is
+        // the same design on Windows and macOS. A POSIX FIFO and a Windows
+        // named pipe are different APIs with different lifetimes, and FFmpeg
+        // has one stdin, so several `rawvideo` inputs would need inherited
+        // descriptors `std::process` does not portably pass. A real
+        // cross-platform divergence, bought for under a millisecond a cue.
         for (index, cue) in spec.cues.iter().enumerate() {
             let image = caption::render_cue(&cue.text, spec.theme, spec.placement, output);
             let path = temporary.with_extension(format!("cap{index:02}.rgba"));

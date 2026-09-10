@@ -265,6 +265,30 @@ impl Mask {
         for dy in -r..=r {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let half = ((r * r - dy * dy) as f64).sqrt().floor() as usize;
+            // **The clone is deliberate and it is faster than not cloning.**
+            // Measured here, three runs each, 4K, ms per cue — an outside audit
+            // read this as an obvious waste and it is the opposite:
+            //
+            //   variant                        Punch            Classic
+            //   `.clone()`, as shipped         58.3/58.6/58.8   44.8/45.1/45.6
+            //   `&[u8]` shared borrow          62.9/63.0/63.1   48.6/48.6/48.7
+            //   `&mut Vec<u8>` from the entry  70.3/73.3/75.1   52.9/53.0/53.1
+            //
+            // So borrowing costs about 7.5%, and borrowing the way the obvious
+            // fix is written costs 17-23%. The likely reason is that the owned
+            // local is provably not aliased with `out.a`, so the inner maximum
+            // loop optimises, while a reference reached through a `HashMap` is
+            // not — that part is a hypothesis. The measurement is the fact, and
+            // it is the only part worth keeping.
+            //
+            // Reproduce with:
+            //   cargo test --release -p spoonstill-media --test caption_bench \
+            //     -- --ignored --nocapture
+            //
+            // If caption speed is ever worth attacking again, the same table
+            // says where: Punch and Classic are ten times Boxed and Band, and
+            // the two cheap themes are the two with no outline and no shadow.
+            // That is `dilate` and `shadow`, not this copy (D-130).
             let widened = cache
                 .entry(half)
                 .or_insert_with(|| self.widen_rows(half))
