@@ -587,6 +587,16 @@ pub fn render_project(
         });
     }
 
+    // Not a `Problem`, because it is not a fact about the folder: it depends on
+    // what *this run* asked for, and `still validate` cannot see `--voice`.
+    // Same placement as the geometry warning (D-145) and for the same reason —
+    // after the override that can silence it, before the pool that would bury
+    // it under progress output (D-163).
+    if let Some(detail) = unchosen_voice_warning(&project) {
+        sink.record(&Event::warn("render", "no voice chosen").with("detail", detail.clone()));
+        on_event(FilmEvent::Warned { detail });
+    }
+
     let tools = Tools::from_env();
 
     // Which FFmpeg made this film (D-151). One `-version` spawn per run, not
@@ -916,6 +926,50 @@ fn apply_voice_override(project: &mut crate::import::Project, options: &RenderPr
             }
         }
     }
+}
+
+/// The spoken scenes this run leaves to the renderer's own judgement (D-163).
+///
+/// By the time this is asked, [`apply_voice_override`] has run, so a scene's
+/// voice is either the one this run named or the one `project.yaml` did.
+/// `default` is neither: it is the word for *nobody has chosen* (D-086), and
+/// D-158 then picks a voice per line from the script that line is written in.
+///
+/// That rule is a **feature for one project and a trap across ten**. Reported
+/// as a workflow: one video cut into ten parts, ten project folders, and the
+/// voice remembered for some of them. Each render succeeds, each film is
+/// correct on its own, and the ten do not match — which is only discovered at
+/// the end, when the fix is nine more renders.
+///
+/// So it is a warning and never a refusal. `default` is a legal, documented,
+/// deliberately-supported answer, and D-158 exists because refusing to guess
+/// here makes a render *fail*. One line for the project, not one per scene —
+/// `undersized_sources`' rule (D-145), and for its reason: the fix is one
+/// setting, so restating it 500 times says nothing new 499 times.
+fn unchosen_voice_warning(project: &crate::import::Project) -> Option<String> {
+    let unchosen = project
+        .scenes
+        .iter()
+        .filter(|scene| match &scene.spec.source {
+            spoonstill_core::AudioSource::Tts { voice, .. } => {
+                let named = voice.0.trim();
+                named.is_empty() || named == crate::import::settings::DEFAULT_VOICE
+            }
+            _ => false,
+        })
+        .count();
+
+    if unchosen == 0 {
+        return None;
+    }
+
+    Some(format!(
+        "{unchosen} spoken scene{} name{} no voice, so each line is read in \
+         whatever voice its own script suggests — pass `--voice NAME`, or set \
+         `tts.voice:` in project.yaml, to keep several projects sounding the same",
+        if unchosen == 1 { "" } else { "s" },
+        if unchosen == 1 { "s" } else { "" },
+    ))
 }
 
 /// Replace the project's geometry with this run's, if it named one (D-143).
@@ -1766,6 +1820,91 @@ mod tests {
             scenes,
             problems: Vec::new(),
         }
+    }
+
+    /// A spoken scene with `voice: default` is the reported workflow (D-163).
+    ///
+    /// One line for the project, naming both fixes, and silent the moment
+    /// anybody has chosen — because a warning on every render of a perfectly
+    /// ordinary project is a warning people learn to scroll past, which is
+    /// D-129's lesson applied before the fact.
+    #[test]
+    fn a_project_that_names_no_voice_says_so_once() {
+        let root = scratch("unchosen-voice");
+        let mut unchosen = spoken_scene("001", "Part four.", "edge");
+        let mut second = spoken_scene("002", "The light had gone.", "edge");
+        for scene in [&mut unchosen, &mut second] {
+            if let AudioSource::Tts { voice, .. } = &mut scene.spec.source {
+                *voice = spoonstill_core::project::VoiceId(
+                    crate::import::settings::DEFAULT_VOICE.to_owned(),
+                );
+            }
+        }
+
+        let warning = unchosen_voice_warning(&project_of(&root, vec![unchosen, second]))
+            .expect("two scenes name no voice");
+
+        assert!(
+            warning.starts_with("2 spoken scenes name no voice"),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("--voice") && warning.contains("tts.voice"),
+            "both ways out have to be named, one per surface: {warning}"
+        );
+        assert_eq!(
+            warning.lines().count(),
+            1,
+            "one line for the project: {warning}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Silent whenever anybody has chosen, and whenever there is nothing to
+    /// speak. Four ways to be quiet, because the warning is worth having only
+    /// if it means something when it appears.
+    #[test]
+    fn a_voice_that_somebody_chose_is_not_warned_about() {
+        let root = scratch("chosen-voice");
+
+        // `spoken_scene` names en-US-AvaNeural, which is a choice.
+        assert_eq!(
+            unchosen_voice_warning(&project_of(
+                &root,
+                vec![spoken_scene("001", "Part four.", "edge")]
+            )),
+            None,
+            "a scene whose voice is named must not be warned about"
+        );
+
+        // A project with nothing to speak has no voice to choose.
+        assert_eq!(unchosen_voice_warning(&project_of(&root, Vec::new())), None);
+
+        // And the override is what silences it on the command line: this is
+        // the same function, asked after `apply_voice_override` has run.
+        let mut project = project_of(&root, vec![spoken_scene("001", "Part four.", "edge")]);
+        if let AudioSource::Tts { voice, .. } = &mut project.scenes[0].spec.source {
+            *voice = spoonstill_core::project::VoiceId(
+                crate::import::settings::DEFAULT_VOICE.to_owned(),
+            );
+        }
+        assert!(
+            unchosen_voice_warning(&project).is_some(),
+            "the defect state"
+        );
+
+        let options = RenderProjectOptions {
+            voice: Some("en-GB-RyanNeural".to_owned()),
+            ..RenderProjectOptions::for_project(&root)
+        };
+        apply_voice_override(&mut project, &options);
+        assert_eq!(
+            unchosen_voice_warning(&project),
+            None,
+            "`--voice` is exactly how an operator answers this warning, so it \
+             must not still be printed afterwards"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// D-002 in one test: the run stops before the pool, naming the provider,

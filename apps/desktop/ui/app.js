@@ -1172,6 +1172,9 @@ async function chooseVoice(id) {
   await refreshVoice();
   drawVoiceChoice();
   drawVoices();
+  // The voice is one of the things that can block Render, so choosing one has
+  // to release it — and clearing one has to put it back (D-163).
+  updateRender();
   // Clicking used to change nothing an operator could see: the row that was
   // already highlighted stayed highlighted, because it had been highlighted as
   // the project's default all along (D-091). And "Use the project default"
@@ -1272,6 +1275,16 @@ function renderBlocker() {
     return `${n} scene${n === 1 ? " needs" : "s need"} attention — see the list on Scenes.`;
   }
   if (outError) return outError;
+  // Asked once, not every time (D-163). This fires only when *nobody* has
+  // answered — no pick, no `tts.voice`, no fallback in Settings — so setting a
+  // fallback once ends it for every project on this machine, which is the
+  // reported workflow's actual fix. A project with nothing to speak is never
+  // asked: the voice would change no frame of it.
+  if (voiceState?.origin === "unchosen" && count("tts") > 0) {
+    return "No voice is chosen, so every line would be read in whatever voice "
+      + "its own script suggests. Pick one on Voice — or set a fallback in "
+      + "Settings, and you will not be asked again.";
+  }
   return "";
 }
 

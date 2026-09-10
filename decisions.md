@@ -6842,6 +6842,73 @@ exists to fix. Verified by adding one.
 project renders the same film — and what changed is which voice a *window*
 asks for, which no shell gate drives (D-131: there is no GUI automation here).
 
+### D-163 — The voice is asked for once, not every time and not never · Accepted
+
+D-162 made the unchosen state **visible** and made the fallback **work**. This
+is the other half of the answer to the same report: being told is not the same
+as being stopped, and the operator who has just been told is exactly the
+operator who is about to render ten parts in ten voices.
+
+**The window blocks, and only when nobody has answered at all.** Not "no voice
+picked in this project" — `renderBlocker` fires on `origin === "unchosen"`,
+which by D-162's precedence means no run pick, **and** no `tts.voice`, **and**
+no machine fallback. So one visit to Settings ends it for every project on the
+machine, forever. That is what makes this asking *once* rather than a step
+added to every render for the rest of the tool's life, which is what the
+reported fix would have been.
+
+**Scoped to projects that speak.** `count("tts") > 0`, because the voice
+changes no frame of a film made of supplied recordings, and holding one up over
+it would be a nuisance on every render of every recorded film. Checked in the
+one function that decides whether Render can run and says why (D-089) — a
+second `disabled = true` elsewhere would grey the button out with no sentence
+beside it, which is the defect D-089 was written for.
+
+**The message names the way to stop being asked**, not just the way to satisfy
+this one render. *"Pick one on Voice — or set a fallback in Settings, and you
+will not be asked again."* A block whose message only says "choose something"
+teaches the operator to choose something every time, which is the friction this
+decision exists to avoid.
+
+**The CLI warns and never refuses**, and that asymmetry is deliberate.
+`tts.voice: default` is a legal, documented, deliberately-supported answer:
+D-158 reads the script a line is written in and picks a voice for it, and that
+rule exists **because refusing to guess makes the render fail**. Making `still
+render DIR` fail without `--voice` would break every project already made,
+`make gates`, and D-158 itself. So the terminal gets one line, before the pool
+— D-145's placement, for D-144's reason: a warning printed under five minutes
+of progress output is a warning nobody reads.
+
+**It is not a `Problem`**, so `still validate` does not report it. A `Problem`
+is a fact about the folder, and this depends on what *this run* asked for:
+`still validate` cannot see `--voice`, so a warning there would fire on a
+project that is about to be rendered perfectly and would be exactly the kind of
+warning people learn to scroll past. Computed in `film.rs` after
+`apply_voice_override`, the same shape D-145 used for the geometry warning and
+for the same reason — it is recomputed after the thing that can silence it.
+
+**One line for the project, not one per scene.** `undersized_sources`' rule
+(D-145): the fix is one setting, so 500 copies of it say nothing new 499 times.
+
+**Gate 7h proves the wiring, which no unit test can.** The unit tests cover
+`unchosen_voice_warning` itself; what only a gate shows is that the sentence
+reaches a terminal, exactly once, before the pool, and that **both** documented
+answers silence it — `--voice` and `tts.voice:` — and that a project with
+nothing to speak is never asked. It asserts the *output* and never the exit
+code, deliberately: the warning is printed before `check_voice_service`, so on
+a machine with no `edge-tts` every render in the gate fails after printing it
+and every assertion still holds. Same bargain as gate 7 (D-020).
+
+Measured on this machine: two spoken scenes with no voice named warn once and
+render (780 KB); the same project with `--voice en-GB-RyanNeural` renders with
+no warning (785 KB — a different voice is a different film, which is D-107);
+`tts.voice:` in `project.yaml` silences it too. The window half was driven
+through the real `app.js` in node behind a stub DOM, both ways: with no
+fallback saved a spoken project is stopped and a recorded one is not, and with
+a fallback saved nothing is stopped at all.
+
+**M2 is 22 gates; `make gates` is 38.**
+
 
 
 ### D-162 — The graphics card can be asked to render, and is still not asked by default · Accepted

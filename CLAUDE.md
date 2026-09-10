@@ -240,13 +240,40 @@ two contract tests hold the Rust/JS seam and both were run against the unfixed
 code. **`make gates` is still 37** — nothing here changes what renders, and no
 shell gate drives the window (D-131).
 
-**Three steps of four remain, and they are the rest of the answer to the
-report:** ask *once* rather than every time (Render blocked in the window only
-when all four answers are empty; a `FilmEvent::Warned` line on the CLI, never a
-refusal); a "use for every project" control on the Voice row, so the fallback is
-settable from where voices are actually auditioned; and `still new` writing the
-fallback into the starter `project.yaml`, so each of ten parts records the voice
-it uses and is reproducible without depending on a machine setting.
+**D-163 — and then it is asked for once.** Being told is not the same as being
+stopped, and the operator who has just been told is the one about to render ten
+parts in ten voices. The window's `renderBlocker` fires on `origin ===
+"unchosen"`, which by D-162's precedence means no pick **and** no `tts.voice`
+**and** no fallback — so **one visit to Settings ends it for every project on
+the machine**. That is what makes it asking *once* rather than a step added to
+every render forever, which is what the reported fix would have been. Scoped to
+`count("tts") > 0`: the voice changes no frame of a film made of supplied
+recordings. The message names how to stop being asked, not just how to satisfy
+this render.
+
+**The CLI warns and never refuses, and the asymmetry is the point.**
+`tts.voice: default` is legal and deliberately supported — D-158 reads the
+script and picks a voice, and exists **because** refusing to guess makes a
+render fail. So the terminal gets one line before the pool (D-145's placement,
+D-144's reason). It is **not a `Problem`**: `still validate` cannot see
+`--voice`, so a warning there would fire on a project about to render perfectly.
+Computed in `film.rs` after `apply_voice_override`, recomputed after the thing
+that silences it — D-145's shape exactly.
+
+**Gate 7h proves the wiring, which the unit tests cannot**, and asserts the
+*output* and never the exit code: the warning is printed before
+`check_voice_service`, so on a machine with no `edge-tts` every render in it
+fails after printing and every assertion still holds (gate 7's bargain, D-020).
+Measured: two unchosen scenes warn once and render; `--voice` silences it;
+`tts.voice:` silences it; a recorded project is never asked. The window half was
+driven through the real `app.js` in node behind a stub DOM, both ways.
+**M2 is 22 gates; `make gates` is 38.**
+
+**Two steps of four remain:** a "use for every project" control on the Voice
+row, so the fallback is settable from where voices are actually auditioned
+rather than one level up under Settings; and `still new` writing the fallback
+into the starter `project.yaml`, so each of ten parts records the voice it uses
+and is reproducible without depending on a machine setting.
 
 ### State as of 2026-09-06 — the bundle was describing an FFmpeg that was not there
 
@@ -2390,10 +2417,10 @@ touching `Backoff`, `wait_until`'s loop, `probe_jobs`, or the `Sync` bound on
 `MediaCheck`**, **D-150 before touching `Ingested::summary`, `unreadable`,
 `human_size`, `arrange::Moved`, or a cited D-number**, **D-151 before touching
 `Spoken::voice`, `tools::version_line`, the "film complete" event's fields, or
-the FFmpeg version line in this file**, **D-162 before touching
+the FFmpeg version line in this file**, **D-162 and D-163 before touching
 `resolve_voice`, `VoiceOrigin`, the `voice_choice` command, `refreshVoice`,
-`VOICE_MARK`, or anything that decides or displays which voice a render
-uses**, **D-161 before touching
+`VOICE_MARK`, `renderBlocker`, `unchosen_voice_warning`, or anything that
+decides, displays, or blocks on which voice a render uses**, **D-161 before touching
 `graphics_summary`, `version_output`'s failure arm, or anything that reports a
 missing FFmpeg in the diagnostics bundle**, **D-152 before touching
 `TEXT_EXTENSIONS`, `POSITIONAL_TEXT_EXTENSIONS` or `ingest::assign`**, **D-153

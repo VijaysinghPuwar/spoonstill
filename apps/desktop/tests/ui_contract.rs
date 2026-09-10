@@ -398,6 +398,54 @@ fn the_page_has_a_word_for_every_origin_rust_can_return() {
     }
 }
 
+/// A render nobody chose a voice for is stopped, once, and told why (D-163).
+///
+/// `renderBlocker` is the only thing that decides whether Render can run and
+/// the only thing that says why (D-089), so the check belongs in it and
+/// nowhere else — a second `disabled = true` somewhere would grey the button
+/// out with no sentence beside it, which is the defect D-089 was written for.
+///
+/// Two halves, and the second is the one that keeps this from being a nuisance:
+/// a project with nothing to speak must not be asked for a voice, because the
+/// voice would change no frame of it.
+#[test]
+fn a_render_with_no_voice_chosen_is_stopped_and_told_why() {
+    let js = code_only(&read("app.js"));
+
+    let at = js
+        .find("function renderBlocker()")
+        .expect("nothing decides whether a render can start");
+    let body = &js[at..js.len().min(at + 1400)];
+
+    assert!(
+        body.contains("\"unchosen\""),
+        "a render can start with nobody having chosen a voice — the reported \
+         defect, in the one function that could stop it"
+    );
+    assert!(
+        body.contains("count(\"tts\")"),
+        "the block is not scoped to projects that speak, so a film of supplied \
+         recordings would be held up over a voice that changes no frame of it"
+    );
+    assert!(
+        body.contains("Settings"),
+        "the block does not say how to stop being asked, which is the whole \
+         difference between asking once and asking every time"
+    );
+
+    // And choosing one releases it. Without this the operator does exactly what
+    // the sentence tells them to and the button stays grey.
+    let at = js
+        .find("async function chooseVoice(")
+        .expect("choosing a voice is gone");
+    let choose = &js[at..js.len().min(at + 900)];
+    assert!(
+        choose.contains("updateRender()"),
+        "choosing a voice does not re-ask whether Render can run, so the \
+         button stays disabled after the operator has fixed it"
+    );
+}
+
 /// The traffic-light reservation is macOS's, and it says so.
 ///
 /// `titleBarStyle: "Overlay"` is macOS-only — Tauri's `title_bar_style` is

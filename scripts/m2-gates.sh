@@ -1077,6 +1077,73 @@ gate_hardware_encoder() {
 check "hardware encodes a different film and leaves every software segment reusable" \
   gate_hardware_encoder
 
+# --- gate 7i: a project nobody chose a voice for says so, once --------------
+# D-163. Reported as a workflow: one video cut into ten parts, ten folders, and
+# the voice remembered for some of them. Each render succeeds and the ten films
+# do not match, which is discovered at the end when the fix is nine re-renders.
+#
+# A warning and never a refusal: `default` is a legal, documented answer, and
+# D-158 exists because refusing to guess here makes a render *fail*.
+#
+# The unit tests cover `unchosen_voice_warning` itself. What only a gate can
+# show is that it is **wired** — that the sentence reaches an operator's
+# terminal, before the pool, and that the two documented ways of answering it
+# both actually silence it.
+#
+# Deliberately machine-independent: the warning is printed before
+# `check_voice_service`, so this asserts the *output* and never the exit code.
+# On a machine with no `edge-tts` every render below fails after printing it,
+# and every assertion here still holds — the other half of D-020's bargain,
+# same as gate 7.
+gate_voice_unchosen() {
+  local proj="$WORK/unchosen"
+  rm -rf "$proj"; mkdir -p "$proj"
+  cp fixtures/generated/land.jpg "$proj/001.jpg" || return 1
+  cp fixtures/generated/port.jpg "$proj/002.jpg" || return 1
+  printf 'Part four begins here.' > "$proj/001.txt"
+  printf 'And this is the second scene.' > "$proj/002.txt"
+
+  local out
+  out=$("$STILL" render "$proj" --out "$WORK/un.mp4" 2>&1)
+
+  grep -q 'warning: 2 spoken scenes name no voice' <<<"$out" || {
+    echo "$out"; echo "two unchosen scenes did not warn"; return 1; }
+  # One line for the project, not one per scene (D-145's rule): 500 scenes
+  # must not print 500 copies of a fix that is one setting.
+  [ "$(grep -c 'name no voice' <<<"$out")" -eq 1 ] || {
+    echo "$out"; echo "the warning was printed more than once"; return 1; }
+  # Both ways out are named, because the two control surfaces answer it
+  # differently and the message is read on only one of them.
+  grep -q -- '--voice' <<<"$out" && grep -q 'tts.voice' <<<"$out" || {
+    echo "$out"; echo "the warning named no way to answer it"; return 1; }
+
+  # And answering it works. Either spelling, and neither may still warn —
+  # a warning that survives its own fix is worse than no warning.
+  out=$("$STILL" render "$proj" --out "$WORK/un2.mp4" --voice en-GB-RyanNeural 2>&1)
+  grep -q 'name no voice' <<<"$out" && {
+    echo "$out"; echo "--voice did not silence it"; return 1; }
+
+  printf 'tts:\n  voice: en-GB-RyanNeural\n' > "$proj/project.yaml"
+  out=$("$STILL" render "$proj" --out "$WORK/un3.mp4" 2>&1)
+  grep -q 'name no voice' <<<"$out" && {
+    echo "$out"; echo "tts.voice in project.yaml did not silence it"; return 1; }
+
+  # A project with nothing to speak has no voice to choose, and being asked
+  # for one would be a nuisance on every render of every recorded film.
+  local silent="$WORK/unchosen-silent"
+  rm -rf "$silent"; mkdir -p "$silent"
+  cp fixtures/generated/land.jpg "$silent/001.jpg" || return 1
+  "$FFMPEG" -y -loglevel error -f lavfi -i "sine=frequency=440:duration=1" \
+    -ar 48000 -ac 1 "$silent/001.wav" || return 1
+  out=$("$STILL" render "$silent" --out "$WORK/un4.mp4" 2>&1)
+  grep -q 'name no voice' <<<"$out" && {
+    echo "$out"; echo "a project with nothing to speak was asked for a voice"; return 1; }
+
+  return 0
+}
+check "a project nobody chose a voice for says so once, and can answer it" \
+  gate_voice_unchosen
+
 # --- gates 8 and 9: the two cargo gates plan.md names -----------------------
 check "cargo test -p spoonstill-app validation" \
   cargo test --release -p spoonstill-app validation
