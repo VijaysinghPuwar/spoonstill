@@ -298,7 +298,7 @@ own decisions. Where a slice is done, the exit gate it satisfies is named.
 |---|---|---|
 | **1. The pure domain** | `spoonstill_core::path_safety` + `spoonstill_core::project`: containment, the scene model, and every validation rule that needs no disk. D-054, D-055. | ✅ 2026-08-26 — satisfies `cargo test -p spoonstill-core path_safety` |
 | **2. Import and `still validate`** | `project.yaml` and the CSV manifest, convention-mode stem pairing, path resolution and media probing merged into one problem list, `still validate` printing it. D-056. | ✅ 2026-08-26 — satisfies `still validate fixtures/projects/mixed/` |
-| **3. The three audio sources, and `still render`** | `AudioSource::resolve()` → `(normalized_path, Duration)`: ingest normalization to 48 kHz stereo, `ffprobe` on the normalized artifact, generated silence. Then `still render DIR` over a whole project — **parallel**, with two bounded pools. D-075, D-076, D-077, D-078. | ✅ 2026-08-26 — `make gates-m2` is 20/20 |
+| **3. The three audio sources, and `still render`** | `AudioSource::resolve()` → `(normalized_path, Duration)`: ingest normalization to 48 kHz stereo, `ffprobe` on the normalized artifact, generated silence. Then `still render DIR` over a whole project — **parallel**, with two bounded pools. D-075, D-076, D-077, D-078. | ✅ 2026-08-26 — `make gates-m2` is 23/23 |
 | **4. Speech behind a trait** | `spoonstill-tts`: the `Provider` trait, typed settings and errors, and the `edge` implementation — `edge-tts` through the one process boundary, cached under `hash(text, provider, voice, settings, profile)`. `still voices`, `--voice`. D-081, D-082. ElevenLabs is deferred, not cancelled. | ✅ 2026-08-26 — gate 7 renders `mixed/` |
 | **+ Getting media in** | Not in the original four. `spoonstill_app::ingest`, `still new`, `still add`: the operator drops what they have and the program names and pairs it. D-080. | ✅ 2026-08-26 |
 
@@ -423,10 +423,17 @@ Slice 4 notes:
 
 ### Exit gates
 
-`make gates-m2` runs all of these. **20/20 pass as of 2026-09-04**, slice 4
+`make gates-m2` runs all of these. **23/23 pass as of 2026-09-10**, slice 4
 included, and D-143's size and shape gate, D-144's capacity gate, D-145's
-undersized-source gate, D-146's overlap gate, D-147's audio-cache bound and D-148's
-activity-log gate with them.
+undersized-source gate, D-146's overlap gate, D-147's audio-cache bound, D-148's
+activity-log gate, D-154's `project.yaml` mtime gate, D-162's hardware-encoder
+gate and D-167's unchosen-voice gate with them.
+
+**Gate 7h was red on macOS from the day it was written until D-172**, and green
+on exactly one machine: it pinned six segment filenames taken on Windows, over
+fixtures that are generated locally. The cross-build promise it was reaching for
+is a golden vector in `film.rs` now. A gate that cannot pass on the machine the
+author uses is a gate people learn to ignore.
 
 ```bash
 still validate fixtures/projects/mixed/     # 3 scenes, 3 sources, 0 warnings
