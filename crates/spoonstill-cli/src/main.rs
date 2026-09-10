@@ -274,7 +274,7 @@ struct VoicesArgs {
     /// A fallback, never a write: `project.yaml` is an input (D-013), so a
     /// project that asks for a voice keeps it and `--voice` on a single render
     /// still wins. This is the answer to ten parts of one film in ten folders
-    /// (D-164).
+    /// (D-168).
     #[arg(long = "use", value_name = "VOICE", conflicts_with = "forget")]
     use_voice: Option<String>,
 
@@ -951,7 +951,7 @@ fn list_voices(args: &VoicesArgs) -> Result<(), String> {
         }
         shown += 1;
         // Which one this machine falls back to, marked where the operator is
-        // already looking — the terminal half of D-162's rule that a voice
+        // already looking — the terminal half of D-166's rule that a voice
         // says who chose it.
         let mark = if fallback.as_deref() == Some(voice.id.as_str()) {
             " *"
@@ -1243,7 +1243,7 @@ fn render_project(args: RenderArgs) -> Result<(), String> {
         keep_cache: args.keep_cache,
         voice: args.voice.clone(),
         // This machine's standing answer, for the scenes that name none
-        // (D-164). Not folded into `voice` above it: that would overrule a
+        // (D-168). Not folded into `voice` above it: that would overrule a
         // project's own `tts.voice`, which is the one thing a fallback must
         // never do. `apply_voice_override` holds the precedence.
         fallback_voice: spoonstill_app::machine::load().default_voice,

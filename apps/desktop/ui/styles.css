@@ -355,7 +355,7 @@ body {
 
 .rail-fact .v.mono { font-size: 11px; }
 
-/* Who chose the voice, under the voice. D-162. */
+/* Who chose the voice, under the voice. D-166. */
 .rail-fact .w {
   font-size: 10.5px;
   color: var(--ink-3);
@@ -971,11 +971,11 @@ button.small { padding: 3px 9px; font-size: 11px; }
 .chosen-tag.on { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent); }
 
 /* "Nobody chose this" is not a failure — a render in the provider's own voice
-   is a legal render — so it is warned, not marked bad. D-162. */
+   is a legal render — so it is warned, not marked bad. D-166. */
 .chosen-tag.unchosen { border-color: var(--warn); color: var(--warn); }
 
 /* The pin, when this voice is already the machine's. Same accent as a chosen
-   row, because it is the same kind of fact: somebody decided this. D-164. */
+   row, because it is the same kind of fact: somebody decided this. D-168. */
 #pin-voice.on {
   border-color: var(--accent-line);
   background: var(--accent-soft);

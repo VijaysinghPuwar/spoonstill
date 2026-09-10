@@ -192,14 +192,14 @@ cargo run --release -p spoonstill-desktop
 
 ### State as of 2026-09-09 — the fallback voice was saved, displayed, and ignored
 
-**D-162 — a voice says who chose it.** Reported as a workflow, not a bug: *ten
+**D-166 — a voice says who chose it.** Reported as a workflow, not a bug: *ten
 parts of one video, ten projects, and in a hurry I forget to change the voice.*
 The proposed fix was to abolish the default and require a pick before every
 render. That is refused — it prevents *forgetting to change* the voice and not
 *choosing differently*, so the failure that actually costs a re-render survives,
 and the cost lands on every render forever, including the CLI, where it would
 have to make `still render DIR` fail without `--voice` and break D-158. Read
-D-162 for the whole argument before reopening it.
+D-166 for the whole argument before reopening it.
 
 **What the report actually found is a defect, and it is not the one described.**
 D-092's machine fallback voice — *set one voice in Settings and every project
@@ -240,10 +240,10 @@ two contract tests hold the Rust/JS seam and both were run against the unfixed
 code. **`make gates` is still 37** — nothing here changes what renders, and no
 shell gate drives the window (D-131).
 
-**D-163 — and then it is asked for once.** Being told is not the same as being
+**D-167 — and then it is asked for once.** Being told is not the same as being
 stopped, and the operator who has just been told is the one about to render ten
 parts in ten voices. The window's `renderBlocker` fires on `origin ===
-"unchosen"`, which by D-162's precedence means no pick **and** no `tts.voice`
+"unchosen"`, which by D-166's precedence means no pick **and** no `tts.voice`
 **and** no fallback — so **one visit to Settings ends it for every project on
 the machine**. That is what makes it asking *once* rather than a step added to
 every render forever, which is what the reported fix would have been. Scoped to
@@ -269,7 +269,7 @@ Measured: two unchosen scenes warn once and render; `--voice` silences it;
 driven through the real `app.js` in node behind a stub DOM, both ways.
 **M2 is 22 gates; `make gates` is 38.**
 
-**D-164 — and the setting it all rests on was somewhere the CLI could not
+**D-168 — and the setting it all rests on was somewhere the CLI could not
 reach.** Setting out to put a "use for every project" button on the Voice
 screen found the deeper reason D-092's fallback had never run: `AppSettings`
 was written to Tauri's `app_config_dir()` — `com.spoonstill.desktop/` — while
@@ -281,7 +281,7 @@ exist.*
 
 `spoonstill_app::machine` is the one file now — `settings.yaml` beside
 `runs.csv`, YAML because `serde_yaml_ng` is already here for `project.yaml` and
-that is the format an operator has already read. A pre-D-164 `app-settings.json`
+that is the format an operator has already read. A pre-D-168 `app-settings.json`
 is **adopted once**, as a read rather than a move.
 
 **`resolve_voice` lasted one session in `apps/desktop`.** The fallback is read
@@ -316,7 +316,7 @@ round it would have passed without the fallback doing anything (D-154). Two
 mutations caught: `still render` not reading the setting, and the fallback
 folded into `voice`. **`make gates` is still 38.**
 
-**D-165 — and a new project records the voice it was made with.** D-164's
+**D-169 — and a new project records the voice it was made with.** D-168's
 fallback keeps ten folders matched *while the machine keeps that setting*.
 Change it — a different film, a new laptop — and the ten stop matching on the
 next render of any of them, silently, because none of them says anything about
@@ -325,7 +325,7 @@ at the moment the folder is made, so the folder says what it sounds like.
 
 Only when there is an answer: no fallback means no `tts:` block, and `default`
 is refused explicitly, because writing it down would record the absence of a
-decision as though it were one (D-086) and would stop D-163 asking. Still
+decision as though it were one (D-086) and would stop D-167 asking. Still
 D-153's narrow exception on D-153's terms — nothing touches a file that exists,
 `add_media` writes none, and the starter is the fewest keys that answer a
 question the folder cannot answer for itself.
@@ -352,7 +352,7 @@ a **second** fresh `HOME` so it cannot pass by inheriting the first's state.
 
 **All four steps of the reported workflow are done.** What is deliberately not
 built is the operator's original proposal — no default voice at all, a manual
-pick before every render — and D-162 records why in full: it prevents forgetting
+pick before every render — and D-166 records why in full: it prevents forgetting
 to change the voice and not choosing differently, and would make `still render
 DIR` fail without `--voice`, breaking every project already made and D-158.
 
@@ -2498,7 +2498,7 @@ touching `Backoff`, `wait_until`'s loop, `probe_jobs`, or the `Sync` bound on
 `MediaCheck`**, **D-150 before touching `Ingested::summary`, `unreadable`,
 `human_size`, `arrange::Moved`, or a cited D-number**, **D-151 before touching
 `Spoken::voice`, `tools::version_line`, the "film complete" event's fields, or
-the FFmpeg version line in this file**, **D-162, D-163, D-164 and D-165 before touching
+the FFmpeg version line in this file**, **D-166, D-167, D-168 and D-169 before touching
 `ingest::starter_settings`, `create_project_with`, and
 `spoonstill_app::voice`, `spoonstill_app::machine`, `VoiceOrigin`, the
 `voice_choice` command, `refreshVoice`, `VOICE_MARK`, `renderBlocker`,

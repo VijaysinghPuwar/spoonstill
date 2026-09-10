@@ -485,7 +485,7 @@ gate_reorder() {
   # And `still new` says which rule it made the project under, so a folder is
   # not silently on the old one forever.
   # HOME redirected because `still new` reads this machine's fallback voice
-  # since D-165: without it, what this gate creates would depend on whoever is
+  # since D-169: without it, what this gate creates would depend on whoever is
   # running it.
   rm -rf "$WORK/reorder-fresh" "$WORK/reorder-home"; mkdir -p "$WORK/reorder-home"
   HOME="$WORK/reorder-home" "$STILL" new "$WORK/reorder-fresh" "$media/p1.jpg" \
@@ -1082,7 +1082,7 @@ check "hardware encodes a different film and leaves every software segment reusa
   gate_hardware_encoder
 
 # --- gate 7i: a project nobody chose a voice for says so, once --------------
-# D-163. Reported as a workflow: one video cut into ten parts, ten folders, and
+# D-167. Reported as a workflow: one video cut into ten parts, ten folders, and
 # the voice remembered for some of them. Each render succeeds and the ten films
 # do not match, which is discovered at the end when the fix is nine re-renders.
 #
@@ -1122,7 +1122,7 @@ gate_voice_unchosen() {
     && grep -q 'tts.voice' <<<"$out" || {
     echo "$out"; echo "the warning named no way to answer it"; return 1; }
 
-  # And the third way out works, which is the whole of D-164: a fallback set
+  # And the third way out works, which is the whole of D-168: a fallback set
   # once, on this machine, answers a project that names nothing — without
   # overruling one that names its own. HOME is redirected so this asserts the
   # rule and not whatever the machine running it happens to be set to.
@@ -1142,7 +1142,7 @@ gate_voice_unchosen() {
   grep -qE 'names? no voice' <<<"$out" && {
     echo "$out"; echo "--voice did not silence it"; return 1; }
 
-  # And the third way out works, which is the whole of D-164: a fallback set
+  # And the third way out works, which is the whole of D-168: a fallback set
   # once, on this machine, answers a project that names nothing.
   #
   # Deliberately **before** the `project.yaml` step below, and in a voice none
@@ -1191,7 +1191,7 @@ gate_voice_unchosen() {
   # And a project made while a fallback is set records it, so it keeps that
   # voice after the machine changes its mind — which is what keeps ten parts of
   # one film matched a month later, on a machine that has never heard of this
-  # one (D-165).
+  # one (D-169).
   local made="$WORK/unchosen-made"
   rm -rf "$made"
   printf 'A line to speak.' > "$WORK/unchosen-line.txt"

@@ -96,11 +96,11 @@ let providerDefault = "";
 // The machine's fallback voice, from Settings. Null means "the provider's own".
 // Only the Settings screen fills this, and only for its own <select> — the
 // *rule* reads the setting in Rust, because a page that has not opened Settings
-// used to hold `null` here and silently ignore the fallback (D-162).
+// used to hold `null` here and silently ignore the fallback (D-166).
 let appDefaultVoice = null;
 
 // The voice the next render will use and who chose it, as Rust resolved it:
-// `{ voice, origin, overrideForRender, said, detail }` (D-162). Null until the
+// `{ voice, origin, overrideForRender, said, detail }` (D-166). Null until the
 // first `refreshVoice()`. Everything that names a voice reads this, including
 // the render request — so what is shown and what is sent cannot disagree.
 let voiceState = null;
@@ -405,7 +405,7 @@ async function load(path) {
   }
   show("app");
   // Before the first draw, because the rail and the Voice screen both name a
-  // voice and neither can name one until Rust has resolved it (D-162).
+  // voice and neither can name one until Rust has resolved it (D-166).
   await refreshVoice();
   draw();
   // Not awaited, for the same reason the FFmpeg check below is not: the two
@@ -969,7 +969,7 @@ const VOICE_MARK = {
   unchosen: "Nobody chose",
 };
 
-// Ask Rust which voice the next render uses and who chose it (D-162).
+// Ask Rust which voice the next render uses and who chose it (D-166).
 //
 // The page used to answer this itself, in two places that had to agree — the
 // Render summary read `effectiveVoice()` and the render request built
@@ -1131,7 +1131,7 @@ function drawVoices() {
     // A highlight alone could not tell "you picked this" from "this is what
     // project.yaml already said", which are different facts and looked
     // identical. Each one now says which it is, in a word (D-091) — and there
-    // are four such facts, not two, which is what D-162 added: the machine's
+    // are four such facts, not two, which is what D-166 added: the machine's
     // fallback, and nobody having chosen at all.
     const isCurrent = current !== "" && voice.id === current;
     if (isCurrent) li.classList.add(origin === "run" ? "on" : "is-default");
@@ -1173,13 +1173,13 @@ async function chooseVoice(id) {
   drawVoiceChoice();
   drawVoices();
   // The voice is one of the things that can block Render, so choosing one has
-  // to release it — and clearing one has to put it back (D-163).
+  // to release it — and clearing one has to put it back (D-167).
   updateRender();
   // Clicking used to change nothing an operator could see: the row that was
   // already highlighted stayed highlighted, because it had been highlighted as
   // the project's default all along (D-091). And "Use the project default"
   // used to promise project.yaml even when project.yaml named nothing — the
-  // answer it lands on is whatever Rust says it lands on (D-162).
+  // answer it lands on is whatever Rust says it lands on (D-166).
   const voice = voices.find((v) => v.id === effectiveVoice());
   const named = voice ? voiceName(voice) : effectiveVoice();
   setStatus(
@@ -1210,7 +1210,7 @@ function drawVoiceChoice() {
   // Four answers, four tags. This used to read "From project.yaml" for every
   // one of the three that are not a run override — a false statement about a
   // file, on the screen whose whole job is to say whose voice you will hear
-  // (D-162). `chosen-why` carries the same fact as something to act on.
+  // (D-166). `chosen-why` carries the same fact as something to act on.
   const origin = voiceState?.origin ?? "unchosen";
   const tag = el("chosen-tag");
   tag.textContent = voiceState?.said ?? "";
@@ -1221,7 +1221,7 @@ function drawVoiceChoice() {
 
   el("voice-default").disabled = !chosenVoice;
   // The rail is what an operator reads at the moment they reach for Render, so
-  // it is the one place "nobody chose this" matters most (D-162).
+  // it is the one place "nobody chose this" matters most (D-166).
   el("rail-voice").textContent = voice
     ? `${voiceName(voice)} · ${languageOf(voice.locale)}`
     : current || "none chosen";
@@ -1231,7 +1231,7 @@ function drawVoiceChoice() {
 }
 
 // The machine's fallback, offered where the operator is already choosing a
-// voice (D-164). It lived only under Settings, one level up and behind Home,
+// voice (D-168). It lived only under Settings, one level up and behind Home,
 // which is a long way from the screen where somebody has just found the voice
 // they want for all ten parts of their film.
 //
@@ -1266,7 +1266,7 @@ async function pinVoice() {
     drawVoiceChoice();
     drawVoices();
     // Clearing it can put a project back into "nobody chose", which is a state
-    // Render is held on (D-163) — so the button has to be re-asked here too.
+    // Render is held on (D-167) — so the button has to be re-asked here too.
     updateRender();
     setStatus(voiceState?.detail ?? "");
   } catch (error) {
@@ -1322,7 +1322,7 @@ function renderBlocker() {
     return `${n} scene${n === 1 ? " needs" : "s need"} attention — see the list on Scenes.`;
   }
   if (outError) return outError;
-  // Asked once, not every time (D-163). This fires only when *nobody* has
+  // Asked once, not every time (D-167). This fires only when *nobody* has
   // answered — no pick, no `tts.voice`, no fallback in Settings — so setting a
   // fallback once ends it for every project on this machine, which is the
   // reported workflow's actual fix. A project with nothing to speak is never
@@ -1513,7 +1513,7 @@ async function render() {
   if (!project || rendering) return;
   // Both standing answers re-asked at the moment of use, not at the moment
   // they were last drawn: the fallback voice can be changed in Settings while
-  // this project is open (D-162).
+  // this project is open (D-166).
   await refreshVoice();
   await refreshOutput();
   if (outError) {
@@ -1610,7 +1610,7 @@ async function render() {
         // machine's fallback when the project names none. Never written back
         // to project.yaml (D-013, D-092). Null hands the question to the
         // renderer, which reads project.yaml and then D-158's script rule.
-        // The same object the Render summary above was drawn from (D-162).
+        // The same object the Render summary above was drawn from (D-166).
         voice: voiceState?.overrideForRender ?? null,
         outDir: el("out-dir").value,
         outName: el("out-name").value,

@@ -83,7 +83,7 @@ pub struct RenderProjectOptions {
     /// Take the lock even if another run appears to hold it.
     pub force: bool,
     /// The voice for scenes that name none — the machine's fallback (D-092,
-    /// D-164), which is not an override: a project that asks for a voice keeps
+    /// D-168), which is not an override: a project that asks for a voice keeps
     /// it, and so does a `--voice` on the same run.
     ///
     /// The window leaves this `None` and passes its already-resolved answer in
@@ -602,7 +602,7 @@ pub fn render_project(
     // what *this run* asked for, and `still validate` cannot see `--voice`.
     // Same placement as the geometry warning (D-145) and for the same reason —
     // after the override that can silence it, before the pool that would bury
-    // it under progress output (D-163).
+    // it under progress output (D-167).
     if let Some(detail) = unchosen_voice_warning(&project) {
         sink.record(&Event::warn("render", "no voice chosen").with("detail", detail.clone()));
         on_event(FilmEvent::Warned { detail });
@@ -932,7 +932,7 @@ fn apply_voice_override(project: &mut crate::import::Project, options: &RenderPr
             // D-092's precedence, for one scene, in the one place the render
             // path expresses it: this run's voice, then the scene's own, then
             // the machine's fallback. `resolve` is the same function the
-            // window draws its Voice screen from (D-162, D-164), so a screen
+            // window draws its Voice screen from (D-166, D-168), so a screen
             // that promises a voice and a render that uses another one cannot
             // happen by one of them being edited alone.
             let choice = crate::voice::resolve(
@@ -951,7 +951,7 @@ fn apply_voice_override(project: &mut crate::import::Project, options: &RenderPr
     }
 }
 
-/// The spoken scenes this run leaves to the renderer's own judgement (D-163).
+/// The spoken scenes this run leaves to the renderer's own judgement (D-167).
 ///
 /// By the time this is asked, [`apply_voice_override`] has run, so a scene's
 /// voice is either the one this run named or the one `project.yaml` did.
@@ -988,7 +988,7 @@ fn unchosen_voice_warning(project: &crate::import::Project) -> Option<String> {
 
     // The fallback is named first and the two per-run answers second, because
     // the report this warning comes from is *several projects*, and only the
-    // first of the three fixes that (D-164).
+    // first of the three fixes that (D-168).
     Some(format!(
         "{unchosen} spoken scene{} name{} no voice, so each line is read in \
          whatever voice its own script suggests — `still voices --use NAME` \
@@ -1849,7 +1849,7 @@ mod tests {
         }
     }
 
-    /// The window and the command line reach the same voices (D-164).
+    /// The window and the command line reach the same voices (D-168).
     ///
     /// They ask differently and they must not answer differently. The window
     /// resolves first — it has to *show* which voice will speak before the
@@ -1931,7 +1931,7 @@ mod tests {
         }
     }
 
-    /// A spoken scene with `voice: default` is the reported workflow (D-163).
+    /// A spoken scene with `voice: default` is the reported workflow (D-167).
     ///
     /// One line for the project, naming both fixes, and silent the moment
     /// anybody has chosen — because a warning on every render of a perfectly

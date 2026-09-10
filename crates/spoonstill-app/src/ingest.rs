@@ -306,7 +306,7 @@ impl std::error::Error for IngestError {}
 /// It is deliberately the **fewest keys that answer a question the folder
 /// cannot answer for itself**, not a template of every setting. An absent
 /// setting is a valid setting (D-056), and a scaffold full of commented
-/// defaults is a file an operator edits by accident. Since D-164 there is a
+/// defaults is a file an operator edits by accident. Since D-168 there is a
 /// second such question — which voice — and it is written only when this
 /// machine has an answer to it.
 ///
@@ -322,7 +322,7 @@ pub fn create_project(path: &Path) -> Result<PathBuf, IngestError> {
 }
 
 /// [`create_project`], with this machine's fallback voice stated rather than
-/// read (D-165).
+/// read (D-169).
 ///
 /// A parameter and not a lookup, for D-144's reason: every test of what a new
 /// project says would otherwise depend on whether the machine running it
@@ -362,7 +362,7 @@ fn create_project_with(path: &Path, fallback_voice: Option<&str>) -> Result<Path
 }
 
 /// What a brand-new project's `project.yaml` says, and all it says (D-153,
-/// D-165).
+/// D-169).
 ///
 /// Each comment is there because the value is not one an operator would guess
 /// the meaning of, and because the honest thing to say about a versioned rule
@@ -387,7 +387,7 @@ motion_seed: v2
         let _ = write!(
             text,
             "
-# Who reads every written line (D-164, D-165). Copied from this machine's
+# Who reads every written line (D-168, D-169). Copied from this machine's
 # fallback voice at the moment this project was made, so the folder says what
 # it sounds like and renders the same on a machine that has never heard of it.
 # Ten parts of one film, made together, stay matched even if the machine's
@@ -1098,7 +1098,7 @@ mod tests {
         assert!(create_project(&path).is_ok());
     }
 
-    /// A project made on a machine with a fallback voice records it (D-165).
+    /// A project made on a machine with a fallback voice records it (D-169).
     ///
     /// The reported workflow is ten folders made in one sitting. A machine
     /// fallback keeps them matched only while the machine keeps that setting;
@@ -1132,7 +1132,7 @@ mod tests {
     /// `default` is not a voice (D-086), so it is not written down as one.
     ///
     /// Writing `voice: default` would record the *absence* of a decision as
-    /// though it were one — and would then make D-163 stop asking, because a
+    /// though it were one — and would then make D-167 stop asking, because a
     /// project that names a voice is a project that has been answered.
     #[test]
     fn a_machine_with_no_answer_writes_no_voice() {
@@ -1150,7 +1150,7 @@ mod tests {
     ///
     /// A project made with a voice must resolve to `Project` — not `Fallback`
     /// — because that is what "reproducible on another machine" means. Asked
-    /// through the same function every surface asks (D-164).
+    /// through the same function every surface asks (D-168).
     #[test]
     fn a_recorded_voice_is_the_projects_own_and_not_the_machines() {
         let temp = Temp::new("startervoice-origin");
@@ -1185,7 +1185,7 @@ mod tests {
     fn a_new_project_declares_the_motion_seed_rule() {
         let temp = Temp::new("nosettings");
         // `None` stated rather than read: `create_project` asks this machine
-        // for its fallback voice (D-165), and a test that called it would say
+        // for its fallback voice (D-169), and a test that called it would say
         // "one key" here and "two" on a machine that has one set.
         let root = create_project_with(&temp.0.join("film"), None).expect("a new project");
 

@@ -6748,7 +6748,7 @@ writes a custom-folder-icon file whose name is `Icon` followed by a carriage
 return, and six of them sat permanently untracked in `git status`. A status
 listing with permanent noise in it is how a real untracked file gets missed.
 
-### D-162 — A voice says who chose it, and the fallback voice finally does something · Accepted
+### D-166 — A voice says who chose it, and the fallback voice finally does something · Accepted
 
 Reported as a workflow: *"I divided a video into ten parts and made ten
 projects; in a hurry I sometimes forget to change the voice."* The proposal was
@@ -6842,16 +6842,16 @@ exists to fix. Verified by adding one.
 project renders the same film — and what changed is which voice a *window*
 asks for, which no shell gate drives (D-131: there is no GUI automation here).
 
-### D-163 — The voice is asked for once, not every time and not never · Accepted
+### D-167 — The voice is asked for once, not every time and not never · Accepted
 
-D-162 made the unchosen state **visible** and made the fallback **work**. This
+D-166 made the unchosen state **visible** and made the fallback **work**. This
 is the other half of the answer to the same report: being told is not the same
 as being stopped, and the operator who has just been told is exactly the
 operator who is about to render ten parts in ten voices.
 
 **The window blocks, and only when nobody has answered at all.** Not "no voice
 picked in this project" — `renderBlocker` fires on `origin === "unchosen"`,
-which by D-162's precedence means no run pick, **and** no `tts.voice`, **and**
+which by D-166's precedence means no run pick, **and** no `tts.voice`, **and**
 no machine fallback. So one visit to Settings ends it for every project on the
 machine, forever. That is what makes this asking *once* rather than a step
 added to every render for the rest of the tool's life, which is what the
@@ -6909,10 +6909,10 @@ a fallback saved nothing is stopped at all.
 
 **M2 is 22 gates; `make gates` is 38.**
 
-### D-164 — The machine's voice is one setting, in one place, reachable from both surfaces · Accepted
+### D-168 — The machine's voice is one setting, in one place, reachable from both surfaces · Accepted
 
 The reported workflow is *several projects*, and the answer to it is the
-fallback voice D-092 built. D-162 found that it had never run. Setting out to
+fallback voice D-092 built. D-166 found that it had never run. Setting out to
 put a control for it on the Voice screen — where somebody has just found the
 voice they want for all ten parts — found the deeper reason it had not: **the
 setting was somewhere the command line could not reach.**
@@ -6932,11 +6932,11 @@ preference until somebody asks the terminal the same question.
 `spoonstill_app::machine` is the one file now — `settings.yaml`, beside
 `runs.csv`. YAML and not JSON, and **no new dependency for it**: `serde_yaml_ng`
 is already here for `project.yaml`, which is the format an operator of this tool
-has already read. A pre-D-164 `app-settings.json` is **adopted once** on the
+has already read. A pre-D-168 `app-settings.json` is **adopted once** on the
 window's next launch, as a read rather than a move — a machine that runs an
 older build again still finds its setting where that build left it.
 
-**One rule, four callers.** D-162 put `resolve_voice` in `apps/desktop`, and it
+**One rule, four callers.** D-166 put `resolve_voice` in `apps/desktop`, and it
 lasted one session: the fallback is read inside it, so a rule only the window
 could call was a setting only the window could honour. It is
 `spoonstill_app::voice` now, and `apply_voice_override` calls the same
@@ -6969,7 +6969,7 @@ machine that has lost its network.
 **On the Voice screen:** one button beside the chosen voice, and it is a
 **toggle** — the same control that sets the fallback clears it. A setting an
 operator cannot find their way back out of is worse than no setting. Clearing
-it can return a project to "nobody chose", which D-163 holds Render on, so the
+it can return a project to "nobody chose", which D-167 holds Render on, so the
 button re-asks the blocker. `VoiceChoice::is_fallback` is what it reads, and it
 is **not** `origin == Fallback`: a voice picked for this run can also be the
 machine's, and a control that could not tell those apart would offer to set
@@ -6995,12 +6995,12 @@ pin, unpin, and the render held again afterwards.
 
 **M2 is 22 gates; `make gates` is 38.**
 
-### D-165 — A new project records the voice it was made with · Accepted
+### D-169 — A new project records the voice it was made with · Accepted
 
 The last of the four steps the reported workflow asked for, and the one that
 turns a preference into a property of the film.
 
-D-164's machine fallback keeps ten folders matched **while the machine keeps
+D-168's machine fallback keeps ten folders matched **while the machine keeps
 that setting**. Change it — a different film, a different client, a new
 laptop — and the ten parts stop matching on the next render of any of them,
 silently, because each still says nothing about its own voice. `still new` now
@@ -7011,7 +7011,7 @@ that has never heard of this one.
 **Only when there is an answer to record.** No fallback set means no `tts:`
 block, and `default` is refused explicitly through `voice::names_a_voice`,
 because writing `voice: default` would record the *absence* of a decision as
-though it were one (D-086) — and would then stop D-163 asking, since a project
+though it were one (D-086) — and would then stop D-167 asking, since a project
 that names a voice is a project that has been answered.
 
 **It stays D-153's narrow exception, on D-153's terms.** `project.yaml` is an

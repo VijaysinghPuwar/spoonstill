@@ -313,7 +313,7 @@ fn the_shape_and_size_boxes_reach_the_render() {
     );
 }
 
-/// The voice on the screen is the voice in the render request (D-162).
+/// The voice on the screen is the voice in the render request (D-166).
 ///
 /// These were two expressions of one rule, in two files. The Render summary
 /// read `effectiveVoice()`; the request built
@@ -357,14 +357,14 @@ fn the_voice_shown_is_the_voice_sent() {
     }
 }
 
-/// Every origin Rust can return has a word the page can print (D-162).
+/// Every origin Rust can return has a word the page can print (D-166).
 ///
 /// The two files are joined by a serde name, which no compiler checks. Adding
 /// a fifth answer in Rust and forgetting the page gives a blank column on the
 /// one screen that exists to say whose voice you will hear — the failure this
 /// decision started from, one variant along.
 ///
-/// It reads across crates since D-164 moved the rule into `spoonstill-app` to
+/// It reads across crates since D-168 moved the rule into `spoonstill-app` to
 /// share it with the command line, which makes the seam wider rather than
 /// narrower: the enum is now edited by people not looking at this window.
 #[test]
@@ -388,7 +388,7 @@ fn the_page_has_a_word_for_every_origin_rust_can_return() {
     assert_eq!(
         variants.len(),
         4,
-        "expected the four answers of D-092/D-162, found {variants:?}"
+        "expected the four answers of D-092/D-166, found {variants:?}"
     );
 
     let js = code_only(&read("app.js"));
@@ -404,7 +404,7 @@ fn the_page_has_a_word_for_every_origin_rust_can_return() {
     }
 }
 
-/// A render nobody chose a voice for is stopped, once, and told why (D-163).
+/// A render nobody chose a voice for is stopped, once, and told why (D-167).
 ///
 /// `renderBlocker` is the only thing that decides whether Render can run and
 /// the only thing that says why (D-089), so the check belongs in it and
@@ -452,17 +452,17 @@ fn a_render_with_no_voice_chosen_is_stopped_and_told_why() {
     );
 }
 
-/// The machine's fallback is settable from where voices are chosen (D-164).
+/// The machine's fallback is settable from where voices are chosen (D-168).
 ///
 /// It existed under Settings, one level up and behind Home — a long way from
 /// the screen on which somebody has just found the voice they want for all ten
-/// parts of their film, and far enough that D-162 found the setting had never
+/// parts of their film, and far enough that D-166 found the setting had never
 /// once been used. A control is only as good as the distance to it.
 ///
 /// It is a toggle on purpose: the same button that sets it clears it. A
 /// setting an operator cannot find their way back out of is worse than no
 /// setting, and clearing this one can put a project back into the state
-/// D-163 holds Render on — so it has to re-ask, which is the last assertion.
+/// D-167 holds Render on — so it has to re-ask, which is the last assertion.
 #[test]
 fn the_fallback_voice_can_be_set_from_the_voice_screen() {
     let js = code_only(&read("app.js"));
@@ -489,7 +489,7 @@ fn the_fallback_voice_can_be_set_from_the_voice_screen() {
     assert!(
         pin.contains("updateRender()"),
         "clearing the fallback can put the project back into \"nobody chose\", \
-         which Render is held on (D-163), and nothing re-asks"
+         which Render is held on (D-167), and nothing re-asks"
     );
 
     // And it is wired, which in a webview fails silently (D-105's lesson).
@@ -499,7 +499,7 @@ fn the_fallback_voice_can_be_set_from_the_voice_screen() {
     );
 }
 
-/// The terminal can do it too (D-164).
+/// The terminal can do it too (D-168).
 ///
 /// *If the CLI cannot do it, it does not exist* is this project's rule, and
 /// the fallback voice broke it for a whole milestone: `AppSettings` was written

@@ -1,4 +1,4 @@
-//! Which voice a render will use, and who chose it (D-162, D-164).
+//! Which voice a render will use, and who chose it (D-166, D-168).
 //!
 //! One rule, reached by both control surfaces. It lived in `apps/desktop` for
 //! exactly one session, which was long enough to show why it cannot: the
@@ -8,7 +8,7 @@
 use serde::Serialize;
 
 /// Which of the four answers decided the voice, so a surface can say *whose*
-/// choice the operator is looking at (D-162).
+/// choice the operator is looking at (D-166).
 ///
 /// The window has always been able to name the voice and never able to say
 /// where the name came from, and the two that matter most looked identical:
@@ -55,7 +55,7 @@ pub struct VoiceChoice {
     /// do about it. `Remedy`'s shape (D-105): a short form to read at a glance
     /// and a long one to act on.
     pub detail: String,
-    /// Whether [`Self::voice`] is *already* this machine's fallback (D-164).
+    /// Whether [`Self::voice`] is *already* this machine's fallback (D-168).
     ///
     /// Not the same question as `origin == Fallback`: a voice picked for this
     /// run can also be the machine's, and the Voice screen's "use for every
@@ -158,7 +158,7 @@ pub fn resolve(
     }
 }
 
-/// The same question, with the machine's fallback read from disk (D-164).
+/// The same question, with the machine's fallback read from disk (D-168).
 ///
 /// Every control surface asks it this way. The fallback is **read here rather
 /// than passed in**, and that is a fix: the window filled its copy only when
@@ -180,7 +180,7 @@ mod tests {
     use super::*;
 
     /// The four answers, in the order D-092 set them, each one displacing the
-    /// one below it (D-162).
+    /// one below it (D-166).
     ///
     /// Written as a table because the defect this exists to prevent is a
     /// *precedence* change — someone adding a fifth answer, or moving the
@@ -347,7 +347,7 @@ mod tests {
     }
 
     /// "Already your fallback" is a different question from "chosen because it
-    /// is your fallback", and the pin control needs the first (D-164).
+    /// is your fallback", and the pin control needs the first (D-168).
     #[test]
     fn a_voice_can_be_the_machines_without_being_the_reason_it_was_chosen() {
         // Picked for this run, and it happens to be the machine's too. The

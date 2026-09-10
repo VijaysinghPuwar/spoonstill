@@ -1,4 +1,4 @@
-//! What this machine answers when no project has (D-164).
+//! What this machine answers when no project has (D-168).
 //!
 //! One file, beside `runs.csv` in [`spoonstill_state::runs::config_dir`],
 //! which is already documented as *"where this machine keeps what belongs to
@@ -108,7 +108,7 @@ mod tests {
             settings.parent(),
             runs.parent(),
             "the window's setting and the CLI's log are in two directories \
-             again, which is the defect D-164 exists to close"
+             again, which is the defect D-168 exists to close"
         );
     }
 

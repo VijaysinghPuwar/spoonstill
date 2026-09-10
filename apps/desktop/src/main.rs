@@ -189,11 +189,11 @@ const RECENT_FILE: &str = "recent-projects.json";
 
 /// The file the window used to keep its machine settings in, under Tauri's
 /// `app_config_dir()` — `com.spoonstill.desktop/`, which the CLI has never
-/// been able to see. Kept only to read a setting made by a build before D-164
+/// been able to see. Kept only to read a setting made by a build before D-168
 /// and carry it across; nothing writes it any more.
 const LEGACY_SETTINGS_FILE: &str = "app-settings.json";
 
-/// Read the machine's answers, adopting a pre-D-164 file once if there is one.
+/// Read the machine's answers, adopting a pre-D-168 file once if there is one.
 ///
 /// The migration is a **read**, not a copy-and-delete: the old file is left
 /// where it is, so a machine that runs an older build again still finds its
@@ -237,10 +237,10 @@ fn set_default_voice(voice: Option<String>) -> Result<spoonstill_app::machine::M
     )
 }
 
-/// The voice the next render will use, and who chose it (D-162).
+/// The voice the next render will use, and who chose it (D-166).
 ///
 /// The rule itself is `spoonstill_app::voice`, shared with the command line
-/// (D-164) — the window used to own it, which is how the machine's fallback
+/// (D-168) — the window used to own it, which is how the machine's fallback
 /// came to be a thing only the window could honour.
 #[tauri::command]
 fn voice_choice(
