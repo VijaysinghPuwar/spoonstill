@@ -2686,6 +2686,65 @@ mod tests {
         );
     }
 
+    /// D-172. The one assertion that can see a cache key move **between
+    /// builds**, and the reason gate 7h no longer tries to.
+    ///
+    /// The gate pinned six segment *filenames* produced by rendering
+    /// `fixtures/projects/renderable`. Those names track the image bytes, and
+    /// `git ls-files fixtures` returns **zero** — every still is generated on
+    /// the machine by `scripts/gen-fixtures.sh` with whatever FFmpeg is
+    /// installed. The six were pinned in `bce4246`, a session `CLAUDE.md`
+    /// records as having run on Windows, so a Gyan build's mjpeg output was
+    /// what they were taken from. **They have been red on macOS since the day
+    /// they were written**, under the most alarming message the suite has:
+    /// *"the libx264 cache key moved, so every project on every disk would
+    /// re-encode."* A false alarm, and a suite people learn to ignore protects
+    /// nothing.
+    ///
+    /// Everything else in that gate is a real within-run assertion and stays.
+    /// What could not stay is this, and it belongs here: a constant, in
+    /// microseconds, that depends on no image, no FFmpeg and no platform.
+    ///
+    /// **The number was derived by hand rather than by running this code** — a
+    /// golden vector taken from a fresh call agrees with whatever the code now
+    /// does, which is D-116's trap. It is FNV-1a-64, length-prefixed, over the
+    /// nine fields spelled out below, computed independently and checked
+    /// against the published FNV vectors first.
+    ///
+    /// If it fails, the message is the one true thing to say: **the segment
+    /// cache key changed, and every project on every disk re-encodes once
+    /// (D-107, D-118). That is a decision, not a test to update.**
+    #[test]
+    fn the_segment_key_is_pinned_to_a_value_no_build_may_move() {
+        let motion = MotionSpec {
+            seed: 42,
+            ..MotionSpec::new(MotionKind::ZoomIn, 0.1, Anchor::Center)
+        };
+        // Stated, not derived, so the inputs cannot drift with a helper:
+        //   content   "aaaaaaaaaaaaaaaa"
+        //   audio     0x5150515051505150      frames 112
+        //   motion    "zoom-in@center:0.1000:000000000000002a"
+        //   geometry  "1920x1080@30"          encoder "medium:18"
+        //   profile   "yuv420p" "bt709" 90000
+        assert_eq!(motion.descriptor(), "zoom-in@center:0.1000");
+        let out = output();
+        assert_eq!(
+            (out.width(), out.height(), out.fps()),
+            (1920, 1080, 30),
+            "the geometry field is not the one the golden value was taken over"
+        );
+        let encode = EncodeSettings::default();
+        assert_eq!((encode.preset.as_str(), encode.crf), ("medium", 18));
+
+        assert_eq!(
+            segment_key("aaaaaaaaaaaaaaaa", AUDIO, 112, motion, out, &encode, None),
+            0x342b_94f3_2103_9a02,
+            "the segment cache key changed — every project on every disk \
+             re-encodes once (D-107, D-118). That is a decision, not a test \
+             to update."
+        );
+    }
+
     /// `segment_key`'s software path as it stood before D-162, reconstructed.
     ///
     /// Deliberately a second implementation rather than a stored hash: a hash

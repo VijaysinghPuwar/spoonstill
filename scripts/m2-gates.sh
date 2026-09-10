@@ -1043,40 +1043,29 @@ gate_hardware_encoder() {
   [ "$soft_hash" = "$soft2_hash" ] || {
     echo "the reused film differs from the original software film"; return 1; }
 
-  # And the names themselves, pinned.
+  # The names themselves are **not** pinned here, and D-172 records why.
   #
   # Everything above this line passes whether or not the software key moved:
   # all three renders in one gate run use whatever key this build computes, so
   # they agree with each other by construction. That is D-116's trap, and this
-  # gate walked into it — it passed against a build whose software key had
-  # deliberately been changed. A within-run sequence cannot detect a key that
-  # moved between *builds*; only a constant written down outside the code can.
+  # gate walked into it. A within-run sequence cannot detect a key that moved
+  # between *builds*; only a constant written down outside the code can.
   #
-  # These are the six segments `fixtures/projects/renderable` produces at the
-  # default geometry with libx264. If this list has to change, that is a
-  # decision with a one-time cost of re-encoding every project on every
-  # operator's disk (D-107, D-118) — not a gate to update.
-  local expected="seg-4fd68d806422a9bb.mp4 seg-76c44324ea1a5020.mp4 seg-a83c34345949c55f.mp4 seg-c4e7e961bba9a6b6.mp4 seg-dfbb557ee738d60b.mp4 seg-eb6d184d45f7df06.mp4"
-  local actual
-  actual="$(cd "$proj/$STATE/segments" && ls seg-*.mp4 2>/dev/null | sort | tr '
-' ' ')"
-  local want
-  want="$(echo $expected | tr ' ' '
-' | sort | tr '
-' ' ')"
-  for name in $want; do
-    case " $actual " in
-      *" $name "*) ;;
-      *) echo "the software segment $name is not there — the libx264 cache key moved,"
-         echo "so every project on every disk would re-encode. Found: $actual"
-         return 1;;
-    esac
-  done
+  # So this gate used to pin six segment filenames. Those names track the image
+  # bytes, and `git ls-files fixtures` returns zero — every still is generated
+  # on the machine by scripts/gen-fixtures.sh with whatever FFmpeg is installed.
+  # The six were taken on Windows (bce4246), so they could never match here, and
+  # the gate has been red on macOS since the day it was written, under the most
+  # alarming message this suite has. A false alarm in a suite is worse than no
+  # assertion: people learn to ignore it.
+  #
+  # The cross-build promise now lives where it costs nothing and depends on
+  # nothing — `the_segment_key_is_pinned_to_a_value_no_build_may_move` in
+  # film.rs, a golden vector derived by hand rather than by running the code.
 
   echo "software $soft_hash"
   echo "hardware $hard_hash"
   echo "reused $reused of $scenes after the hardware run"
-  echo "the six pinned libx264 segment names are all present"
 }
 check "hardware encodes a different film and leaves every software segment reusable" \
   gate_hardware_encoder

@@ -7067,6 +7067,64 @@ and the gate: `still new` not recording, and `default` recorded as a voice.
 
 
 
+### D-172 — A cross-build assertion is made of constants, not of media · Accepted
+
+`make gates` has been **38 of 39 on macOS since 2026-09-07**, and the one red
+gate was a false alarm printing the most alarming sentence in the suite:
+
+> the libx264 cache key moved, so every project on every disk would re-encode.
+
+**The key had not moved.** Gate 7h pinned six segment *filenames* produced by
+rendering `fixtures/projects/renderable`. A segment's name is its content key,
+which holds the still's content hash — and **`git ls-files fixtures` returns
+zero**. `.gitignore` excludes `/fixtures/generated/` and `/fixtures/projects/`,
+and `scripts/gen-fixtures.sh` encodes every still with whatever FFmpeg is
+installed. So the names track the *image bytes*, which differ per machine.
+
+**The cause, which the audit named the class of but not the cause:** the six
+were pinned in `bce4246`, and `CLAUDE.md` records that session in as many words
+— *"This session ran on Windows; NVENC and AMF were measured here."* A Gyan
+Windows build's mjpeg encoder does not emit the same bytes for `testsrc2` as
+Homebrew's. **The gate has been red on macOS since the day it was written and
+green on exactly one machine.** Knowing that is what makes this a half-hour
+rather than an investigation, and it is what says the fix is a golden vector
+rather than six new constants — pasting this machine's names in would turn the
+gate green here and red on Windows, the same defect wearing the other hat.
+
+**What stays.** Everything above the pinned block in gate 7h is a real
+within-run assertion and all four pass here today: the hardware film differs
+from the software one, the D-041 profile assertion passed on a hardware segment,
+the plain render afterwards reuses **every** software segment, and the reused
+film is byte-identical to the first. Only the constants leave.
+
+**What replaces it.** `the_segment_key_is_pinned_to_a_value_no_build_may_move`
+— literal inputs, a literal `u64`, no image, no FFmpeg, no platform, and
+microseconds. The gate's own comment moves with the assertion, because it is
+correct and is the whole justification: *a within-run sequence cannot detect a
+key that moved between builds.*
+
+**The number was derived by hand, and that is not a detail.** A golden vector
+taken by running the new code agrees with whatever the new code does, which is
+D-116's trap in the purest form available. It was computed independently in
+Python — FNV-1a-64, length-prefixed, over the nine fields spelled out from
+`segment_key`'s own list — with the published FNV reference vectors reproduced
+first to prove the primitive. Rust then agreed exactly: `0x342b94f321039a02`.
+
+**It earns its keep beside the test that was already there.** Two mutations:
+
+| mutation | `segment_key_before_d162` | the golden vector |
+|---|---|---|
+| a tenth field added to the key | **fails** | **fails** |
+| `profile::COLOR_SPACE` changed | passes | **fails** |
+
+The second row is the reason this exists. `segment_key_before_d162` is a
+spelled-out second implementation and catches any change to the key's *shape* —
+but it reads the same `PIX_FMT`, `COLOR_SPACE` and `VIDEO_TIMESCALE` constants
+and the same hash function, so a change *underneath* both agrees with itself.
+A literal number is the only thing that does not.
+
+**M2 returns to 23/23 and `make gates` to 39** without weakening anything.
+
 ### D-173 — One read per photograph, and the memo is narrower than either audit thought · Accepted
 
 Both audits proposed memoizing the still's content hash, and the same

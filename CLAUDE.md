@@ -190,6 +190,55 @@ cargo build --release -p spoonstill-cli
 cargo run --release -p spoonstill-desktop
 ```
 
+### State as of 2026-09-10 — `make gates` is 39 of 39, and had never been
+
+**D-172 — a cross-build assertion is made of constants, not of media.** The one
+red gate was a **false alarm printing the most alarming sentence in the suite**:
+*"the libx264 cache key moved, so every project on every disk would re-encode."*
+
+The key had not moved. Gate 7h pinned six segment **filenames**, and a segment's
+name is its content key, which holds the still's content hash — while **`git
+ls-files fixtures` returns zero**. Every still is generated on the machine by
+`scripts/gen-fixtures.sh` with whatever FFmpeg is installed, so the names track
+the *image bytes*.
+
+**The cause, which the audit named the class of but not the cause:** the six were
+pinned in `bce4246`, and this file records that session in as many words — *"This
+session ran on Windows."* A Gyan build's mjpeg encoder does not emit the same
+bytes for `testsrc2` as Homebrew's. **The gate has been red on macOS since the
+day it was written and green on exactly one machine**, which is what makes the
+fix a half-hour rather than an investigation — and what says the fix is a golden
+vector rather than six new constants, since pasting this machine's names in
+would turn it green here and red on Windows.
+
+Gate 7h keeps all four of its real within-run assertions and loses only the
+constants. The cross-build promise is now
+`the_segment_key_is_pinned_to_a_value_no_build_may_move`: literal inputs, a
+literal `u64`, no image, no FFmpeg, no platform, microseconds.
+
+**The number was derived by hand, and that is not a detail.** A golden vector
+taken by running the new code agrees with whatever the new code does — D-116's
+trap in its purest form. It was computed independently in Python (FNV-1a-64,
+length-prefixed, over the nine fields spelled out from `segment_key`'s own list)
+with the published FNV reference vectors reproduced first to prove the
+primitive. Rust then agreed exactly: **`0x342b94f321039a02`**.
+
+**It earns its keep beside the test that was already there:**
+
+| mutation | `segment_key_before_d162` | the golden vector |
+|---|---|---|
+| a tenth field added to the key | **fails** | **fails** |
+| `profile::COLOR_SPACE` changed | passes | **fails** |
+
+The second row is the reason it exists. `segment_key_before_d162` is a
+spelled-out second implementation and catches any change to the key's *shape*,
+but it reads the same `PIX_FMT`, `COLOR_SPACE` and `VIDEO_TIMESCALE` and the
+same hash function — so a change *underneath* both agrees with itself. Only a
+literal number does not.
+
+**M0 8/8, M1 8/8, M2 23/23 — `make gates` is 39 of 39.**
+
+
 ### State as of 2026-09-10 — the memo both audits asked for cannot hit on an ordinary project
 
 **D-173 — one read per photograph, and it is narrower than either audit
