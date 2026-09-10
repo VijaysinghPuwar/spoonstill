@@ -7067,6 +7067,89 @@ and the gate: `still new` not recording, and `default` recorded as a voice.
 
 
 
+### D-170 — A rename never lands on a file nobody parked · Accepted
+
+Found by running the tool rather than by reading it, while checking an outside
+audit's claim that an interrupted removal can split a scene. That claim is true
+and it is the smaller half. The larger half is that the file left behind is then
+**silently destroyed by an ordinary `still move`**, while `still remove` prints
+*"Nothing was deleted"* — this module's own promise, stated in the same breath
+as it is broken.
+
+**An orphan needs no failure to exist.** `renumber`'s pass one parks every file
+that belongs to a *scene*, and D-050 defines a scene by its **still** — so a
+narration whose photograph was deleted in Finder belongs to nothing, is never
+parked, sits at a name a later scene wants, and pass two renames over it. One
+deleted photograph is enough.
+
+Reproduced with no failure involved at all:
+
+```
+proj/  001.jpg 001.txt  002.jpg 002.txt  003.jpg 003.txt  004.txt(orphan)  005.jpg 005.txt
+$ still move proj 005 4
+$ cat proj/004.txt   ->  "narration 005"      # the orphan is gone
+```
+
+And `recover()` had this right all along — it has `if target.exists() {
+continue; }` — while `renumber`, which is the path every ordinary command takes,
+did not. Two implementations of one rule, and the one that runs is the one that
+was wrong. D-111's shape exactly.
+
+**The refusal is made before anything moves.** `occupied_destination` walks the
+names the renumber wants and the names it is about to vacate, and answers with
+the first file in the way; `renumber` asks it first, and `remove` asks it again
+*before* parking, because by the time `remove` reaches `renumber` the scene is
+already in `removed/` and a command that refuses ought to refuse having done
+nothing. There is a second check in pass two as well. It is unreachable behind
+the first and is kept anyway: **a parked file is recoverable (D-121) and an
+overwritten photograph is not**, so the one thing this module must never do
+deserves a net under it rather than an argument.
+
+**Cost, stated rather than discovered:** a project carrying an orphan now
+*fails* a reorder that used to appear to work. That is the right way round —
+what it used to do was destroy the orphan — and `still validate` already reports
+an unpaired narration, so the operator has been told before they arrive here.
+The message names the file and says both ways out.
+
+**And a removal is recoverable now, which is the audit's own finding.** It used
+to rename each file straight into `removed/`; a failure on the second one left
+half a scene in the project and half in the bin with `renumber` never reached —
+a still with no narration, rendering in silence. It parks first, under
+`.removing-<stem>.<ext>`, and then moves the parked files on. That is D-121's
+journal, reused rather than reinvented, and `recover` runs it before the project
+is *read*.
+
+**The removal arm has no rollback, deliberately.** The files that travelled
+before the interruption are already in the bin under their final names and carry
+no record of having belonged to this scene, so "put it back" would be the branch
+that leaves a scene in two places — the defect being fixed. Finishing is the
+only reading that ends with the scene whole, and nothing is lost either way,
+because `removed/` is what the operator drags back from (D-100).
+
+**`still validate` counts both parked shapes**, before the dotfile skip that is
+the whole reason they were invisible.
+
+**Tests, and what each one catches.** The two orphan tests were run against the
+unfixed code and seen to fail — `move_to` returning `Moved { was: "005", now:
+"004" }` over a folder it had just damaged. Then the fix was mutated: removing
+the pass-one check alone fails exactly `a_renumber_never_overwrites_a_file_it_
+did_not_park`, and removing `.removing-` from the validate filter fails exactly
+`files_parked_by_an_interrupted_arrange_are_reported_whichever_shape`.
+
+**The first version of the orphan test passed against the unfixed code**, which
+is worth more than the test. It asserted "the folder is exactly as it was"
+through `contents()` — which reads the folder through `scenes()`, which runs
+`recover()`, which put the parked folder right *before the assertion saw it*.
+D-116's trap, walked into inside a test written for it. It asserts the raw
+listing now.
+
+**The interrupted-removal test builds the state rather than racing a kill.**
+D-121 set that precedent for the same reason, and there is a second one here:
+making a rename fail needs `chflags uchg` on this platform and something else
+entirely on Windows (D-090, D-155). The `chflags` reproduction belongs in this
+paragraph, not in the suite.
+
+
 ### D-162 — The graphics card can be asked to render, and is still not asked by default · Accepted
 
 D-036 settled the encoder in M1 in one sentence with three clauses — *"probe

@@ -190,6 +190,59 @@ cargo build --release -p spoonstill-cli
 cargo run --release -p spoonstill-desktop
 ```
 
+### State as of 2026-09-10 — "Nothing was deleted" was printed over a deleted file
+
+**Two outside audits were checked claim by claim before any of them was acted
+on** — `chatgpt.md`, `gemini.md`, and the verification and plan in
+`solution-chatgpt-gemini.md`. Nine findings between them; one is refuted by
+measurement (removing the caption `.clone()` is **18% slower**), one is
+unreproducible (a "403 tests pass" header — it is 620), and the two defects that
+actually destroy or misreport an operator's work were in **neither audit** and
+were found by running the tool.
+
+**D-170 — a rename never lands on a file nobody parked.** The audit found that
+an interrupted `still remove` splits a scene. True, and the smaller half. The
+half that loses work: `renumber`'s pass two had **no check that its destination
+was free**, and pass one parks only files that belong to a *scene* — which D-050
+defines by its **still**. So a narration whose photograph was deleted in Finder
+is parked by nothing, sits at a name a later scene wants, and is replaced in
+silence. **One deleted photograph is enough; no failure is needed:**
+
+```
+proj/ 001.jpg 001.txt 002.jpg 002.txt 003.jpg 003.txt 004.txt(orphan) 005.jpg 005.txt
+$ still move proj 005 4      ->  exit 0, and 004.txt now reads "narration 005"
+$ still remove proj 001      ->  "Nothing was deleted — …/removed holds what came out."
+```
+
+`recover()` had the rule right all along (`if target.exists() { continue; }`)
+and `renumber`, which is the path every ordinary command takes, did not — **two
+implementations of one rule, and the one that runs is the one that was wrong**
+(D-111's shape).
+
+`occupied_destination` is asked **before anything moves**, by `renumber` and
+again by `remove` before it parks, because by the time `remove` reaches
+`renumber` the scene is already in `removed/`. The pass-two check is unreachable
+behind it and is kept: a parked file is recoverable (D-121), an overwritten
+photograph is not.
+
+**And a removal parks now**, `.removing-<stem>.<ext>`, then moves the parked
+files into `removed/` — D-121's journal reused rather than a second mechanism.
+The removal arm has **no rollback** and that is the decision: the files that
+travelled already are in the bin under final names and carry no record of this
+scene, so "put it back" is the branch that leaves a scene in two places.
+`still validate` counts both parked shapes.
+
+**The first version of the orphan test passed against the unfixed code**, which
+is worth more than the test: it asserted "the folder is exactly as it was"
+through `contents()`, which reads through `scenes()`, which runs `recover()` —
+so the folder was repaired *before the assertion saw it*. D-116's trap, inside a
+test written for it. Two mutations, each caught by exactly one test.
+
+**`make gates` is 38 of 39** and was 38 of 39 before this: gate 7h has been red
+on macOS since the day it was written, because its six segment names were pinned
+on Windows (audit finding 3). That is the next step's work, not a regression.
+
+
 ### State as of 2026-09-09 — the fallback voice was saved, displayed, and ignored
 
 **D-166 — a voice says who chose it.** Reported as a workflow, not a bug: *ten

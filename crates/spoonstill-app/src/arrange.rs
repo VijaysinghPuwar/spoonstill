@@ -25,14 +25,21 @@
 //!   this refuses rather than renumbering a project whose order came from
 //!   somewhere else. Manifest mode has its own order — the CSV's — and that
 //!   file is the operator's to edit (D-050).
-//! - **Nothing is deleted.** A removed scene's files move to `removed/` inside
-//!   the project, which the folder scan never looks in (it reads one level and
-//!   takes files only). The operator drags them back if they were wrong, and
-//!   nothing this program does can lose their photograph.
-//! - **Renaming is two passes.** Renumbering in place means `002` becoming
-//!   `001` while `001` still exists. Everything moves to a temporary name
-//!   first, then to its final one, so no rename ever lands on a file that is
-//!   still wanted.
+//! - **Nothing is deleted**, and `still remove` says so in as many words — so
+//!   it has to be true of every rename here, not only of the ones aimed at
+//!   `removed/`. It was not: pass one parks every file a *scene* owns, and a
+//!   scene is its still, so a narration whose photograph was deleted in Finder
+//!   belonged to nothing, was never parked, sat at a name a later scene wanted,
+//!   and was replaced in silence by an ordinary `still move` (D-170). A
+//!   renumber now refuses an occupied destination, before it touches anything.
+//! - **Renaming is two passes**, and so is removing. Renumbering in place means
+//!   `002` becoming `001` while `001` still exists. Everything moves to a
+//!   temporary name first, then to its final one, so no rename ever lands on a
+//!   file that is still wanted. A removal parks the same way for the same
+//!   reason — renaming each file straight into `removed/` meant a failure on
+//!   the second one left half a scene in the project and half in the bin, with
+//!   the renumber never reached (D-170). A parked file carries what it was
+//!   doing, so `recover` finishes the job (D-121).
 //! - **The whole scene moves together.** A still and its script and its
 //!   recording share a stem, so they are renamed as a set. Renaming the image
 //!   alone would silently unpair the narration — a scene that still renders,
@@ -67,6 +74,17 @@ pub enum ArrangeError {
         /// How many there are.
         count: usize,
     },
+    /// A file nobody parked is sitting where a renumbered scene must go
+    /// (D-170).
+    ///
+    /// Pass one vacates every name a *scene* owns, and a scene is its still —
+    /// so a narration whose photograph is gone belongs to nothing, is never
+    /// parked, and would be replaced in silence. A parked file is recoverable
+    /// (D-121); an overwritten photograph is not.
+    Occupied {
+        /// The file that is in the way.
+        path: PathBuf,
+    },
     /// The folder could not be read or written.
     Io {
         /// What we were doing.
@@ -93,6 +111,16 @@ impl std::fmt::Display for ArrangeError {
             ArrangeError::NoSuchScene { id, count } => write!(
                 f,
                 "there is no scene {id} — this project has {count} of them"
+            ),
+            ArrangeError::Occupied { path } => write!(
+                f,
+                "{} is not part of any scene, so renumbering this project \
+                 would write over it. Move it out of the folder, or give it a \
+                 still so it becomes a scene, and try again — `still validate` \
+                 lists every file in that state.",
+                path.file_name()
+                    .unwrap_or(path.as_os_str())
+                    .to_string_lossy()
             ),
             ArrangeError::Io {
                 doing,
@@ -212,28 +240,32 @@ pub fn remove(root: &Path, id: &str) -> Result<Removed, ArrangeError> {
     })?;
 
     let scene = &all[at];
-    for file in &scene.files {
-        let name = file.file_name().unwrap_or_default();
-        let mut destination = bin.join(name);
-        // Removing scene 003 twice, after a renumber, means two different
-        // photographs both called `003.jpeg`. The second keeps its own copy
-        // rather than replacing the first.
-        let mut nth = 2;
-        while destination.exists() {
-            let stem = file.file_stem().and_then(OsStr::to_str).unwrap_or("scene");
-            let extension = file.extension().and_then(OsStr::to_str).unwrap_or("");
-            destination = bin.join(format!("{stem}-{nth}.{extension}"));
-            nth += 1;
-        }
-        rename(file, &destination)?;
-    }
-
     let kept: Vec<Scene> = all
         .iter()
         .enumerate()
         .filter(|(index, _)| *index != at)
         .map(|(_, scene)| scene.clone())
         .collect();
+
+    // Asked before a single file moves (D-170). `renumber` asks the same
+    // question, but by the time it runs this scene is already in `removed/` —
+    // and a command that refuses ought to refuse having done nothing.
+    if let Some(blocking) = occupied_destination(root, &kept, &scene.files) {
+        return Err(ArrangeError::Occupied { path: blocking });
+    }
+
+    // Two passes, for the reason `renumber` has two (D-170). A removal used to
+    // rename each file straight into `removed/`, so a failure on the second one
+    // left half a scene in the project and half in the bin, with `renumber`
+    // never reached — a still with no narration, rendering in silence. Parking
+    // first is a rename within one folder, and a parked file says what it was
+    // doing, so `recover` finishes the removal rather than leaving a scene in
+    // two places.
+    let parked = park_for_removal(root, scene)?;
+    for path in &parked {
+        finish_removal(root, path)?;
+    }
+
     renumber(root, &kept)?;
 
     Ok(Removed {
@@ -324,6 +356,15 @@ fn position_of(all: &[Scene], id: &str) -> Result<usize, ArrangeError> {
 /// a live file destroys it on Unix and fails on Windows (D-071 — the two
 /// platforms disagree, and neither is acceptable).
 fn renumber(root: &Path, order: &[Scene]) -> Result<(), ArrangeError> {
+    // Before anything moves (D-170). Pass one vacates every name a scene owns
+    // and nothing else, so a file belonging to no scene sitting at a
+    // destination would be replaced in pass two without a word. Refusing here
+    // leaves the folder exactly as it was; refusing later would leave it
+    // parked.
+    if let Some(blocking) = occupied_destination(root, order, &[]) {
+        return Err(ArrangeError::Occupied { path: blocking });
+    }
+
     let width = MIN_WIDTH.max(order.len().to_string().len());
 
     // Pass one: out of the way. The prefix is one no scene can have, because a
@@ -350,12 +391,131 @@ fn renumber(root: &Path, order: &[Scene]) -> Result<(), ArrangeError> {
         }
     }
 
-    // Pass two: into place.
+    // Pass two: into place. The check above makes an occupied destination
+    // unreachable; this is the net under it, because the one thing this module
+    // must never do is write over a photograph. A parked file is recoverable
+    // (D-121) and an overwritten one is not, so it stays parked.
     for (parked, wanted, extension) in staged {
         let destination = root.join(format!("{wanted}.{extension}"));
+        if destination.exists() {
+            return Err(ArrangeError::Occupied { path: destination });
+        }
         rename(&parked, &destination)?;
     }
     Ok(())
+}
+
+/// The first file that is sitting where a renumbered scene must go, if there is
+/// one (D-170).
+///
+/// `vacating` names files that are about to leave their current names on top of
+/// the ones `order` holds — a scene on its way to `removed/`, which is still in
+/// the folder when the caller asks.
+fn occupied_destination(root: &Path, order: &[Scene], vacating: &[PathBuf]) -> Option<PathBuf> {
+    let width = MIN_WIDTH.max(order.len().to_string().len());
+
+    let leaving: Vec<&PathBuf> = order
+        .iter()
+        .flat_map(|scene| scene.files.iter())
+        .chain(vacating.iter())
+        .collect();
+
+    for (index, scene) in order.iter().enumerate() {
+        let wanted = format!("{:0width$}", index + 1, width = width);
+        for file in &scene.files {
+            let extension = file.extension().and_then(OsStr::to_str).unwrap_or_default();
+            let destination = root.join(format!("{wanted}.{extension}"));
+            if destination.exists() && !leaving.iter().any(|path| **path == destination) {
+                return Some(destination);
+            }
+        }
+    }
+    None
+}
+
+/// Move a scene's files out of the way, inside the project folder (D-170).
+///
+/// Returns where they were parked, in the order they must go on to `removed/`.
+fn park_for_removal(root: &Path, scene: &Scene) -> Result<Vec<PathBuf>, ArrangeError> {
+    let mut parked = Vec::with_capacity(scene.files.len());
+    for file in &scene.files {
+        let extension = file
+            .extension()
+            .and_then(OsStr::to_str)
+            .unwrap_or_default()
+            .to_owned();
+        let stem = file
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .unwrap_or("scene")
+            .to_owned();
+        let target = unique(root.join(removing_name(&stem, &extension)));
+        rename(file, &target)?;
+        parked.push(target);
+    }
+    Ok(parked)
+}
+
+/// Put one parked file into `removed/`, under a name nothing else is using.
+///
+/// There is no rollback arm here, and that is the decision: the files that
+/// travelled before the interruption are already in the bin under their final
+/// names and carry no record of having been part of this scene, so finishing is
+/// the only reading that leaves the scene whole in one place. Nothing is lost
+/// either way — `removed/` is what the operator drags back from (D-100).
+fn finish_removal(root: &Path, parked: &Path) -> Result<(), ArrangeError> {
+    let bin = root.join(REMOVED_DIR);
+    fs::create_dir_all(&bin).map_err(|source| ArrangeError::Io {
+        doing: "making the removed folder",
+        path: bin.clone(),
+        source,
+    })?;
+
+    let name = parked
+        .file_name()
+        .and_then(OsStr::to_str)
+        .and_then(removing_parts)
+        .map_or_else(
+            || ("scene".to_owned(), String::new()),
+            |(stem, extension)| (stem, extension),
+        );
+    let (stem, extension) = name;
+
+    // Removing scene 003 twice, after a renumber, means two different
+    // photographs both called `003.jpeg`. The second keeps its own copy rather
+    // than replacing the first.
+    let mut destination = bin.join(format!("{stem}.{extension}"));
+    let mut nth = 2;
+    while destination.exists() {
+        destination = bin.join(format!("{stem}-{nth}.{extension}"));
+        nth += 1;
+    }
+    rename(parked, &destination)
+}
+
+/// The name a file wears on its way out of the project.
+///
+/// `.removing-<stem>.<ext>` — a dot so the folder scan ignores it (D-050), and
+/// the stem it is leaving so `recover` can name it in the bin.
+fn removing_name(stem: &str, extension: &str) -> String {
+    format!(".removing-{stem}.{extension}")
+}
+
+/// What a file parked for removal says about itself: its stem, and its
+/// extension.
+fn removing_parts(name: &str) -> Option<(String, String)> {
+    let rest = name.strip_prefix(".removing-")?;
+    let (stem, extension) = rest.rsplit_once('.')?;
+    // `unique` may have appended `-2`, `-3`… to avoid a collision with another
+    // parked file; the bin has its own collision rule and applies it again.
+    let stem = stem.rsplit_once('-').map_or(stem, |(head, tail)| {
+        if tail.chars().all(|c| c.is_ascii_digit()) && !head.is_empty() {
+            head
+        } else {
+            stem
+        }
+    });
+    Some((stem.to_owned(), extension.to_owned()))
 }
 
 /// The name a file wears while it is between two numbers.
@@ -406,6 +566,10 @@ fn parked_parts(name: &str) -> Option<(String, String, String)> {
 /// Either way the file ends up under a name the operator can see, which is the
 /// property that actually matters: a photograph must never be invisible.
 ///
+/// A removal parks too (D-170), under `.removing-…`, and has only the first
+/// branch: its files go on to `removed/`, which is also a name the operator can
+/// see and is where the rest of that scene already is.
+///
 /// Returns how many files it put back.
 ///
 /// # Errors
@@ -417,6 +581,7 @@ pub fn recover(root: &Path) -> Result<usize, ArrangeError> {
     };
 
     let mut parked: Vec<(PathBuf, String, String, String)> = Vec::new();
+    let mut removing: Vec<PathBuf> = Vec::new();
     for entry in entries.flatten() {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
@@ -424,14 +589,26 @@ pub fn recover(root: &Path) -> Result<usize, ArrangeError> {
         if !entry.file_type().is_ok_and(|t| t.is_file()) {
             continue;
         }
-        if let Some((from, wanted, extension)) = parked_parts(&name) {
+        if name.starts_with(".removing-") {
+            removing.push(entry.path());
+        } else if let Some((from, wanted, extension)) = parked_parts(&name) {
             parked.push((entry.path(), from, wanted, extension));
         }
     }
     // Deterministic, so two runs of a recovery resolve the same way.
     parked.sort_by(|a, b| a.0.cmp(&b.0));
+    removing.sort();
 
     let mut restored = 0;
+
+    // A removal that stopped half way. It is always finished rather than undone
+    // — see `finish_removal` for why that is the reading that keeps the scene
+    // in one place.
+    for path in removing {
+        finish_removal(root, &path)?;
+        restored += 1;
+    }
+
     for (path, from, wanted, extension) in parked {
         let destination = root.join(format!("{wanted}.{extension}"));
         let target = if destination.exists() {
@@ -966,6 +1143,175 @@ mod tests {
         let project = Project::new("healthy", &[("001", &["jpg", "txt"]), ("002", &["jpg"])]);
         assert_eq!(recover(&project.0).expect("recovers"), 0);
         assert_eq!(scenes(&project.0).expect("scenes").len(), 2);
+    }
+
+    /// D-170. A renumber must never land on a file it did not park.
+    ///
+    /// Pass one parks every file that belongs to a *scene*, and a scene is
+    /// defined by its still — so a narration whose photograph was deleted in
+    /// Finder is never parked, sits at a name a later scene wants, and used to
+    /// be replaced without a word. An orphan needs no failed removal to exist;
+    /// one deleted photograph is enough.
+    ///
+    /// Reproduced before this existed: `still move proj 005 4` over the folder
+    /// below left `004.txt` reading "005.txt" and the operator's own narration
+    /// gone, while `still remove` printed "Nothing was deleted".
+    #[test]
+    fn a_renumber_never_overwrites_a_file_it_did_not_park() {
+        let project = Project::new(
+            "orphan",
+            &[
+                ("001", &["jpeg", "txt"]),
+                ("002", &["jpeg", "txt"]),
+                ("003", &["jpeg", "txt"]),
+                ("005", &["jpeg", "txt"]),
+            ],
+        );
+        // A narration whose photograph is gone. It is not a scene, so nothing
+        // parks it.
+        fs::write(project.0.join("004.txt"), "ORPHAN-SURVIVOR").expect("write");
+
+        let error = move_to(project.path(), "005", 4).expect_err("refused, not silently");
+
+        assert!(
+            matches!(error, ArrangeError::Occupied { .. }),
+            "it names the obstacle: {error}"
+        );
+        let said = error.to_string();
+        assert!(said.contains("004.txt"), "{said}");
+        assert_eq!(
+            fs::read_to_string(project.0.join("004.txt")).expect("still there"),
+            "ORPHAN-SURVIVOR",
+            "the operator's narration must survive"
+        );
+
+        // And nothing was touched on the way to refusing — asserted on the raw
+        // listing, because `contents()` reads the folder through `scenes()`,
+        // which runs `recover` and would put a parked folder right before the
+        // assertion ever saw it (D-116).
+        assert_eq!(
+            project.listing(),
+            vec![
+                "001.jpeg", "001.txt", "002.jpeg", "002.txt", "003.jpeg", "003.txt", "004.txt",
+                "005.jpeg", "005.txt",
+            ],
+            "the folder is exactly as it was"
+        );
+        assert_eq!(
+            project.contents(),
+            vec!["001.jpeg", "002.jpeg", "003.jpeg", "005.jpeg"],
+            "and it still reads as the same four scenes"
+        );
+    }
+
+    /// The same obstacle reached through `still remove`, which is the command
+    /// that prints "Nothing was deleted" — so it is the one that must not.
+    #[test]
+    fn a_removal_that_would_overwrite_an_orphan_refuses_before_moving_anything() {
+        // Five scenes, so removing one leaves four and the fourth wants the
+        // orphan's name.
+        let project = Project::new(
+            "orphan-remove",
+            &[
+                ("001", &["jpeg", "txt"]),
+                ("002", &["jpeg", "txt"]),
+                ("003", &["jpeg", "txt"]),
+                ("005", &["jpeg", "txt"]),
+                ("006", &["jpeg", "txt"]),
+            ],
+        );
+        fs::write(project.0.join("004.txt"), "ORPHAN-SURVIVOR").expect("write");
+
+        let error = remove(project.path(), "001").expect_err("refused");
+
+        assert!(matches!(error, ArrangeError::Occupied { .. }), "{error}");
+        assert_eq!(
+            fs::read_to_string(project.0.join("004.txt")).expect("still there"),
+            "ORPHAN-SURVIVOR"
+        );
+        assert_eq!(
+            project.contents(),
+            vec!["001.jpeg", "002.jpeg", "003.jpeg", "005.jpeg", "006.jpeg"],
+            "the scene it was asked to remove is still in the project"
+        );
+        assert!(
+            !project.path().join(REMOVED_DIR).join("001.jpeg").exists(),
+            "and nothing reached the removed folder"
+        );
+    }
+
+    /// D-170. A removal that stops half way must not leave a scene in two
+    /// places.
+    ///
+    /// The interrupted state is built by calling the first phase and stopping,
+    /// which is exactly what a killed process leaves — and is portable, unlike
+    /// making a rename fail, which on this platform needs `chflags uchg` and on
+    /// Windows needs something else entirely (D-090, D-155).
+    #[test]
+    fn an_interrupted_removal_is_finished_rather_than_left_in_two_places() {
+        let project = three();
+        let all = scenes(project.path()).expect("numbered");
+
+        let staged = park_for_removal(project.path(), &all[1]).expect("parked");
+        assert_eq!(staged.len(), 2, "the still and its script");
+
+        // This is the state a kill leaves: nothing in `removed/`, nothing at
+        // `002.*`, and two files under names the folder scan skips.
+        assert!(!project.path().join(REMOVED_DIR).exists());
+        assert_eq!(
+            project.listing(),
+            vec![
+                ".removing-002.jpeg",
+                ".removing-002.txt",
+                "001.jpeg",
+                "001.txt",
+                "003.jpeg",
+            ]
+        );
+
+        assert_eq!(recover(project.path()).expect("recovers"), 2);
+
+        let bin = project.path().join(REMOVED_DIR);
+        let mut kept: Vec<String> = fs::read_dir(&bin)
+            .expect("the removed folder")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        kept.sort();
+        assert_eq!(kept, vec!["002.jpeg", "002.txt"], "whole, and in one place");
+        assert!(
+            project.listing().iter().all(|n| !n.contains("removing")),
+            "and nothing is left parked: {:?}",
+            project.listing()
+        );
+    }
+
+    /// The half that already reached the bin stays there, and the parked half
+    /// follows it — the scene ends whole, under the bin's own collision rule.
+    #[test]
+    fn a_removal_finishes_around_files_already_in_the_bin() {
+        let project = three();
+        let bin = project.path().join(REMOVED_DIR);
+        fs::create_dir_all(&bin).expect("bin");
+        // A photograph removed earlier, wearing the name this one wants.
+        fs::write(bin.join("002.jpeg"), "an earlier photograph").expect("write");
+        fs::write(
+            project.0.join(removing_name("002", "jpeg")),
+            "the interrupted one",
+        )
+        .expect("park");
+
+        assert_eq!(recover(project.path()).expect("recovers"), 1);
+
+        assert_eq!(
+            fs::read_to_string(bin.join("002.jpeg")).expect("read"),
+            "an earlier photograph",
+            "the one that was already there is untouched"
+        );
+        assert_eq!(
+            fs::read_to_string(bin.join("002-2.jpeg")).expect("read"),
+            "the interrupted one"
+        );
     }
 
     /// Every parked file in a folder.

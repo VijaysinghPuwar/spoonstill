@@ -309,7 +309,7 @@ fn from_convention(root: &Path, settings: &Settings) -> Result<Rows, RowsError> 
     // a project of 2000 scenes reported "1566 scenes — no problems".
     let interrupted = names
         .iter()
-        .filter(|name| name.starts_with(".arranging-"))
+        .filter(|name| name.starts_with(".arranging-") || name.starts_with(".removing-"))
         .count();
     if interrupted > 0 {
         problems.push(Problem::in_project(ProblemKind::InterruptedRename {
@@ -631,6 +631,31 @@ mod tests {
             Some(Settings::default().silent_seconds)
         );
         assert!(rows.problems.is_empty(), "{:?}", rows.problems);
+    }
+
+    /// D-121 and D-170. Both parked shapes are counted, and counted *before*
+    /// the dotfile skip that is exactly why they were invisible: "1566 scenes,
+    /// no problems" over a project that had 2000 is the most misleading thing
+    /// this program can say.
+    #[test]
+    fn files_parked_by_an_interrupted_arrange_are_reported_whichever_shape() {
+        let scratch = Scratch::new(&[
+            ("001.png", ""),
+            (".arranging-003-to-002.png", ""),
+            (".removing-004.png", ""),
+            (".DS_Store", ""),
+        ]);
+        let rows = scratch.collect();
+
+        let reported: Vec<usize> = rows
+            .problems
+            .iter()
+            .filter_map(|p| match p.kind {
+                ProblemKind::InterruptedRename { files } => Some(files),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reported, vec![2], "both parked files, and not `.DS_Store`");
     }
 
     /// Order is the film's order and the motion seed (D-035). `scene2` must
