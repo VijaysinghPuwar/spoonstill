@@ -1158,15 +1158,25 @@ gate_voice_unchosen() {
   # once, on this machine, answers a project that names nothing — without
   # overruling one that names its own. HOME is redirected so this asserts the
   # rule and not whatever the machine running it happens to be set to.
-  local fake="$WORK/unchosen-home"
+  local fake="$WORK/unchosen-home" rc=0
   rm -rf "$fake"; mkdir -p "$fake"
   HOME="$fake" "$STILL" voices --use en-GB-RyanNeural >/dev/null 2>&1 || {
     echo "could not set a fallback voice"; return 1; }
-  out=$(HOME="$fake" "$STILL" render "$proj" --out "$WORK/un5.mp4" 2>&1)
+  out=$(HOME="$fake" "$STILL" render "$proj" --out "$WORK/un5.mp4" 2>&1) || rc=$?
   grep -q 'names\? no voice' <<<"$out" && {
     echo "$out"; echo "a machine fallback did not silence the warning"; return 1; }
-  grep -q 'voice=en-GB-RyanNeural' "$fake/Library/Application Support/spoonstill/runs.csv" || {
-    echo "the fallback was not the voice that spoke"; return 1; }
+  # The warning is silenced only by the scenes actually carrying the fallback,
+  # so the line above is the assertion even on a machine with no `edge-tts`.
+  # What such a machine cannot show is the voice that *spoke*, so that half runs
+  # only where the render finished — the same guard the D-169 half below already
+  # had, and the reason this gate was red on the CI runner and green here: the
+  # runner deliberately has no voice service (D-137), so the render fails, and
+  # `runs.csv` carries no `voice=` row to find.
+  if [ "$rc" -eq 0 ]; then
+    grep -q 'voice=en-GB-RyanNeural' \
+      "$fake/Library/Application Support/spoonstill/runs.csv" || {
+      echo "the fallback was not the voice that spoke"; return 1; }
+  fi
 
   # And answering it works. Either spelling, and neither may still warn —
   # a warning that survives its own fix is worse than no warning.
