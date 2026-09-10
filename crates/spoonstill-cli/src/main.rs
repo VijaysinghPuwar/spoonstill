@@ -897,6 +897,18 @@ fn name_of(path: &std::path::Path) -> String {
 /// D-002: the operator finds out that a provider is unreachable here, in one
 /// second, rather than at scene 340 of 500.
 fn list_voices(args: &VoicesArgs) -> Result<(), String> {
+    // A settings file that is there and cannot be used, said once, before
+    // anything that depends on it (D-171). Not an error: the machine still
+    // answers, with its defaults, and refusing to list voices because a
+    // preference file is damaged would be the wrong end of D-089's rule. It is
+    // printed first because everything below reads that file.
+    if let Some(problem) = spoonstill_app::machine::read().problem {
+        println!("  {}", problem.need);
+        if !problem.detail.is_empty() {
+            println!("    {}", problem.detail);
+        }
+    }
+
     // Before the provider is asked anything: forgetting a setting must work on
     // a machine that has lost its network, or an operator whose renders are
     // failing cannot undo the setting that is failing them.

@@ -190,6 +190,59 @@ cargo build --release -p spoonstill-cli
 cargo run --release -p spoonstill-desktop
 ```
 
+### State as of 2026-09-10 — the setting was saved, then lost, and nothing said so
+
+**D-171 — machine state is replaced, not overwritten, and a broken file is
+reported.** `machine::load` was
+`read_to_string(..).ok().and_then(from_str(..).ok()).unwrap_or_default()` —
+**no file**, **unreadable** and **unparseable** all answered "the defaults", in
+silence.
+
+Reproduced with `HOME` redirected: set a fallback voice, truncate
+`settings.yaml` the way a crash mid-write would, and `still voices` marks no row
+and says nothing. **D-168 added the catalogue check on `--use` for exactly this
+reason** — *a misspelt voice is otherwise a setting that silently fails every
+render* — and the file it writes to reintroduced the failure one layer down. The
+consequence is D-166's original complaint by another road: ten folders that no
+longer match.
+
+`read()` returns `Loaded { settings, problem }`. **`NotFound` is the only silent
+arm**, because a machine nobody has configured is the ordinary first run.
+Anything else is still the defaults — a render must not fail over a preference —
+plus a `Remedy::manual` the caller draws. The sentence says what it cost (*"…
+including which voice a project that names none is read in"*), not what the
+parser thought; the YAML error is `detail`.
+
+**Written beside, then renamed.** `fs::write` truncates first, so a crash
+between truncate and write leaves the file empty — which is the state now being
+reported. `replace_file` is **public and takes a path**, and that is D-010's
+doing: the window keeps `recent-projects.json` in Tauri's `app_config_dir()`
+(D-086, deliberately not moved) and `architecture.rs` forbids it reaching
+`spoonstill-media` where the rename lives. One implementation, both callers.
+
+**The damaged file is kept, not replaced** — moved to `settings.yaml.broken`,
+best-effort, so failing to preserve it never stops an operator setting what they
+asked to set. And `app_settings` will not run the pre-D-168 migration over a
+damaged file: adopting an old setting on top of one that may still be repairable
+by hand is the wrong way round.
+
+**Two mutations, each caught by exactly one test.** Reverting to `fs::write`
+fails with the defect verbatim — *"a reader saw a half-written settings file:
+`""`"*. Making `damaged_file` always answer `None` fails the other.
+
+**The window half was driven through the shipped `app.js` in node behind a stub
+DOM, both ways**: a damaged file draws the sentence in `app-settings-fix`, a
+healthy one leaves it hidden. `app_settings` now returns `{settings, problem}`,
+so a page that kept the old shape would read `undefined.default_voice` and land
+in the `catch` — which is the silence being fixed; `ui_contract` asserts both
+halves and was run against that.
+
+**Gate 7i grew rather than a gate being added.** It asserts the output and never
+the exit code (the line prints before the provider is asked anything, so it
+holds with no `edge-tts`), and that the warning **does not survive its own fix**.
+**`make gates` is still 39.**
+
+
 ### State as of 2026-09-10 — `make gates` is 39 of 39, and had never been
 
 **D-172 — a cross-build assertion is made of constants, not of media.** The one

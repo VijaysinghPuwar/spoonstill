@@ -7067,6 +7067,84 @@ and the gate: `still new` not recording, and `default` recorded as a voice.
 
 
 
+### D-171 — Machine state is replaced, not overwritten, and a broken file is reported · Accepted
+
+`machine::load` was
+`read_to_string(..).ok().and_then(from_str(..).ok()).unwrap_or_default()`.
+Three different things — **no file**, **unreadable**, **unparseable** — with one
+answer: the defaults, in silence.
+
+**Reproduced**, with `HOME` redirected:
+
+```
+$ still voices --use en-GB-RyanNeural       # set, and confirmed marked with *
+$ printf 'default_voice: "en-GB-Rya' > .../spoonstill/settings.yaml
+$ still voices en-GB | grep -c '\*'         # rows marked as the fallback
+0
+```
+
+No message anywhere. The setting is gone and the operator finds out from the
+films.
+
+**Why this one matters more than it looks.** D-168 added the catalogue check on
+`still voices --use` for exactly this reason — *"a misspelt voice is otherwise a
+setting that silently fails every render until somebody remembers making it"* —
+and then the file it writes to reintroduced the same failure one layer down. The
+module's own note invites hand-editing (*"small enough to edit by hand when that
+is the quickest thing"*), so the damaged file is most likely something the
+operator typed. And the consequence is D-166's original complaint arriving by
+another road: ten folders that no longer match.
+
+**Three cases, three answers.** `read()` returns a `Loaded { settings, problem }`.
+`NotFound` is the **only** silent arm, because a machine nobody has configured
+is the ordinary first run and is not a problem to show anyone. Anything else is
+still the defaults — a render must not fail over a preference — plus a
+`Remedy::manual` (D-105) the caller shows. `load()` stays, for the callers with
+no surface to report on.
+
+**The sentence says what it cost, not what the parser thought.** *"This
+machine's settings file is damaged, so it is answering with its defaults —
+including which voice a project that names none is read in."* The YAML error is
+`detail`, which is the bundle and the disclosure triangle and never the first
+thing anybody sees. `install` is `None`: there is no package manager answer to a
+file somebody hand-edited.
+
+**Written beside, then renamed.** `fs::write` truncates first, so a crash
+between the truncate and the write leaves the file empty or half-written —
+precisely the state now being reported. Rename replaces (D-119), so the previous
+contents survive until the new ones are complete on disk.
+
+`replace_file` is **public and takes a path**, and that is D-010's doing rather
+than a convenience: the window keeps `recent-projects.json` in Tauri's own
+`app_config_dir()` (D-086, deliberately not moved — that would be a migration
+with no beneficiary), and `architecture.rs` forbids the window from reaching
+`spoonstill-media` where the rename lives. One implementation, both callers, and
+the file stays where it was.
+
+**The damaged file is kept, not replaced.** `save` moves it to
+`settings.yaml.broken` first, best-effort, so failing to preserve it never stops
+an operator setting the thing they asked to set. And `app_settings` will not run
+the pre-D-168 migration over a damaged file — adopting an old setting on top of
+one that may still be repairable by hand is the wrong way round.
+
+**`recent-projects.json` gets the writer and keeps its silence.** Losing that
+list costs no data: the folders are all still on disk. What it must not do is
+leave a half-written file where a whole one was, because an empty home screen
+reads as *"spoonstill forgot everything I have ever opened"*.
+
+**Two mutations, each caught by exactly one test.** Reverting `replace_file` to
+`fs::write` fails `a_replaced_file_is_never_seen_half_written` with the defect
+verbatim — *"a reader saw a half-written settings file: `""`"*, the empty file
+the truncate leaves. Making `damaged_file` always answer `None` fails
+`setting_one_again_moves_a_damaged_file_aside`.
+
+**Gate 7i grew rather than a gate being added**, because what only a gate can
+show is that the sentence reaches a terminal. It asserts the **output** and
+never the exit code — the line is printed before the provider is asked anything,
+so it holds on a machine with no `edge-tts` (D-020's bargain, D-137's runner) —
+and it asserts the warning **does not survive its own fix**. **`make gates` is
+still 39.**
+
 ### D-172 — A cross-build assertion is made of constants, not of media · Accepted
 
 `make gates` has been **38 of 39 on macOS since 2026-09-07**, and the one red

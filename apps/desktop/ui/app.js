@@ -298,10 +298,16 @@ async function loadFallbackVoice() {
   const select = el("app-voice");
   const said = el("app-voice-said");
   try {
-    const settings = await invoke("app_settings");
-    appDefaultVoice = settings.default_voice || null;
+    const view = await invoke("app_settings");
+    appDefaultVoice = view.settings.default_voice || null;
+    // A file that is there and could not be read is said where its setting is
+    // (D-171). `drawFix` hides itself when there is nothing wrong, so the
+    // ordinary machine sees no change.
+    drawFix(el("app-settings-fix"), view.problem || { ready: true },
+      () => loadFallbackVoice());
   } catch {
     appDefaultVoice = null;
+    el("app-settings-fix").hidden = true;
   }
 
   let catalogue = [];

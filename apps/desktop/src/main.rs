@@ -193,16 +193,60 @@ const RECENT_FILE: &str = "recent-projects.json";
 /// and carry it across; nothing writes it any more.
 const LEGACY_SETTINGS_FILE: &str = "app-settings.json";
 
+/// The machine's answers, and anything wrong with the file they came from.
+///
+/// Two fields because they go to two places: the settings fill the Voice
+/// chooser, and the problem is drawn by `drawFix` — the same component every
+/// other screen already uses for a `Remedy` (D-105, D-171).
+#[derive(serde::Serialize)]
+struct AppSettingsView {
+    settings: spoonstill_app::machine::Machine,
+    /// [`None`] when the file read cleanly or does not exist yet. A first run
+    /// has no settings and that is not a problem to show anybody.
+    problem: Option<SettingsProblem>,
+}
+
+/// A damaged settings file, in the shape `drawFix` draws.
+///
+/// `ready: false` always — this is only ever constructed when something is
+/// wrong — and `install: None`, because there is no package manager answer to
+/// a file the operator hand-edited.
+#[derive(serde::Serialize)]
+struct SettingsProblem {
+    ready: bool,
+    need: String,
+    install: Option<String>,
+    detail: String,
+}
+
 /// Read the machine's answers, adopting a pre-D-168 file once if there is one.
 ///
 /// The migration is a **read**, not a copy-and-delete: the old file is left
 /// where it is, so a machine that runs an older build again still finds its
 /// setting. It costs one stat on a path that normally does not exist.
 #[tauri::command]
-fn app_settings(app: tauri::AppHandle) -> spoonstill_app::machine::Machine {
-    let current = spoonstill_app::machine::load();
-    if current != spoonstill_app::machine::Machine::default() {
-        return current;
+fn app_settings(app: tauri::AppHandle) -> AppSettingsView {
+    let loaded = spoonstill_app::machine::read();
+    let problem = loaded.problem.map(|remedy| SettingsProblem {
+        ready: false,
+        need: remedy.need,
+        install: None,
+        detail: remedy.detail,
+    });
+    let view = |settings| AppSettingsView {
+        settings,
+        problem: None,
+    };
+
+    let current = loaded.settings;
+    if current != spoonstill_app::machine::Machine::default() || problem.is_some() {
+        // A damaged file is never quietly replaced by the pre-D-168 migration
+        // below: that would adopt an old setting over one the operator may
+        // still be able to repair by hand.
+        return AppSettingsView {
+            settings: current,
+            problem,
+        };
     }
     let Some(legacy) = app
         .path()
@@ -210,21 +254,21 @@ fn app_settings(app: tauri::AppHandle) -> spoonstill_app::machine::Machine {
         .ok()
         .map(|dir| dir.join(LEGACY_SETTINGS_FILE))
     else {
-        return current;
+        return view(current);
     };
     let Some(adopted) = std::fs::read_to_string(legacy)
         .ok()
         .and_then(|text| serde_json::from_str::<spoonstill_app::machine::Machine>(&text).ok())
     else {
-        return current;
+        return view(current);
     };
     if adopted == spoonstill_app::machine::Machine::default() {
-        return current;
+        return view(current);
     }
     // Best effort: a machine whose config directory cannot be written still
     // gets the setting for this session, which is better than losing it.
     let _ = spoonstill_app::machine::save(&adopted);
-    adopted
+    view(adopted)
 }
 
 /// Set the fallback voice, or clear it by passing nothing.
@@ -349,8 +393,18 @@ fn read_recent(app: &tauri::AppHandle) -> Vec<RecentProject> {
 }
 
 fn write_recent(app: &tauri::AppHandle, list: &[RecentProject]) {
+    // Written beside and renamed over, never truncated in place (D-171).
+    // Losing this list costs no data — the folders are all still on disk — so
+    // a failure here stays silent, as `read_recent` says. What it must not do
+    // is leave a half-written file where a whole one was: the home screen is
+    // the operator's list of projects, and an empty one reads as "spoonstill
+    // forgot everything I have ever opened".
+    //
+    // `spoonstill_app` owns the writer because D-010 stops the window reaching
+    // `spoonstill-media`, where the rename lives. One implementation, and the
+    // file stays where D-086 put it.
     if let (Some(path), Ok(text)) = (recent_file(app), serde_json::to_string_pretty(list)) {
-        let _ = std::fs::write(path, text);
+        let _ = spoonstill_app::machine::replace_file(&path, &text);
     }
 }
 

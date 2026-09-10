@@ -1218,6 +1218,35 @@ gate_voice_unchosen() {
       echo "the project did not keep the voice it was made with"; return 1; }
   fi
 
+  # D-171. A settings file that is there and cannot be used is *said*, and the
+  # file the operator typed is kept rather than replaced.
+  #
+  # Only a gate can show this: the unit tests cover the parsing and the moving
+  # aside, and what they cannot see is whether the sentence reaches a terminal.
+  # It asserts the **output** and never the exit code, for gate 7's reason —
+  # the line is printed before the provider is asked anything, so it holds on a
+  # machine with no `edge-tts` (D-020, D-137).
+  local broke="$fake/Library/Application Support/spoonstill/settings.yaml"
+  printf 'default_voice: "en-GB-Rya' > "$broke"
+  rm -f "$broke.broken"
+  out=$(HOME="$fake" "$STILL" voices en-GB 2>&1) || true
+  grep -q 'settings file is damaged' <<<"$out" || {
+    echo "$out"; echo "a damaged settings file was ignored in silence"; return 1; }
+  # The sentence says what it cost them, which is a voice — not that a YAML
+  # document ended unexpectedly (D-091, D-105).
+  grep -q 'which voice a project that names none' <<<"$out" || {
+    echo "$out"; echo "the message did not say what the damage cost"; return 1; }
+
+  HOME="$fake" "$STILL" voices --use en-GB-RyanNeural >/dev/null 2>&1 || {
+    echo "could not set a voice over a damaged file"; return 1; }
+  grep -q 'en-GB-Rya' "$broke.broken" || {
+    ls "$(dirname "$broke")"; echo "the damaged file was replaced, not kept"; return 1; }
+  grep -q 'default_voice: en-GB-RyanNeural' "$broke" || {
+    cat "$broke"; echo "the new setting did not take"; return 1; }
+  out=$(HOME="$fake" "$STILL" voices en-GB 2>&1) || true
+  grep -q 'settings file is damaged' <<<"$out" && {
+    echo "$out"; echo "the warning survived its own fix"; return 1; }
+
   # A machine with no answer writes none: `default` is not a voice (D-086), and
   # writing it would record the absence of a decision as though it were one.
   local bare="$WORK/unchosen-bare"

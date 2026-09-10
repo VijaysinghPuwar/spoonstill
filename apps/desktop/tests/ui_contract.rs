@@ -189,6 +189,7 @@ fn every_screen_that_reports_a_missing_tool_can_also_fix_it() {
         "render-fix",       // before a render, not after it fails
         "app-provider-fix", // Settings: the voice service
         "app-ffmpeg-fix",   // Settings: FFmpeg, which every render needs
+        "app-settings-fix", // Settings: this machine's own settings file (D-171)
     ] {
         assert!(
             html.contains(&format!("id=\"{host}\"")),
@@ -205,6 +206,40 @@ fn every_screen_that_reports_a_missing_tool_can_also_fix_it() {
     assert!(
         js.contains("invoke(\"install_tool\""),
         "nothing installs anything any more"
+    );
+}
+
+/// D-171. A settings file that is there and cannot be read is drawn, not
+/// swallowed.
+///
+/// The page used to take `app_settings` as the settings themselves. It returns
+/// `{settings, problem}` now, so a page that kept the old shape would read
+/// `undefined.default_voice`, throw, and land in the `catch` — which sets the
+/// fallback to `null` and is exactly the silence D-171 exists to end. Both
+/// halves are asserted because either alone passes against that.
+#[test]
+fn a_damaged_settings_file_is_drawn_where_its_setting_is() {
+    let js = code_only(&read("app.js"));
+    assert!(
+        js.contains("view.settings.default_voice"),
+        "the page reads `app_settings` as the settings themselves again, so \
+         the problem beside them cannot reach it"
+    );
+    assert!(
+        js.contains("drawFix(el(\"app-settings-fix\")"),
+        "a damaged settings file is read and then thrown away"
+    );
+
+    // And Rust still hands both halves over.
+    let rust = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+        .expect("src/main.rs");
+    assert!(
+        rust.contains("struct AppSettingsView"),
+        "the command stopped carrying the problem"
+    );
+    assert!(
+        rust.contains("machine::read()"),
+        "`app_settings` went back to `load`, which cannot say anything is wrong"
     );
 }
 
