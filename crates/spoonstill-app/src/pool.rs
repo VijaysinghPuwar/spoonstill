@@ -84,8 +84,25 @@ pub fn default_jobs() -> usize {
 pub enum Outcome<T> {
     /// The worker ran and produced this.
     Done(T),
+    /// The item was never admitted, and why.
+    NotAdmitted(NotStarted),
+}
+
+/// Why an item was never admitted (D-174).
+///
+/// It carried no reason until it had two, and the caller's message still said
+/// the only one it used to have: a single failed narration reported five
+/// scenes as *"not started — the run was cancelled"* when nobody had cancelled
+/// anything. A caller that has to infer this is a caller that will be wrong
+/// again the next time a reason is added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotStarted {
     /// Cancellation was requested before this item was admitted (D-045).
-    NotAdmitted,
+    Cancelled,
+    /// An earlier item's first stage failed, so the run was already doomed and
+    /// buying more narration would be buying it for a film nobody gets
+    /// (D-014). Only [`pipeline`] produces this.
+    EarlierFailure,
 }
 
 impl<T> Outcome<T> {
@@ -93,14 +110,14 @@ impl<T> Outcome<T> {
     pub fn done(self) -> Option<T> {
         match self {
             Outcome::Done(value) => Some(value),
-            Outcome::NotAdmitted => None,
+            Outcome::NotAdmitted(_) => None,
         }
     }
 
-    /// Whether this item was skipped because the run was cancelled.
+    /// Whether this item never ran, for any reason.
     #[must_use]
     pub const fn was_skipped(&self) -> bool {
-        matches!(self, Outcome::NotAdmitted)
+        matches!(self, Outcome::NotAdmitted(_))
     }
 }
 
@@ -158,7 +175,7 @@ where
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .into_iter()
-        .map(|value| value.map_or(Outcome::NotAdmitted, Outcome::Done))
+        .map(|value| value.map_or(Outcome::NotAdmitted(NotStarted::Cancelled), Outcome::Done))
         .collect()
 }
 
@@ -185,7 +202,9 @@ pub type Staged<T, E> = Vec<Outcome<Result<T, E>>>;
 ///   overlap changes when work happens and nothing about what comes back.
 /// - **Stage two only ever sees a stage one that succeeded.** An item whose
 ///   first stage failed is `NotAdmitted` in the second — its failure is in the
-///   first vector, which the caller reports.
+///   first vector, which the caller reports. Every `NotAdmitted` says **why**
+///   it was not admitted (D-174), because there are two reasons and they read
+///   very differently to the person holding the failure.
 /// - **Cancellation stops admission in both** (D-045).
 /// - **A stage-one failure stops admitting stage two.** Without it, one failed
 ///   narration at scene 1 would encode all 499 other segments before the run
@@ -241,7 +260,8 @@ where
             scope.spawn(|| {
                 loop {
                     // D-045's first rung, same as `run`: stop admitting.
-                    if cancel.is_requested() {
+                    // Also stop admitting if stage one has already failed.
+                    if cancel.is_requested() || first_failed.load(Ordering::SeqCst) {
                         break;
                     }
                     let index = next.fetch_add(1, Ordering::SeqCst);
@@ -298,7 +318,17 @@ where
         }
     });
 
-    (into_outcomes(firsts), into_outcomes(seconds))
+    // One reason for the whole run, because both causes are run-level: a
+    // producer breaks out of admission for one or the other, and every slot it
+    // did not reach has the same answer. Cancellation wins where both hold —
+    // the operator did that on purpose, and the caller already collapses a
+    // cancelled run to one line.
+    let why = if cancel.is_requested() {
+        NotStarted::Cancelled
+    } else {
+        NotStarted::EarlierFailure
+    };
+    (into_outcomes(firsts, why), into_outcomes(seconds, why))
 }
 
 /// What stage one has finished and stage two has not started.
@@ -322,12 +352,12 @@ fn take<A>(handoff: &Mutex<Handoff<A>>, arrived: &Condvar) -> Option<(usize, A)>
     }
 }
 
-fn into_outcomes<R>(slots: Mutex<Vec<Option<R>>>) -> Vec<Outcome<R>> {
+fn into_outcomes<R>(slots: Mutex<Vec<Option<R>>>, why: NotStarted) -> Vec<Outcome<R>> {
     slots
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .into_iter()
-        .map(|value| value.map_or(Outcome::NotAdmitted, Outcome::Done))
+        .map(|value| value.map_or(Outcome::NotAdmitted(why), Outcome::Done))
         .collect()
 }
 
@@ -596,18 +626,30 @@ mod tests {
     /// One failed narration must not cost a full render before the run is
     /// allowed to fail. Serial on both stages so the failure at index 0 is
     /// known before anything else could start.
+    ///
+    /// **Stage one is counted, and that is the point** (D-174). This test used
+    /// to assert only `SECOND_RAN < 50`, which passed against the code that
+    /// had no barrier at all: the producer ran all fifty, handed off
+    /// forty-nine, and the consumers skipped every one of them because
+    /// `first_failed` was already set — so stage two ran zero times either way
+    /// and the assertion could not tell the two programs apart. D-116's trap,
+    /// in a test written to catch exactly this. Stage one is where the money
+    /// is (D-014): it is the one that calls the provider.
     #[test]
-    fn a_first_stage_failure_stops_admitting_second_stage_work() {
+    fn a_first_stage_failure_stops_admitting_more_of_either_stage() {
+        static FIRST_RAN: AtomicU32 = AtomicU32::new(0);
         static SECOND_RAN: AtomicU32 = AtomicU32::new(0);
+        FIRST_RAN.store(0, Ordering::SeqCst);
         SECOND_RAN.store(0, Ordering::SeqCst);
 
         let items: Vec<u32> = (0..50).collect();
-        let (firsts, _) = pipeline(
+        let (firsts, _seconds) = pipeline(
             &items,
             1,
             1,
             &Cancel::new(),
             |index, item: &u32| -> Result<u32, String> {
+                FIRST_RAN.fetch_add(1, Ordering::SeqCst);
                 if index == 0 {
                     return Err("the voice service is gone".to_owned());
                 }
@@ -620,10 +662,78 @@ mod tests {
         );
 
         assert!(matches!(&firsts[0], Outcome::Done(Err(_))));
-        assert!(
-            SECOND_RAN.load(Ordering::SeqCst) < 50,
-            "every segment rendered anyway, after the run was already doomed"
+        assert_eq!(
+            FIRST_RAN.load(Ordering::SeqCst),
+            1,
+            "forty-nine more narrations were bought for a film nobody gets"
         );
+        assert_eq!(
+            SECOND_RAN.load(Ordering::SeqCst),
+            0,
+            "and nothing was encoded from them"
+        );
+    }
+
+    /// The barrier with several producers, which is where the real edge is
+    /// (D-174): **work already in flight must be allowed to finish**, and no
+    /// new item may be admitted after the failure.
+    ///
+    /// The four producers are held inside their first item by a barrier, so
+    /// which indices are in flight when the failure is decided is a fact and
+    /// not a race. After that each producer can slip at most one more item
+    /// through before its next look at the flag, which is why the bound is
+    /// `2n - 1` and not `n` — a bound the design guarantees, rather than a
+    /// number this machine happened to produce.
+    #[test]
+    fn work_already_in_flight_finishes_and_nothing_new_is_admitted() {
+        const PRODUCERS: usize = 4;
+        let started: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+        let gate = std::sync::Barrier::new(PRODUCERS);
+
+        let items: Vec<u32> = (0..50).collect();
+        let (firsts, _) = pipeline(
+            &items,
+            PRODUCERS,
+            2,
+            &Cancel::new(),
+            |index, item: &u32| -> Result<u32, String> {
+                if let Ok(mut log) = started.lock() {
+                    log.push(index);
+                }
+                // Every producer is inside its first item together, so the
+                // failure below is decided with all four in flight.
+                if index < PRODUCERS {
+                    gate.wait();
+                }
+                if index == 0 {
+                    return Err("the voice service is gone".to_owned());
+                }
+                Ok(*item)
+            },
+            |_, _, value: &u32| -> Result<u32, String> { Ok(*value) },
+        );
+
+        let started = started.into_inner().expect("not poisoned");
+        assert!(
+            started.len() < items.len(),
+            "every narration was bought anyway: {} of {}",
+            started.len(),
+            items.len()
+        );
+        assert!(
+            started.len() < 2 * PRODUCERS,
+            "more than one item slipped past the barrier per producer: {started:?}"
+        );
+        for index in 0..PRODUCERS {
+            assert!(started.contains(&index), "{index} never ran: {started:?}");
+        }
+        // Work already in flight finished rather than being abandoned.
+        for (index, outcome) in firsts.iter().enumerate().take(PRODUCERS).skip(1) {
+            assert!(
+                matches!(outcome, Outcome::Done(Ok(_))),
+                "item {index} was in flight and must have finished"
+            );
+        }
     }
 
     /// D-045 in both stages, and — the reason this test exists at all — no

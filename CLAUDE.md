@@ -190,6 +190,58 @@ cargo build --release -p spoonstill-cli
 cargo run --release -p spoonstill-desktop
 ```
 
+### State as of 2026-09-10 — the working tree was saving money by lying about which scenes broke
+
+**D-174 — stage one stops when stage one has failed, and says so without
+inventing a cancellation.** The uncommitted `pipeline` edit both audits arrived
+at — one as its author, one as its reviewer — is **right and was untested**, and
+**neither of them noticed what it does to the failure report.**
+
+Keep it, for Gemini's reason: stage one is `resolve_audio`, which calls the
+provider, which under D-014's BYOK is **money and rate limit**. Measured through
+a stub voice service, eight scenes with 003 poisoned: **8 provider calls before,
+3 after**. D-002's pre-flight does not cover this — it asks whether the service
+is reachable *before* the pool, and this is a failure *during* it.
+
+**What it cost, reproduced end to end:**
+
+```
+WITH the edit, before this commit          AFTER
+still: 6 narrations could not be           still: 1 narration could not be
+       resolved:                                  resolved:
+  scene 003: cannot speak its line …         scene 003: cannot speak its line …
+  scene 004: not started — the run           5 more scenes were not started,
+             was cancelled                   because a narration failed before them.
+  scene 005: … (and 006, 007, 008)
+```
+
+Nobody cancelled anything. `Outcome::NotAdmitted` meant D-045 cancellation and
+nothing else when that sentence was written, and the edit gave it a second
+meaning. **The pool says which now** — `NotAdmitted(NotStarted::Cancelled |
+EarlierFailure)` — rather than the caller inferring it, because inference is
+what would be wrong again the next time a reason is added. A consequence is
+**counted, not listed**: same judgement a cancelled run already got a few
+branches up, so the header counts the scenes with a file to go and look at.
+
+**The test that should have caught the edit passed against both programs**, and
+that is the lesson. `SECOND_RAN < 50` with one producer and item 0 failing: the
+old code ran all fifty, handed off forty-nine, and the consumers skipped every
+one because `first_failed` was already set — **stage two ran zero times either
+way**. D-116's trap inside a test written for D-116's shape, and the reason the
+edit reached the working tree untested. It counts **stage one** now — the stage
+the money is in — and asserts 1 and 0. Against the code before the edit: 50.
+
+The multi-producer test holds four producers inside their first item on a
+barrier, so which indices are in flight when the failure is decided is a fact
+rather than a race, and asserts a bound the design guarantees (`2n`) plus that
+**work already in flight finished**. The report has three tests and needs all
+three: the count, the absence of the word *cancelled*, and that a genuinely
+cancelled run still collapses to one line.
+
+**`make gates` is 38 of 39** — unchanged; gate 7h is still the macOS-pinned
+Windows constants, which is the next step.
+
+
 ### State as of 2026-09-10 — "Nothing was deleted" was printed over a deleted file
 
 **Two outside audits were checked claim by claim before any of them was acted

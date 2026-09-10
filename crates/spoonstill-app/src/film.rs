@@ -364,11 +364,15 @@ pub enum FilmError {
     Audio {
         /// Every failure, in render order.
         failures: Vec<SceneFailure>,
+        /// How many scenes were never started because of them (D-174).
+        not_started: usize,
     },
     /// One or more segments could not be rendered.
     Render {
         /// Every failure, in render order.
         failures: Vec<SceneFailure>,
+        /// How many scenes were never started because of them (D-174).
+        not_started: usize,
     },
     /// The run was cancelled (D-045).
     Cancelled,
@@ -444,7 +448,10 @@ impl std::fmt::Display for FilmError {
                 plural(*scenes),
                 if *scenes == 1 { "s" } else { "" }
             ),
-            FilmError::Audio { failures } => {
+            FilmError::Audio {
+                failures,
+                not_started,
+            } => {
                 write!(
                     f,
                     "{} narration{} could not be resolved:",
@@ -454,9 +461,12 @@ impl std::fmt::Display for FilmError {
                 for failure in failures {
                     write!(f, "\n  {failure}")?;
                 }
-                Ok(())
+                write_not_started(f, *not_started, "a narration failed before them")
             }
-            FilmError::Render { failures } => {
+            FilmError::Render {
+                failures,
+                not_started,
+            } => {
                 write!(
                     f,
                     "{} scene{} failed to render:",
@@ -466,7 +476,7 @@ impl std::fmt::Display for FilmError {
                 for failure in failures {
                     write!(f, "\n  {failure}")?;
                 }
-                Ok(())
+                write_not_started(f, *not_started, "an earlier scene failed")
             }
             FilmError::Cancelled => f.write_str(
                 "cancelled — finished segments are kept, so the next run resumes from them",
@@ -493,6 +503,29 @@ impl From<MediaError> for FilmError {
 
 fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
+}
+
+/// One line for the scenes that never started, or nothing at all (D-174).
+///
+/// One line rather than one row each, for the reason a cancelled run collapses
+/// to one line a few branches up: *a list of "we stopped" is not a list an
+/// operator needs to read*, and printing it makes one broken narration look
+/// like six broken scenes. The header counts the real failures, which are the
+/// ones with a file to go and look at.
+fn write_not_started(
+    f: &mut std::fmt::Formatter<'_>,
+    not_started: usize,
+    because: &str,
+) -> std::fmt::Result {
+    if not_started == 0 {
+        return Ok(());
+    }
+    write!(
+        f,
+        "\n  {not_started} more scene{} {} not started, because {because}.",
+        plural(not_started),
+        if not_started == 1 { "was" } else { "were" }
+    )
 }
 
 /// Render a project folder into one film.
@@ -1275,10 +1308,15 @@ fn resolve_and_render(
     // The narrations first, and the order matters: a scene whose narration
     // failed has no segment, so reporting the segment list would name the
     // consequence rather than the cause.
-    let audio = collect(project, audio_outcomes, cancel)
-        .map_err(|failures| FilmError::Audio { failures })?;
-    let rendered = collect(project, segment_outcomes, cancel)
-        .map_err(|failures| FilmError::Render { failures })?;
+    let audio = collect(project, audio_outcomes, cancel).map_err(|failed| FilmError::Audio {
+        failures: failed.failures,
+        not_started: failed.not_started,
+    })?;
+    let rendered =
+        collect(project, segment_outcomes, cancel).map_err(|failed| FilmError::Render {
+            failures: failed.failures,
+            not_started: failed.not_started,
+        })?;
 
     Ok((audio, rendered))
 }
@@ -1458,14 +1496,31 @@ fn is_the_planned_length(probed: &spoonstill_media::probe::ProbeResult, plan: &P
     false
 }
 
+/// What a stage could not do: the scenes that failed, and how many never got
+/// the chance (D-174).
+///
+/// Two numbers rather than one list, because they are two different things to
+/// the person reading them. A scene that failed is a file to go and look at; a
+/// scene that was never started is a consequence, and putting five of them in
+/// the list turns one broken narration into a report that says six things are
+/// wrong.
+#[derive(Debug)]
+struct Failed {
+    /// The scenes that actually failed, in render order.
+    failures: Vec<SceneFailure>,
+    /// How many were never started because of them.
+    not_started: usize,
+}
+
 /// Turn a pool's outcomes into either every value or every failure.
 fn collect<T>(
     project: &Project,
     outcomes: Vec<Outcome<Result<T, impl std::fmt::Display>>>,
     cancel: &Cancel,
-) -> Result<Vec<T>, Vec<SceneFailure>> {
+) -> Result<Vec<T>, Failed> {
     let mut values = Vec::with_capacity(outcomes.len());
     let mut failures = Vec::new();
+    let mut not_started = 0;
 
     for (index, outcome) in outcomes.into_iter().enumerate() {
         let id = project
@@ -1479,26 +1534,30 @@ fn collect<T>(
                 id,
                 detail: error.to_string(),
             }),
-            Outcome::NotAdmitted => failures.push(SceneFailure {
-                index,
-                id,
-                detail: "not started — the run was cancelled".to_owned(),
-            }),
+            // Counted, not listed — and never described as a cancellation
+            // unless one was asked for (D-174).
+            Outcome::NotAdmitted(_) => not_started += 1,
         }
     }
 
-    if failures.is_empty() {
+    if failures.is_empty() && not_started == 0 {
         Ok(values)
     } else if cancel.is_requested() {
         // A cancelled run's failures are mostly "we stopped", which is not a
         // list an operator needs to read.
-        Err(vec![SceneFailure {
-            index: 0,
-            id: "*".to_owned(),
-            detail: "cancelled".to_owned(),
-        }])
+        Err(Failed {
+            failures: vec![SceneFailure {
+                index: 0,
+                id: "*".to_owned(),
+                detail: "cancelled".to_owned(),
+            }],
+            not_started: 0,
+        })
     } else {
-        Err(failures)
+        Err(Failed {
+            failures,
+            not_started,
+        })
     }
 }
 
@@ -1847,6 +1906,91 @@ mod tests {
             scenes,
             problems: Vec::new(),
         }
+    }
+
+    /// D-174. Nobody cancelled anything, so nothing may say they did.
+    ///
+    /// `Outcome::NotAdmitted` had exactly one cause when this message was
+    /// written — D-045 cancellation — and stopping stage one after a stage-one
+    /// failure gave it a second. Reproduced with eight scenes through a stub
+    /// voice service, one line poisoned: the render reported **six** narrations
+    /// broken when one was, and five of the six said *"not started — the run
+    /// was cancelled"*. The header is the first thing read, and it sent the
+    /// operator to look at five files that were fine.
+    ///
+    /// Both halves are asserted, because either alone would pass against a
+    /// wrong fix: the count, and the word.
+    #[test]
+    fn a_failed_narration_is_not_reported_as_a_cancellation() {
+        let root = scratch("not-cancelled");
+        let scenes: Vec<ResolvedScene> = (1..=6)
+            .map(|n| spoken_scene(&format!("{n:03}"), "A line.", "edge"))
+            .collect();
+        let project = project_of(&root, scenes);
+
+        // One scene failed; the four after it were never admitted because of
+        // it. This is exactly what `pipeline` hands back.
+        let outcomes: Vec<Outcome<Result<(), String>>> = vec![
+            Outcome::Done(Ok(())),
+            Outcome::Done(Ok(())),
+            Outcome::Done(Err("cannot speak its line".to_owned())),
+            Outcome::NotAdmitted(crate::pool::NotStarted::EarlierFailure),
+            Outcome::NotAdmitted(crate::pool::NotStarted::EarlierFailure),
+            Outcome::NotAdmitted(crate::pool::NotStarted::EarlierFailure),
+        ];
+
+        let failed = collect(&project, outcomes, &Cancel::new()).expect_err("one scene failed");
+        assert_eq!(
+            failed.failures.len(),
+            1,
+            "one narration failed, so the header must say one: {:?}",
+            failed.failures
+        );
+        assert_eq!(failed.not_started, 3);
+
+        let said = FilmError::Audio {
+            failures: failed.failures,
+            not_started: failed.not_started,
+        }
+        .to_string();
+        assert!(
+            said.starts_with("1 narration could not be resolved:"),
+            "{said}"
+        );
+        assert!(
+            !said.to_lowercase().contains("cancel"),
+            "nobody cancelled anything: {said}"
+        );
+        assert!(
+            said.contains("3 more scenes were not started"),
+            "and the consequence is still stated, once: {said}"
+        );
+        assert!(said.contains("cannot speak its line"), "{said}");
+    }
+
+    /// And a run that *was* cancelled still collapses to the one line it always
+    /// did — the branch above must not have been bought by breaking this one.
+    #[test]
+    fn a_cancelled_run_still_collapses_to_one_line() {
+        let root = scratch("still-cancelled");
+        let scenes: Vec<ResolvedScene> = (1..=4)
+            .map(|n| spoken_scene(&format!("{n:03}"), "A line.", "edge"))
+            .collect();
+        let project = project_of(&root, scenes);
+
+        let cancel = Cancel::new();
+        cancel.request();
+        let outcomes: Vec<Outcome<Result<(), String>>> = vec![
+            Outcome::Done(Ok(())),
+            Outcome::NotAdmitted(crate::pool::NotStarted::Cancelled),
+            Outcome::NotAdmitted(crate::pool::NotStarted::Cancelled),
+            Outcome::NotAdmitted(crate::pool::NotStarted::Cancelled),
+        ];
+
+        let failed = collect(&project, outcomes, &cancel).expect_err("cancelled");
+        assert_eq!(failed.failures.len(), 1);
+        assert_eq!(failed.failures[0].detail, "cancelled");
+        assert_eq!(failed.not_started, 0, "not listed twice");
     }
 
     /// The window and the command line reach the same voices (D-168).

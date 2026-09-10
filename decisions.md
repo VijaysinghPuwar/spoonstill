@@ -7067,6 +7067,81 @@ and the gate: `still new` not recording, and `default` recorded as a voice.
 
 
 
+### D-174 — Stage one stops when stage one has failed, and says so without inventing a cancellation · Accepted
+
+Both audits arrived at the same uncommitted `pipeline` edit — one as its author,
+one as its reviewer — and **both missed what it does to the failure report**.
+Gemini named the stake better and is right about it: stage one is
+`resolve_audio`, which calls the provider, which under D-014's BYOK is **money
+and rate limit**. A doomed render must not keep buying narration. D-002's
+pre-flight does not cover this — it asks whether the service is reachable
+*before* the pool, and this is a failure *during* it.
+
+So the change stays. The rest of this is what it cost.
+
+**Reproduced**, eight scenes through a stub voice service with scene 003's line
+poisoned:
+
+```
+WITH the edit                              WITHOUT it
+still: 6 narrations could not be           still: 1 narration could not be
+       resolved:                                  resolved:
+  scene 003: cannot speak its line …         scene 003: cannot speak its line …
+  scene 004: not started — the run
+             was cancelled
+  scene 005: … (and 006, 007, 008)
+```
+
+Two wrongs, and the second is worse. **Five lines state something that did not
+happen** — nobody cancelled anything, which is D-150's whole class and D-091's
+rule that a misleadingly-true state is a defect of the same kind as a wrong
+number. And **the count went from 1 to 6**: the header is the first thing read,
+and it now sends the operator to look at five files that are fine while the one
+real cause becomes something to find rather than something shown.
+
+**The cause is a message written when its case had one meaning.**
+`Outcome::NotAdmitted` meant D-045 cancellation and nothing else, so
+`film.rs` rendered it as *"not started — the run was cancelled"*. It has two
+meanings now. **The pool says which** — `NotAdmitted(NotStarted::Cancelled |
+NotStarted::EarlierFailure)` — rather than the caller inferring it from the
+list, because inference is exactly what would be wrong again the next time a
+reason is added. The reason is computed once per run, since both causes are
+run-level, and cancellation wins where both hold.
+
+**A consequence is counted, not listed.** `collect` returns `Failed { failures,
+not_started }` and the message ends with one line: *"3 more scenes were not
+started, because a narration failed before them."* That is the same judgement a
+cancelled run already got a few branches up — *a list of "we stopped" is not a
+list an operator needs to read* — applied to the second reason as well. The
+header counts the scenes with a file to go and look at.
+
+**The test that should have caught the edit did not, and why is the lesson.**
+`a_first_stage_failure_stops_admitting_second_stage_work` asserted `SECOND_RAN <
+50` and **passed against both programs**. With one producer and item 0 failing,
+the old code ran all fifty, handed off forty-nine, and the consumers skipped
+every one because `first_failed` was already set — so stage two ran **zero**
+times either way. The assertion could not tell the two programs apart. D-116's
+trap, in a test written to catch this exact shape of defect, and the reason the
+edit reached the working tree untested.
+
+It counts **stage one** now — the stage the money is in — and asserts `1` and
+`0` rather than a bound. Against the code before the edit it reports 50.
+
+**And the multi-producer case is a bound the design guarantees, not a number
+this machine produced.** Four producers are held inside their first item by a
+barrier, so which indices are in flight when the failure is decided is a fact
+rather than a race; after it, each producer can slip at most one more item
+through before its next look at the flag, so the bound is `2n`. The test also
+asserts the three items already in flight **finished** — work started must be
+allowed to complete — which is the property the barrier could otherwise be
+mistaken for breaking.
+
+**The report has two tests and needs both**, because either alone passes against
+a wrong fix: the count, and the absence of the word *cancelled*. A third asserts
+that a run that really was cancelled still collapses to the one line it always
+did — the fix must not be bought by breaking the case it was modelled on.
+
+
 ### D-170 — A rename never lands on a file nobody parked · Accepted
 
 Found by running the tool rather than by reading it, while checking an outside
