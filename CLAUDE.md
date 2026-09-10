@@ -15,7 +15,7 @@ narration boundaries. It is **not a video editor** — no timeline, no scrubber.
   the same cache. There is also a **drop-in importer** (`still new` / `still
   add`, D-080) and a **Tauri window** in `apps/desktop`. There is still **no
   state database** (M3) and **no ElevenLabs provider**; if a document describes
-  those as existing, it is describing an intended system. Run `make gates` — 38 checks, M2 now 22.
+  those as existing, it is describing an intended system. Run `make gates` — 39 checks, M2 now 23.
 - **Rust 1.94.0 is installed**, pinned by `rust-toolchain.toml`. Homebrew's
   rustup keeps its shims in `/opt/homebrew/opt/rustup/bin`, **not**
   `~/.cargo/bin` — that path is on `PATH` via `~/.zshrc` and is re-exported by
@@ -129,7 +129,7 @@ dependency, and the shipped FFmpeg binary needs its own LGPL build (D-062).
 what any document claims:
 
 ```bash
-make gates          # M0 8/8, M1 8/8, M2 22/22 = intact.
+make gates          # M0 8/8, M1 8/8, M2 23/23 = intact.
                     # Also: make gates-m1 | gates-m2 | test | lint | fixtures
                     #       | brand | tts-live | help
 git log --oneline   # planning corpus, then M0, then M1, then M2 slice by slice
@@ -260,14 +260,14 @@ D-144's reason). It is **not a `Problem`**: `still validate` cannot see
 Computed in `film.rs` after `apply_voice_override`, recomputed after the thing
 that silences it — D-145's shape exactly.
 
-**Gate 7h proves the wiring, which the unit tests cannot**, and asserts the
+**Gate 7i proves the wiring, which the unit tests cannot**, and asserts the
 *output* and never the exit code: the warning is printed before
 `check_voice_service`, so on a machine with no `edge-tts` every render in it
 fails after printing and every assertion still holds (gate 7's bargain, D-020).
 Measured: two unchosen scenes warn once and render; `--voice` silences it;
 `tts.voice:` silences it; a recorded project is never asked. The window half was
 driven through the real `app.js` in node behind a stub DOM, both ways.
-**M2 is 22 gates; `make gates` is 38.**
+**M2 is 23 gates; `make gates` is 39.**
 
 **D-168 — and the setting it all rests on was somewhere the CLI could not
 reach.** Setting out to put a "use for every project" button on the Voice
@@ -310,11 +310,11 @@ a voice picked for this run can also be the machine's.
 Measured with `HOME` redirected: no fallback → `voice=en-US-AvaNeural`;
 `--use en-GB-RyanNeural` → that; a project naming `en-US-GuyNeural` → that, the
 fallback correctly overruled; `--voice ja-JP-KeitaNeural` → that, overruling
-both. Gate 7h asserts it in a **fresh `HOME`**, and does the fallback half
+both. Gate 7i asserts it in a **fresh `HOME`**, and does the fallback half
 **before** the `project.yaml` half in a voice no other step uses — the other way
 round it would have passed without the fallback doing anything (D-154). Two
 mutations caught: `still render` not reading the setting, and the fallback
-folded into `voice`. **`make gates` is still 38.**
+folded into `voice`. **`make gates` is still 39.**
 
 **D-169 — and a new project records the voice it was made with.** D-168's
 fallback keeps ten folders matched *while the machine keeps that setting*.
@@ -346,9 +346,9 @@ wrong by two spaces is a file that looks correct and names no voice.
 Measured with `HOME` redirected: a project made under `en-GB-RyanNeural` still
 renders `voice=en-GB-RyanNeural` after the machine moves to
 `ja-JP-KeitaNeural`, while a folder with no `project.yaml` renders
-`voice=ja-JP-KeitaNeural`. In gate 7h, with the "no answer writes none" half on
+`voice=ja-JP-KeitaNeural`. In gate 7i, with the "no answer writes none" half on
 a **second** fresh `HOME` so it cannot pass by inheriting the first's state.
-**`make gates` is still 38** — gate 7h grew; no gate was added.
+**`make gates` is still 39** — gate 7i grew; no gate was added.
 
 **All four steps of the reported workflow are done.** What is deliberately not
 built is the operator's original proposal — no default voice at all, a manual
@@ -1555,7 +1555,7 @@ exact thing the top of this file warns about.
 
 #### If you are checking this work
 
-Run `make gates` first: **M0 8/8, M1 8/8, M2 22/22**, plus `cargo fmt --check`,
+Run `make gates` first: **M0 8/8, M1 8/8, M2 23/23**, plus `cargo fmt --check`,
 `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test
 --workspace` (558 tests). Then `cargo audit --deny warnings` (D-129), which is
 new and is the one check that can fail without the code changing.

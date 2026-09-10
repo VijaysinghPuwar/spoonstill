@@ -160,7 +160,7 @@ is additionally cross-compiled for `x86_64-pc-windows-msvc` before a tag is cut
 `ffmpeg-findings.md` §13 is the first set of numbers in this project that is not
 macOS.
 
-What remains true is that the **38 `make gates` checks are macOS-only** — they
+What remains true is that the **39 `make gates` checks are macOS-only** — they
 are bash, and the Windows leg's `cargo test --workspace` covers the same media
 paths in Rust. If you are the first person to hit something,
 an [issue](https://github.com/VijaysinghPuwar/spoonstill/issues) with
@@ -810,7 +810,7 @@ before it is called a test**.
 | Rust | **37,715 lines** across 6 crates + a Tauri app · edition 2024, pinned to 1.94 |
 | UI | 3,636 lines of hand-written HTML/CSS/JS — no framework, no build step |
 | Tests | **601 `#[test]` functions** — 45 unit-test modules, 15 integration suites |
-| Exit gates | **38** shell gates that render real media and assert real properties |
+| Exit gates | **39** shell gates that render real media and assert real properties |
 | Decisions | **131 numbered decisions** in `decisions.md`, each Accepted / Open / Superseded |
 | Direct dependencies | **12 third-party crates** at runtime (plus one build-time, one dev-only) — and `spoonstill-core` has **none** |
 | `unsafe` | forbidden at the workspace root |
@@ -907,7 +907,7 @@ obvious fix was wrong, and the test that fails without it.
 |---|---|---|
 | **M0** — toolchain, workspace, architecture boundary | ✅ complete | 8/8 gates |
 | **M1** — one scene, end to end | ✅ complete | 8/8 gates |
-| **M2** — whole projects: import, validation, speech, subtitles, parallel render | ✅ complete | 22/22 gates |
+| **M2** — whole projects: import, validation, speech, subtitles, parallel render | ✅ complete | 23/23 gates |
 | **M3** — state database and reporting index | goal met, deliverables owed — *resume already works, and not by a database* | — |
 | **M4** — the desktop window | shell exists, ahead of schedule | — |
 | **M5** — signing, notarization, bundled FFmpeg, auto-update | not started | — |
@@ -955,7 +955,7 @@ make tts-live   # exercise the voice provider against the real service
 make brand      # regenerate every logo asset from its one description
 ```
 
-`make gates` is the honest answer to *"does this work?"*. It runs 38 checks
+`make gates` is the honest answer to *"does this work?"*. It runs 39 checks
 across the three completed milestones and prints pass/fail for each. If all
 three are green, everything in this file is accurate.
 

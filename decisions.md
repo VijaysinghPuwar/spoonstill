@@ -6838,7 +6838,7 @@ files are joined by a serde name that no compiler checks, and a fifth origin
 added in Rust would otherwise leave a blank column on the screen this decision
 exists to fix. Verified by adding one.
 
-**`make gates` is still 37.** Nothing here changes what renders — the same
+**`make gates` is 39** — one gate more than before this work, and the extra one is D-167's; nothing here changes what renders — the same
 project renders the same film — and what changed is which voice a *window*
 asks for, which no shell gate drives (D-131: there is no GUI automation here).
 
@@ -6890,7 +6890,7 @@ for the same reason — it is recomputed after the thing that can silence it.
 **One line for the project, not one per scene.** `undersized_sources`' rule
 (D-145): the fix is one setting, so 500 copies of it say nothing new 499 times.
 
-**Gate 7h proves the wiring, which no unit test can.** The unit tests cover
+**Gate 7i proves the wiring, which no unit test can.** The unit tests cover
 `unchosen_voice_warning` itself; what only a gate shows is that the sentence
 reaches a terminal, exactly once, before the pool, and that **both** documented
 answers silence it — `--voice` and `tts.voice:` — and that a project with
@@ -6907,7 +6907,7 @@ through the real `app.js` in node behind a stub DOM, both ways: with no
 fallback saved a spoken project is stopped and a recorded one is not, and with
 a fallback saved nothing is stopped at all.
 
-**M2 is 22 gates; `make gates` is 38.**
+**M2 is 23 gates; `make gates` is 39.**
 
 ### D-168 — The machine's voice is one setting, in one place, reachable from both surfaces · Accepted
 
@@ -6983,7 +6983,7 @@ Measured on this machine with `HOME` redirected: no fallback → the warning and
 `voice=en-US-AvaNeural`; `--use en-GB-RyanNeural` → no warning and
 `voice=en-GB-RyanNeural`; a project naming `en-US-GuyNeural` → `voice=en-US-GuyNeural`,
 the fallback correctly overruled by the project; `--voice ja-JP-KeitaNeural` →
-that, overruling both. Gate 7h asserts the first three, in a **fresh `HOME`**
+that, overruling both. Gate 7i asserts the first three, in a **fresh `HOME`**
 so it tests the rule and not the machine it runs on, and does the fallback half
 **before** the `project.yaml` half in a voice no other step uses — written the
 other way round it would have rendered a project that already named that voice
@@ -6993,7 +6993,7 @@ voice service says which case it ran in rather than passing quietly.
 The window half was driven through the real `app.js` in node behind a stub DOM:
 pin, unpin, and the render held again afterwards.
 
-**M2 is 22 gates; `make gates` is 38.**
+**M2 is 23 gates; `make gates` is 39.**
 
 ### D-169 — A new project records the voice it was made with · Accepted
 
@@ -7044,12 +7044,12 @@ Measured with `HOME` redirected: with no fallback, a new project writes one key
 and no `tts:`; with `en-GB-RyanNeural` set it writes the block; and after the
 machine is moved to `ja-JP-KeitaNeural` that project still renders
 `voice=en-GB-RyanNeural` while a folder with no `project.yaml` renders
-`voice=ja-JP-KeitaNeural`. Both halves are in gate 7h, in a fresh `HOME`, with
+`voice=ja-JP-KeitaNeural`. Both halves are in gate 7i, in a fresh `HOME`, with
 the "no answer writes none" half on a **second** fresh `HOME` so it cannot pass
 by inheriting the first one's state. Two mutations caught by both a unit test
 and the gate: `still new` not recording, and `default` recorded as a voice.
 
-**`make gates` is still 38** — gate 7h grew; no gate was added.
+**`make gates` is still 39** — gate 7i grew; no gate was added.
 
 
 
