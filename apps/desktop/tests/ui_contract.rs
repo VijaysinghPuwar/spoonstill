@@ -313,6 +313,91 @@ fn the_shape_and_size_boxes_reach_the_render() {
     );
 }
 
+/// The voice on the screen is the voice in the render request (D-162).
+///
+/// These were two expressions of one rule, in two files. The Render summary
+/// read `effectiveVoice()`; the request built
+/// `chosenVoice || (projectNamesNoVoice() ? appDefaultVoice : null)`. Nothing
+/// asserted they agreed, and one of them was reading a variable that the page
+/// only filled if the operator had visited Settings in that session — so the
+/// machine's fallback voice was saved, displayed, and ignored.
+///
+/// Asserted rather than clicked for D-088's reason: a webview renders a wrong
+/// voice name without complaint, and a render in the wrong voice looks like a
+/// finished render.
+#[test]
+fn the_voice_shown_is_the_voice_sent() {
+    let js = code_only(&read("app.js"));
+
+    assert!(
+        js.contains("invoke(\"voice_choice\""),
+        "the page is deciding the voice itself instead of asking the one \
+         function that knows the rule"
+    );
+
+    let at = js
+        .find("\"render_project\"")
+        .expect("the page does not render at all");
+    let request = &js[at..js.len().min(at + 1600)];
+    assert!(
+        request.contains("voice: voiceState?.overrideForRender"),
+        "the render request is building its own answer, so what it sends can \
+         drift from what the Voice screen shows"
+    );
+
+    // The page may still hold the fallback for the Settings <select> to show.
+    // What it may not do is resolve *with* it: that is the copy of the rule
+    // that silently did nothing on a launch where Settings was never opened.
+    for spelling in ["appDefaultVoice ||", "projectNamesNoVoice"] {
+        assert!(
+            !js.contains(spelling),
+            "`{spelling}` is the page resolving a voice again — the fallback \
+             is read in Rust, from the file, where the page cannot forget it"
+        );
+    }
+}
+
+/// Every origin Rust can return has a word the page can print (D-162).
+///
+/// The two files are joined by a serde name, which no compiler checks. Adding
+/// a fifth answer in Rust and forgetting the page gives a blank column on the
+/// one screen that exists to say whose voice you will hear — the failure this
+/// decision started from, one variant along.
+#[test]
+fn the_page_has_a_word_for_every_origin_rust_can_return() {
+    let rust = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+        .expect("reading main.rs");
+
+    let at = rust
+        .find("enum VoiceOrigin {")
+        .expect("VoiceOrigin is gone");
+    let body = &rust[at..at + rust[at..].find('}').expect("unclosed enum")];
+    let variants: Vec<String> = body
+        .lines()
+        .map(|line| line.split_once("//").map_or(line, |(code, _)| code).trim())
+        .filter(|line| line.ends_with(','))
+        .map(|line| line.trim_end_matches(',').to_lowercase())
+        .collect();
+
+    assert_eq!(
+        variants.len(),
+        4,
+        "expected the four answers of D-092/D-162, found {variants:?}"
+    );
+
+    let js = code_only(&read("app.js"));
+    let at = js.find("const VOICE_MARK = {").expect("VOICE_MARK is gone");
+    let marks = &js[at..at + js[at..].find("};").expect("unclosed VOICE_MARK")];
+
+    for variant in &variants {
+        assert!(
+            marks.contains(&format!("{variant}:")),
+            "VoiceOrigin::{variant} has no word in VOICE_MARK, so that row \
+             would be marked with nothing: {marks}"
+        );
+    }
+}
+
 /// The traffic-light reservation is macOS's, and it says so.
 ///
 /// `titleBarStyle: "Overlay"` is macOS-only — Tauri's `title_bar_style` is

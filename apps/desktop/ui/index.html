@@ -194,7 +194,11 @@
       <div class="rail-facts">
         <button class="rail-fact" data-tab="voice" id="go-voice">
           <span class="k">Voice</span>
-          <span class="v" id="rail-voice">project default</span>
+          <span class="v" id="rail-voice">none chosen</span>
+          <!-- Who chose it, not just what it is. The rail is what gets read at
+               the moment of reaching for Render, so it is where "nobody chose
+               this" has to be legible. D-162. -->
+          <span class="w" id="rail-voice-said"></span>
         </button>
         <button class="rail-fact" data-tab="output" id="go-output">
           <span class="k">Saves to</span>
@@ -276,11 +280,14 @@
           <div class="chosen-name" id="chosen-name">Project default</div>
           <div class="chosen-id mono" id="chosen-id">—</div>
         </div>
-        <!-- Whether this is your pick or the project's, in words. D-091. -->
+        <!-- Which of the four answers this is, in words. D-091, D-162. -->
         <span class="chosen-tag" id="chosen-tag"></span>
         <button id="preview" class="primary">▶ Preview this voice</button>
         <audio id="player" hidden></audio>
       </div>
+      <!-- The same fact as the tag, as a sentence with something to do about
+           it — Remedy's shape (D-105) applied to a choice nobody has made. -->
+      <p class="chosen-why" id="chosen-why"></p>
       <p id="provider-state" class="state"></p>
       <!-- D-105: the fix lives where the problem is shown. The old screen said
            "press Install in Settings" and left the operator to find Settings. -->

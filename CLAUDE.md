@@ -190,6 +190,64 @@ cargo build --release -p spoonstill-cli
 cargo run --release -p spoonstill-desktop
 ```
 
+### State as of 2026-09-09 — the fallback voice was saved, displayed, and ignored
+
+**D-162 — a voice says who chose it.** Reported as a workflow, not a bug: *ten
+parts of one video, ten projects, and in a hurry I forget to change the voice.*
+The proposed fix was to abolish the default and require a pick before every
+render. That is refused — it prevents *forgetting to change* the voice and not
+*choosing differently*, so the failure that actually costs a re-render survives,
+and the cost lands on every render forever, including the CLI, where it would
+have to make `still render DIR` fail without `--voice` and break D-158. Read
+D-162 for the whole argument before reopening it.
+
+**What the report actually found is a defect, and it is not the one described.**
+D-092's machine fallback voice — *set one voice in Settings and every project
+that names none uses it*, which is precisely the ten-parts answer — **had never
+once run**. `appDefaultVoice` in the page is filled only by
+`loadFallbackVoice()`, which is called only from `openSettings()`. So on any
+launch that went straight from Home into a project, it was `null`, and the
+render request sent `null`. The setting saved correctly, showed the right voice
+in its own `<select>`, and changed no film ever made. Proven by loading the
+**shipped** `app.js` in node behind a stub DOM and driving the reported
+sequence: `appDefaultVoice = null`, sent `null`, spoken by `en-US-AvaNeural`.
+Fixed where it cannot recur — `voice_choice` reads `app_settings` **itself**,
+because a page cannot forget to load something it never holds.
+
+**And there were two spellings of one rule.** The Render summary drew
+`effectiveVoice()`; the render request built `chosenVoice ||
+(projectNamesNoVoice() ? appDefaultVoice : null)`. Same precedence, written
+twice, nothing asserting they agreed. `resolve_voice` in Rust is the only
+statement of it now and returns both answers in one value — what to display and
+what to send — so **what is shown is what is sent**, which is a contract test.
+
+**`VoiceOrigin` is `Run | Project | Fallback | Unchosen`**, and every surface
+that names a voice names its origin: the tag, the catalogue row, the rail fact
+read at the moment of reaching for Render, and the Render summary. The tag used
+to say **"From project.yaml" for all three non-override cases** — a false
+statement about a file, on the screen whose whole job is to say whose voice you
+will hear (D-091's class, D-086's sentence). `Unchosen` gets a sentence rather
+than a word, because it is the state that renders ten parts in ten voices.
+
+**`Unchosen` deliberately sends no override**, and that is the load-bearing
+choice: sending `provider_default` would look identical on the screen and would
+**speak a Hindi project in English**, because D-158 picks a voice per line from
+the script only when the request says `default`. The two answers the window owns
+are sent; the two it does not are handed back to the renderer.
+
+Four mutations against the rule, each caught, two of them by exactly one test;
+two contract tests hold the Rust/JS seam and both were run against the unfixed
+code. **`make gates` is still 37** — nothing here changes what renders, and no
+shell gate drives the window (D-131).
+
+**Three steps of four remain, and they are the rest of the answer to the
+report:** ask *once* rather than every time (Render blocked in the window only
+when all four answers are empty; a `FilmEvent::Warned` line on the CLI, never a
+refusal); a "use for every project" control on the Voice row, so the fallback is
+settable from where voices are actually auditioned; and `still new` writing the
+fallback into the starter `project.yaml`, so each of ten parts records the voice
+it uses and is reproducible without depending on a machine setting.
+
 ### State as of 2026-09-06 — the bundle was describing an FFmpeg that was not there
 
 **D-161 — two defects in the environment block**, which is the one surface here
@@ -2332,7 +2390,10 @@ touching `Backoff`, `wait_until`'s loop, `probe_jobs`, or the `Sync` bound on
 `MediaCheck`**, **D-150 before touching `Ingested::summary`, `unreadable`,
 `human_size`, `arrange::Moved`, or a cited D-number**, **D-151 before touching
 `Spoken::voice`, `tools::version_line`, the "film complete" event's fields, or
-the FFmpeg version line in this file**, **D-161 before touching
+the FFmpeg version line in this file**, **D-162 before touching
+`resolve_voice`, `VoiceOrigin`, the `voice_choice` command, `refreshVoice`,
+`VOICE_MARK`, or anything that decides or displays which voice a render
+uses**, **D-161 before touching
 `graphics_summary`, `version_output`'s failure arm, or anything that reports a
 missing FFmpeg in the diagnostics bundle**, **D-152 before touching
 `TEXT_EXTENSIONS`, `POSITIONAL_TEXT_EXTENSIONS` or `ingest::assign`**, **D-153

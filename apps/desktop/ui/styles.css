@@ -355,6 +355,18 @@ body {
 
 .rail-fact .v.mono { font-size: 11px; }
 
+/* Who chose the voice, under the voice. D-162. */
+.rail-fact .w {
+  font-size: 10.5px;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.rail-fact .w:empty { display: none; }
+.rail-fact.unchosen .w { color: var(--warn); }
+
 .rail-go { margin-top: auto; display: flex; flex-direction: column; gap: 8px; }
 .rail-rev { font-family: var(--mono); font-size: 10px; color: var(--ink-3); text-align: center; }
 button.wide { width: 100%; padding: 7px 12px; }
@@ -957,6 +969,20 @@ button.small { padding: 3px 9px; font-size: 11px; }
   white-space: nowrap;
 }
 .chosen-tag.on { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent); }
+
+/* "Nobody chose this" is not a failure — a render in the provider's own voice
+   is a legal render — so it is warned, not marked bad. D-162. */
+.chosen-tag.unchosen { border-color: var(--warn); color: var(--warn); }
+
+/* The sentence under the name: what this answer means and what to do about it.
+   Wraps, unlike the name above it, because it is prose. */
+.chosen-why {
+  margin: 0;
+  padding: 8px 16px 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
 
 .voices { margin: 0; padding: 0; list-style: none; }
 

@@ -6748,6 +6748,100 @@ writes a custom-folder-icon file whose name is `Icon` followed by a carriage
 return, and six of them sat permanently untracked in `git status`. A status
 listing with permanent noise in it is how a real untracked file gets missed.
 
+### D-162 — A voice says who chose it, and the fallback voice finally does something · Accepted
+
+Reported as a workflow: *"I divided a video into ten parts and made ten
+projects; in a hurry I sometimes forget to change the voice."* The proposal was
+to abolish the default — no render without an explicit pick. That is refused,
+for a reason in the next section; what the report actually found is a **defect**,
+and it is not the one being described.
+
+**The machine's fallback voice was saved, displayed, and ignored.** D-092 built
+it exactly for this case: set one voice in Settings and every project that names
+none uses it. The page holds it in `appDefaultVoice`, and `appDefaultVoice` is
+filled **only** by `loadFallbackVoice()`, which is called **only** from
+`openSettings()`. So on any launch where the operator went straight from Home
+into a project — which is every launch that is not about changing a setting —
+the variable was `null`, `effectiveVoice()` fell through to the provider's own,
+and the render request sent `null`. The setting existed, persisted correctly to
+`app-settings.json`, showed the right voice in its own `<select>`, and changed
+nothing about any film. **The feature that answers the report was already
+built and had never once run.**
+
+Fixed where it cannot recur: `voice_choice` reads `app_settings` **itself**. A
+page cannot forget to load something it never holds.
+
+**And two spellings of one rule.** The Render summary drew `effectiveVoice()`;
+the render request built `chosenVoice || (projectNamesNoVoice() ?
+appDefaultVoice : null)` — the same precedence, written twice, in one file,
+with nothing asserting they agreed. They did agree, by luck. `resolve_voice` in
+Rust is now the only statement of it and returns both answers in one value:
+what to display, and what to send. D-010's rule, applied to a rule the webview
+had quietly acquired two copies of.
+
+**The four answers, and the one that could not be said out loud.** Precedence is
+D-092's, unchanged: this run's pick, then `project.yaml`'s `tts.voice`, then the
+machine's fallback, then nothing. What was missing is that the window could name
+the voice and never say **whose choice it was**, and the two that matter most
+looked identical — a project that asks for a voice and a project that asks for
+nothing both displayed a real voice id, so `en-US-AvaNeural` read as somebody's
+decision when it was the absence of one. Worse, the tag under it said **"From
+project.yaml"** for all three non-override cases: a *false statement about a
+file*, on the one screen whose whole job is to say whose voice you will hear.
+D-091's class of defect, and D-086's sentence — *`default` is not a voice* —
+applied to every surface except this one.
+
+`VoiceOrigin` is `Run | Project | Fallback | Unchosen`, and every surface that
+names a voice now names its origin too: the tag, the row mark in the catalogue,
+the rail fact the operator reads at the moment they reach for Render, and the
+Render summary. `Unchosen` carries a sentence rather than a word, because it is
+the state that renders ten parts of one film in ten voices and the operator
+needs to know there is something to do about it.
+
+**`Unchosen` deliberately sends no override.** It would be easy to send
+`provider_default` — it is what the screen displays, and it would look
+identical here. It would also **speak a Hindi project in English**: D-158 picks
+a voice per line from the script the line is written in, and only when the
+request says `default`. So the two answers the window owns (`Run`, `Fallback`)
+are sent, and the two it does not (`Project`, `Unchosen`) are handed back to the
+renderer, which owns them. The `Unchosen` sentence names the provider's default
+as *an example for English lines* rather than as the answer, for the same
+reason.
+
+**Why the reported fix is refused.** Requiring a manual pick before every render
+prevents *forgetting to change* the voice and does not prevent *choosing
+differently* — nothing stops part 3 getting Ryan and part 4 getting Ava, so the
+failure that actually costs a re-render is still reachable. It would be paid on
+every render forever, including the single-project renders where nothing was
+ever wrong. On the CLI it would have to make `still render DIR` fail without
+`--voice`, which breaks every project already made, `make gates`, and D-158,
+whose whole reason for existing is that refusing to guess makes a render
+*fail*. The cost is real and lands in the wrong place. What the report is owed
+is that the state be **visible** and the fallback **work** — this decision — and
+then that it be asked about **once** rather than every time, which is the next
+one.
+
+**Tested as a table, because the defect this guards is a precedence change**,
+and a precedence change is invisible to any test that supplies one input at a
+time. Nine rows, including the three spellings of "nobody said" (`default`, the
+empty string, whitespace). Four mutations were run against the rule and each
+was caught: the fallback outranking the project, `Unchosen` sending an
+override, `Unchosen` tagged as the project's, and `default` counted as a voice.
+The middle two are each caught by exactly one test, which is what earns those
+tests their place.
+
+Two contract tests hold the seam. `the_voice_shown_is_the_voice_sent` fails when
+the render request builds its own answer again — verified by restoring the
+original expression. `the_page_has_a_word_for_every_origin_rust_can_return`
+reads the variants out of `main.rs` and the keys out of `VOICE_MARK`: the two
+files are joined by a serde name that no compiler checks, and a fifth origin
+added in Rust would otherwise leave a blank column on the screen this decision
+exists to fix. Verified by adding one.
+
+**`make gates` is still 37.** Nothing here changes what renders — the same
+project renders the same film — and what changed is which voice a *window*
+asks for, which no shell gate drives (D-131: there is no GUI automation here).
+
 
 
 ### D-162 — The graphics card can be asked to render, and is still not asked by default · Accepted

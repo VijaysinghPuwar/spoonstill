@@ -94,7 +94,16 @@ let voices = [];
 let voicesLoaded = false;
 let providerDefault = "";
 // The machine's fallback voice, from Settings. Null means "the provider's own".
+// Only the Settings screen fills this, and only for its own <select> — the
+// *rule* reads the setting in Rust, because a page that has not opened Settings
+// used to hold `null` here and silently ignore the fallback (D-162).
 let appDefaultVoice = null;
+
+// The voice the next render will use and who chose it, as Rust resolved it:
+// `{ voice, origin, overrideForRender, said, detail }` (D-162). Null until the
+// first `refreshVoice()`. Everything that names a voice reads this, including
+// the render request — so what is shown and what is sent cannot disagree.
+let voiceState = null;
 
 // Per-scene render state, keyed by scene index. Wiped at the start of a render
 // and filled by the progress channel — never merged into `project`, which is
@@ -395,6 +404,9 @@ async function load(path) {
     return;
   }
   show("app");
+  // Before the first draw, because the rail and the Voice screen both name a
+  // voice and neither can name one until Rust has resolved it (D-162).
+  await refreshVoice();
   draw();
   // Not awaited, for the same reason the FFmpeg check below is not: the two
   // lists are constants and the grid should not wait on an IPC round trip to
@@ -947,22 +959,42 @@ function describe(id) {
   return language ? `${voiceName(voice)} · ${language}` : voiceName(voice);
 }
 
-// The voice that will actually be used if nothing is chosen here. Three
-// answers in order of who wins: this run's override, the project's own
-// `tts.voice`, then the machine's fallback — and the provider's own only when
-// none of the three said anything (D-092).
-// True when `project.yaml` left the choice open, which is what makes the
-// machine's fallback apply at all.
-function projectNamesNoVoice() {
-  const named = project?.voice || "";
-  return !named || named === "default";
+// Which of the four answers decided the voice, in the words each surface has
+// room for. Rust's `said` is the long form; these are the column-width form.
+// Kept beside each other so no origin can quietly lose its label.
+const VOICE_MARK = {
+  run: "\u2713 Selected",
+  project: "From project.yaml",
+  fallback: "Your fallback",
+  unchosen: "Nobody chose",
+};
+
+// Ask Rust which voice the next render uses and who chose it (D-162).
+//
+// The page used to answer this itself, in two places that had to agree — the
+// Render summary read `effectiveVoice()` and the render request built
+// `chosenVoice || (projectNamesNoVoice() ? appDefaultVoice : null)`. One rule,
+// two spellings, nothing asserting they matched. Now there is one call, and
+// both read its result.
+//
+// On failure the previous answer is kept rather than cleared: a stale label is
+// wrong about *when*, and clearing it would make the screen wrong about *what*,
+// which is the mistake this whole decision exists to stop.
+async function refreshVoice() {
+  try {
+    voiceState = await invoke("voice_choice", {
+      chosen: chosenVoice,
+      projectVoice: project?.voice ?? "",
+      providerDefault,
+    });
+  } catch (error) {
+    setStatus(String(error));
+  }
+  return voiceState;
 }
 
 function effectiveVoice() {
-  if (chosenVoice) return chosenVoice;
-  const named = project?.voice || "";
-  if (named && named !== "default") return named;
-  return appDefaultVoice || providerDefault;
+  return voiceState?.voice || "";
 }
 
 async function loadVoices() {
@@ -976,6 +1008,10 @@ async function loadVoices() {
   try {
     const status = await invoke("provider_status", { provider: project.provider });
     providerDefault = status.default_voice || "";
+    // `providerDefault` is an input to the rule, so the answer is re-asked the
+    // moment it lands — this is the first point at which "nobody chose this"
+    // can name the voice an operator who does nothing will actually hear.
+    await refreshVoice();
     if (!status.ready) {
       // Left un-loaded on purpose: the fix for "edge-tts is not installed" is
       // to install it, and the operator who just did that comes straight back
@@ -1075,6 +1111,7 @@ function drawVoices() {
   const locale = el("locale").value;
   const gender = el("gender").value;
   const current = effectiveVoice();
+  const origin = voiceState?.origin ?? "unchosen";
 
   const shown = voices.filter((voice) => {
     if (locale && voice.locale !== locale) return false;
@@ -1093,18 +1130,18 @@ function drawVoices() {
     const li = document.createElement("li");
     // A highlight alone could not tell "you picked this" from "this is what
     // project.yaml already said", which are different facts and looked
-    // identical. Each one now says which it is, in a word (D-091).
-    const isCurrent = voice.id === current;
-    if (isCurrent) li.classList.add(chosenVoice ? "on" : "is-default");
+    // identical. Each one now says which it is, in a word (D-091) — and there
+    // are four such facts, not two, which is what D-162 added: the machine's
+    // fallback, and nobody having chosen at all.
+    const isCurrent = current !== "" && voice.id === current;
+    if (isCurrent) li.classList.add(origin === "run" ? "on" : "is-default");
     li.innerHTML =
       `<span class="v-name"></span><span class="v-mark"></span>` +
       `<span class="v-lang"></span>` +
       `<span class="v-gender"></span><span class="v-note"></span>` +
       `<span class="v-id mono"></span><button class="v-play">▶</button>`;
     li.children[0].textContent = voiceName(voice);
-    li.children[1].textContent = isCurrent
-      ? (chosenVoice ? "✓ Selected" : "Project default")
-      : "";
+    li.children[1].textContent = isCurrent ? (VOICE_MARK[origin] ?? "") : "";
     li.children[2].textContent = languageOf(voice.locale);
     li.children[3].textContent = voice.gender;
     li.children[4].textContent = voice.note;
@@ -1112,8 +1149,8 @@ function drawVoices() {
     li.children[5].textContent = voice.id;
     li.children[6].title = "Hear this voice";
     li.setAttribute("aria-selected", String(isCurrent));
-    li.title = isCurrent && chosenVoice
-      ? "This voice reads every written line"
+    li.title = isCurrent
+      ? (voiceState?.detail ?? "")
       : `Use ${voiceName(voice)} for the next render`;
 
     li.addEventListener("click", () => chooseVoice(voice.id));
@@ -1129,19 +1166,23 @@ function drawVoices() {
   if (marked) marked.scrollIntoView({ block: "nearest" });
 }
 
-function chooseVoice(id) {
+async function chooseVoice(id) {
   chosenVoice = id || null;
   rememberChoices();
+  await refreshVoice();
   drawVoiceChoice();
   drawVoices();
   // Clicking used to change nothing an operator could see: the row that was
   // already highlighted stayed highlighted, because it had been highlighted as
-  // the project's default all along (D-091).
+  // the project's default all along (D-091). And "Use the project default"
+  // used to promise project.yaml even when project.yaml named nothing — the
+  // answer it lands on is whatever Rust says it lands on (D-162).
   const voice = voices.find((v) => v.id === effectiveVoice());
+  const named = voice ? voiceName(voice) : effectiveVoice();
   setStatus(
     chosenVoice
-      ? `${voice ? voiceName(voice) : chosenVoice} will read every written line.`
-      : `Back to the voice named in project.yaml — ${project?.voice || "default"}.`,
+      ? `${named} will read every written line.`
+      : voiceState?.detail ?? "",
   );
 }
 
@@ -1156,21 +1197,33 @@ function drawVoiceChoice() {
     el("chosen-name").textContent = describe(current);
     el("chosen-id").textContent = current;
   } else {
-    el("chosen-name").textContent = "The project's own voice";
-    el("chosen-id").textContent = `${project?.voice || "default"} · ${project?.provider || ""}`;
+    // No name to show at all: nobody chose one and the provider could not be
+    // reached to say what it would use. Naming "the project's own voice" here
+    // was the same false claim the tag below used to make.
+    el("chosen-name").textContent = "No voice chosen";
+    el("chosen-id").textContent = project?.provider || "";
   }
 
+  // Four answers, four tags. This used to read "From project.yaml" for every
+  // one of the three that are not a run override — a false statement about a
+  // file, on the screen whose whole job is to say whose voice you will hear
+  // (D-162). `chosen-why` carries the same fact as something to act on.
+  const origin = voiceState?.origin ?? "unchosen";
   const tag = el("chosen-tag");
-  tag.textContent = chosenVoice ? "✓ Selected for this render" : "From project.yaml";
-  tag.className = "chosen-tag" + (chosenVoice ? " on" : "");
+  tag.textContent = voiceState?.said ?? "";
+  tag.className = "chosen-tag" + (origin === "run" ? " on" : "")
+    + (origin === "unchosen" ? " unchosen" : "");
+  el("chosen-why").textContent = voiceState?.detail ?? "";
 
   el("voice-default").disabled = !chosenVoice;
+  // The rail is what an operator reads at the moment they reach for Render, so
+  // it is the one place "nobody chose this" matters most (D-162).
   el("rail-voice").textContent = voice
     ? `${voiceName(voice)} · ${languageOf(voice.locale)}`
-    : current || "project default";
-  el("go-voice").title = current
-    ? `${current}${chosenVoice ? " — an override for the next render" : " — the project's default"}`
-    : "The voice named in project.yaml";
+    : current || "none chosen";
+  el("rail-voice-said").textContent = voiceState?.said ?? "";
+  el("go-voice").classList.toggle("unchosen", origin === "unchosen");
+  el("go-voice").title = voiceState?.detail ?? "";
 }
 
 // An audition. It goes through the same cache and the same normalization the
@@ -1398,6 +1451,10 @@ function restoreChoices() {
 
 async function render() {
   if (!project || rendering) return;
+  // Both standing answers re-asked at the moment of use, not at the moment
+  // they were last drawn: the fallback voice can be changed in Settings while
+  // this project is open (D-162).
+  await refreshVoice();
   await refreshOutput();
   if (outError) {
     tab("output");
@@ -1415,7 +1472,9 @@ async function render() {
   buildLive();
   el("live-note").textContent = "";
   el("bar").style.width = "0";
-  el("r-voice").textContent = effectiveVoice() || project.voice || "default";
+  el("r-voice").textContent = voiceState
+    ? `${voiceState.voice || "chosen per line"} \u2014 ${voiceState.said.toLowerCase()}`
+    : "\u2014";
   el("r-out").textContent = outFull;
   tab("render");
 
@@ -1489,8 +1548,10 @@ async function render() {
         force: false,
         // The override this run asked for — the Voice screen's pick, or the
         // machine's fallback when the project names none. Never written back
-        // to project.yaml (D-013, D-092).
-        voice: chosenVoice || (projectNamesNoVoice() ? appDefaultVoice : null),
+        // to project.yaml (D-013, D-092). Null hands the question to the
+        // renderer, which reads project.yaml and then D-158's script rule.
+        // The same object the Render summary above was drawn from (D-162).
+        voice: voiceState?.overrideForRender ?? null,
         outDir: el("out-dir").value,
         outName: el("out-name").value,
         // D-106, and the same override rule as the voice above it: null means
