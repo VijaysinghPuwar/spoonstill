@@ -190,6 +190,62 @@ cargo build --release -p spoonstill-cli
 cargo run --release -p spoonstill-desktop
 ```
 
+### State as of 2026-09-10 — the memo both audits asked for cannot hit on an ordinary project
+
+**D-173 — one read per photograph, and it is narrower than either audit
+thought.** Both proposed memoizing the still's content hash; the same
+uncommitted edit was in the tree. Both were right that it is not single-flight
+(check, unlock, hash, lock, insert, on `--jobs` threads). **Neither asked how
+often it can hit**, and that is the interesting part.
+
+**Measured before anything was designed:** `fixtures/projects/renderable`
+renders six scenes with **six misses and no hits**, and it cannot do otherwise —
+convention mode gives every scene its own file, and manifest mode derives the
+scene id from the image stem, so naming one image twice is a `DuplicateId`
+error. What is left is a **link**: `img/a.jpg` with a symlink beside it is two
+scene ids and one resolved path, confirmed by rendering it.
+
+**Where it hits it earns its keep.** Eight scenes over one 103 MB photograph,
+three runs each: `--jobs 1` **7.94 / 7.95 / 8.30 s with** against **9.13 / 9.28
+/ 9.94 s without** — about 170 ms per avoided read. At `--jobs 4` it is
+**inside the noise**, because the reads overlap with encoding.
+
+**Single-flight is adopted for the guarantee, not for a number**, and saying so
+is the point: the two are indistinguishable at `--jobs 4` here because duplicate
+concurrent reads come out of the page cache. What decides it is that the racy
+version's cost is `jobs` reads bounded by nothing, and this author works from a
+**network volume**, where a second read of a 400 MB scan is not a memcpy.
+Reporting the 3.7 s as evidence either way would have been D-162's contended
+benchmark in another costume.
+
+The shape is **D-108's**: a map lock claims a per-path cell, the cell's lock is
+held across the read. Three mutations, three distinct tests — a fresh cell per
+call fails the pointer test, remembering a failed read fails the retry test, and
+holding the map lock across the read **hangs** the two-photograph test (D-149's
+bargain: a concurrency claim with no clock in it fails as a deadline).
+
+**The first test written for it was flaky and was thrown away** — eight threads
+racing on one path caught the racy version **7 times in 20**. A test that
+reproduces a defect one run in three is a test people learn to re-run (D-121).
+
+**And running the full suite found the same fault in D-174's own new test**,
+which had shipped one commit earlier. It asserted a `2n` bound on how many items
+start after a stage-one failure, reasoning each producer could slip one more
+through. Wrong: `first_failed` is stored *after* index 0's closure returns, so a
+descheduled producer lets the others churn — beside two hundred other tests it
+started **16 of 50** and failed. The bound is gone; the "stops admitting" half
+is exact in the serial test, where the answer is 1. **A bound that holds on an
+idle machine is a measurement, not a guarantee.**
+
+**Noticed and deliberately not acted on:** `occurrences_of` counts by path, so
+two *copies* of one photograph at `001.jpg` and `007.jpg` are occurrence 0 both,
+share a content hash, and get the same V2 seed and the same move — which D-035
+says must not happen. D-153 records the path-counting choice and its reason, so
+it is a known trade; reopening it is the author's call.
+
+**`make gates` is 38 of 39**, unchanged.
+
+
 ### State as of 2026-09-10 — the working tree was saving money by lying about which scenes broke
 
 **D-174 — stage one stops when stage one has failed, and says so without

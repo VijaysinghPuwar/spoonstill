@@ -36,8 +36,9 @@
 //! story is M3; the content-addressed directory is what M2 can offer without
 //! it, and it is enough to make a re-run cheap.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use spoonstill_core::captions::{self, Placement, SubtitleSpec, SubtitleTheme};
 use spoonstill_core::diagnostics::{Diagnostics, Event};
@@ -1243,6 +1244,7 @@ fn resolve_and_render(
     let project_id = project_id(&project.root);
     let occurrences = occurrences_of(project);
 
+    let image_hashes = ImageHashes::default();
     let (audio_outcomes, segment_outcomes) = pool::pipeline(
         &project.scenes,
         audio_jobs,
@@ -1285,6 +1287,7 @@ fn resolve_and_render(
                 segments_dir,
                 output,
                 encode,
+                &image_hashes,
             )
             .and_then(|plan| render_one(tools, &plan, cancel, log));
             match &result {
@@ -1329,6 +1332,91 @@ struct Segment {
     reused: bool,
 }
 
+/// One read per photograph, however many scenes use it (D-173).
+///
+/// **This is D-108 one layer along, and it is deliberately the same shape.**
+///
+/// ## The case it is for, stated because it is narrower than it looks
+///
+/// It hits only when **two scenes resolve to one path**, and measured on an
+/// ordinary project that never happens: `fixtures/projects/renderable` renders
+/// six scenes with **six misses and no hits**, because convention mode gives
+/// every scene its own file and manifest mode derives the scene id from the
+/// image stem, so naming one image twice is a `DuplicateId` error. What is
+/// left is a link — `img/a.jpg` and a symlink beside it are two scene ids and
+/// one resolved path — which is also the shape D-153's `occurrences_of` counts.
+///
+/// Where it does hit it is worth having, because D-126 records how large one of
+/// these can be: *"a still can be a 400 MB scan"*. Measured, eight scenes over
+/// one 103 MB photograph: at `--jobs 1`, **7.94–8.30 s with against 9.13–9.94 s
+/// without** — about 170 ms per avoided read. At `--jobs 4` the difference is
+/// inside the noise, because the reads overlap with encoding.
+///
+/// ## Why it is single-flight rather than check-unlock-read-lock-insert
+///
+/// Not for a number: the two are indistinguishable at `--jobs 4` here, since
+/// the duplicate concurrent reads come out of the page cache. It is because the
+/// cost of the racy version is `jobs` reads rather than one, bounded by nothing
+/// the machine promises — and `CLAUDE.md` records this author working from a
+/// network volume, where a second read of a 400 MB scan is not a memcpy.
+///
+/// ## And it is not a pass before the pipeline
+///
+/// That would be the obvious alternative and it is worse: it reads every
+/// photograph in the project before the first narration is even requested,
+/// putting a barrier back in front of the network stage D-146 exists to
+/// overlap, and paying it in full on the ordinary project where nothing
+/// repeats.
+#[derive(Default)]
+struct ImageHashes {
+    entries: Mutex<HashMap<PathBuf, Arc<Mutex<Option<String>>>>>,
+}
+
+impl ImageHashes {
+    /// The cell one photograph's answer lives in, making it if nobody has.
+    ///
+    /// Two locks and the order between them is the whole design: the **map**
+    /// lock is held only long enough to claim a cell, and the **cell** lock is
+    /// held across the read. So two workers wanting one photograph queue behind
+    /// each other, and two wanting different ones never meet. Taking the map
+    /// lock across the read instead would serialize every photograph in the
+    /// project behind whichever one is being read.
+    fn entry_for(&self, image: &Path) -> Arc<Mutex<Option<String>>> {
+        let mut map = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(map.entry(image.to_path_buf()).or_default())
+    }
+
+    /// The photograph's content hash, reading it if nobody has yet.
+    ///
+    /// `read` is a parameter rather than a call so a test can count the reads
+    /// (D-144's shape) — what this type exists for is *how many times the file
+    /// is opened*, and nothing observable from outside can show that.
+    ///
+    /// A failed read leaves the cell empty rather than remembering the failure:
+    /// a volume that went away for one scene has not made that photograph
+    /// permanently unhashable, and the next scene to want it should find out
+    /// for itself.
+    fn of(
+        &self,
+        image: &Path,
+        read: impl FnOnce(&Path) -> Result<String, MediaError>,
+    ) -> Result<String, MediaError> {
+        let entry = self.entry_for(image);
+        let mut answer = entry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(hash) = answer.as_deref() {
+            return Ok(hash.to_owned());
+        }
+        let hash = read(image)?;
+        *answer = Some(hash.clone());
+        Ok(hash)
+    }
+}
+
 /// Everything about one scene's segment that is fixed before it is encoded.
 ///
 /// **Nothing here depends on which worker runs it, or on what order the
@@ -1348,13 +1436,14 @@ fn plan_scene(
     segments_dir: &Path,
     output: OutputSpec,
     encode: &EncodeSettings,
+    image_hashes: &ImageHashes,
 ) -> Result<Plan, MediaError> {
     let narration = audio.duration;
     let frames = timing::frames_for_duration(narration, output.fps());
     // One implementation, in `spoonstill-media` (D-126). This used to be a
     // second streaming loop here, and the pair had to agree on the cache
     // key for `still render` and `still render-scene` to share a segment.
-    let content = spoonstill_media::scene::hash_file(&scene.image)?;
+    let content = image_hashes.of(&scene.image, spoonstill_media::scene::hash_file)?;
 
     let index32 = u32::try_from(index).unwrap_or(u32::MAX);
     let motion = motion_for(
@@ -1906,6 +1995,156 @@ mod tests {
             scenes,
             problems: Vec::new(),
         }
+    }
+
+    /// D-173, and the mechanism the read count depends on — D-108's
+    /// `one_key_is_one_lock_and_two_keys_are_two`, one layer along.
+    ///
+    /// This is the deterministic half and it is the half that catches the
+    /// defect. The memo as it arrived was check, unlock, hash, lock, insert:
+    /// it had **no per-photograph cell at all**, so every worker that missed
+    /// did the whole read. A cell handed out fresh per call would be the same
+    /// defect wearing this shape, and nothing but pointer equality would see
+    /// it.
+    #[test]
+    fn one_photograph_is_one_cell_and_two_photographs_are_two() {
+        let hashes = ImageHashes::default();
+        let a = hashes.entry_for(Path::new("001.jpg"));
+        let b = hashes.entry_for(Path::new("001.jpg"));
+        let c = hashes.entry_for(Path::new("002.jpg"));
+
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "one photograph handed out two cells, so two workers would both \
+             be inside the read"
+        );
+        assert!(
+            !Arc::ptr_eq(&a, &c),
+            "two photographs share one cell — unrelated stills would queue"
+        );
+    }
+
+    /// And the cell is where `of` actually looks, which is what makes holding
+    /// it across the read mean anything. The read panics: reaching it at all
+    /// is the failure.
+    #[test]
+    fn the_cell_is_where_the_answer_lives() {
+        let hashes = ImageHashes::default();
+        let image = PathBuf::from("001.jpg");
+
+        // What a worker that has finished its read leaves behind.
+        *hashes.entry_for(&image).lock().expect("not poisoned") = Some("deadbeef".to_owned());
+
+        let got = hashes
+            .of(&image, |_| unreachable!("the photograph was read again"))
+            .expect("answered from the cell");
+        assert_eq!(got, "deadbeef");
+    }
+
+    /// The behaviour the whole thing is for: eight workers, one photograph,
+    /// **one read** — and never two readers inside at once.
+    ///
+    /// Deliberately a bare counter rather than a real photograph, so it runs
+    /// with no fixture. Both assertions are invariants of the single-flight
+    /// code and so cannot flake into failure; what they *catch* is another
+    /// matter, and measured honestly the check-unlock-hash-lock-insert version
+    /// is caught by this test **7 times in 20**. A test that reproduces a
+    /// defect one run in three is a test people learn to re-run (D-121), so
+    /// the guard against that defect is the pointer-equality test above and
+    /// this is the end-to-end statement of what it buys.
+    #[test]
+    fn eight_workers_wanting_one_photograph_read_it_once() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        const WORKERS: usize = 8;
+
+        let hashes = ImageHashes::default();
+        let reads = AtomicU32::new(0);
+        let inside = AtomicU32::new(0);
+        let most_at_once = AtomicU32::new(0);
+        let gate = std::sync::Barrier::new(WORKERS);
+        let image = PathBuf::from("001.jpg");
+
+        std::thread::scope(|scope| {
+            for _ in 0..WORKERS {
+                scope.spawn(|| {
+                    gate.wait();
+                    let got = hashes
+                        .of(&image, |_| {
+                            reads.fetch_add(1, Ordering::SeqCst);
+                            let now = inside.fetch_add(1, Ordering::SeqCst) + 1;
+                            most_at_once.fetch_max(now, Ordering::SeqCst);
+                            inside.fetch_sub(1, Ordering::SeqCst);
+                            Ok("deadbeef".to_owned())
+                        })
+                        .expect("hashes");
+                    assert_eq!(got, "deadbeef");
+                });
+            }
+        });
+
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "the photograph was read once per worker instead of once"
+        );
+        assert_eq!(
+            most_at_once.load(Ordering::SeqCst),
+            1,
+            "two workers were inside the read for one photograph"
+        );
+    }
+
+    /// Two photographs are two answers, and the second must not queue behind
+    /// the first — a cell per path, not one lock over the whole memo.
+    ///
+    /// Neither read can finish until the other has started, so a version that
+    /// held the map lock across the read **deadlocks** rather than passing
+    /// slowly. That is the same bargain D-149 struck for the same property: a
+    /// concurrency claim has no clock in it, so the failure shows up as a
+    /// deadline rather than as an assertion. It is the only way to state "these
+    /// two do not wait for each other" without timing the machine.
+    #[test]
+    fn different_photographs_do_not_wait_for_each_other() {
+        let hashes = ImageHashes::default();
+        let both_inside = std::sync::Barrier::new(2);
+
+        std::thread::scope(|scope| {
+            for name in ["001.jpg", "002.jpg"] {
+                let hashes = &hashes;
+                let both_inside = &both_inside;
+                scope.spawn(move || {
+                    let path = PathBuf::from(name);
+                    let got = hashes
+                        .of(&path, |p| {
+                            both_inside.wait();
+                            Ok(format!("hash-of-{}", p.display()))
+                        })
+                        .expect("hashes");
+                    assert_eq!(got, format!("hash-of-{name}"));
+                });
+            }
+        });
+    }
+
+    /// A read that fails is not remembered as an answer: the photograph was
+    /// never hashed, so the next scene to want it must try again rather than
+    /// inherit a hole.
+    #[test]
+    fn a_failed_read_is_retried_rather_than_cached() {
+        let hashes = ImageHashes::default();
+        let image = PathBuf::from("001.jpg");
+
+        let first = hashes.of(&image, |p| {
+            Err(MediaError::Io {
+                doing: "reading",
+                path: p.to_path_buf(),
+                source: std::io::Error::other("the volume went away"),
+            })
+        });
+        assert!(first.is_err());
+
+        let second = hashes.of(&image, |_| Ok("deadbeef".to_owned()));
+        assert_eq!(second.expect("the retry"), "deadbeef");
     }
 
     /// D-174. Nobody cancelled anything, so nothing may say they did.

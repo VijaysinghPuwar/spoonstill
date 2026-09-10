@@ -7067,6 +7067,77 @@ and the gate: `still new` not recording, and `default` recorded as a voice.
 
 
 
+### D-173 — One read per photograph, and the memo is narrower than either audit thought · Accepted
+
+Both audits proposed memoizing the still's content hash, and the same
+uncommitted edit was in the working tree. Both were right that it is not
+single-flight — `film.rs` was check, unlock, hash, lock, insert, and `plan_scene`
+runs inside `pipeline`'s stage-two closure on `--jobs` threads, so every worker
+that missed read the file. Neither asked **how often the memo can hit**, and the
+answer turns out to be the interesting part.
+
+**Measured before anything was designed: on an ordinary project it never hits.**
+`fixtures/projects/renderable` renders six scenes with **six misses and no
+hits**, and it cannot do otherwise: convention mode gives every scene its own
+file, and manifest mode derives the scene id from the image stem, so a CSV
+naming one image twice is a `DuplicateId` error and is refused. What is left is
+a **link** — `img/a.jpg` with a symlink beside it is two scene ids and one
+resolved path, confirmed by rendering exactly that. It is also the shape D-153's
+`occurrences_of` counts.
+
+**Where it does hit it earns its keep, and that was measured too.** Eight scenes
+over one 103 MB photograph, three runs each:
+
+| | `--jobs 1` | `--jobs 4` |
+|---|---|---|
+| with the memo | **7.94 / 7.95 / 8.30 s** | 3.54 / 3.79 / 3.84 s |
+| no memo (before) | 9.13 / 9.28 / 9.94 s | 3.46 / 3.66 / 4.38 s |
+
+About **170 ms per avoided read**, 1.2 s of a 9.3 s serial render — and **inside
+the noise at `--jobs 4`**, where the reads overlap with encoding. D-126 records
+why the large case is the one to care about: *"a still can be a 400 MB scan"*.
+
+**Single-flight is not adopted for a number, and saying so is the point.** The
+racy version and this one are indistinguishable at `--jobs 4` here, because the
+duplicate concurrent reads come out of the page cache. It is adopted because the
+racy version's cost is `jobs` reads rather than one, bounded by nothing the
+machine promises — and `CLAUDE.md` records this author working from a **network
+volume**, where a second read of a 400 MB scan is not a memcpy. Reporting that
+3.7 s as evidence either way would have been D-162's contended benchmark in
+another costume.
+
+**The shape is D-108's, deliberately.** A map lock claims a per-path cell; the
+cell's lock is held across the read. Two workers wanting one photograph queue
+behind each other; two wanting different ones never meet. Holding the map lock
+across the read instead would serialize every photograph in the project behind
+whichever one is being read — a wrong fix that looks right, and the test for it
+**deadlocks**, which is the bargain D-149 already struck for a concurrency claim
+with no clock in it. A failed read leaves the cell empty, so a volume that went
+away for one scene has not made that photograph permanently unhashable.
+
+**And the obvious alternative is refused with a reason**: hashing the distinct
+paths once before the pipeline would read every photograph in the project before
+the first narration was even requested, putting a barrier back in front of the
+network stage D-146 exists to overlap, and paying it in full on the ordinary
+project where nothing repeats.
+
+**The first test written for this was flaky and was thrown away.** Eight threads
+racing on one path, asserting one read: it caught the racy version **7 times in
+20**. A test that reproduces a defect one run in three is a test people learn to
+re-run (D-121). The guard is D-108's own shape instead — `Arc::ptr_eq` on the
+cell, which is deterministic and which the racy version cannot satisfy because
+it has no cell at all. Three mutations, three distinct tests: a fresh cell per
+call fails the pointer test, remembering a failed read fails the retry test, and
+holding the map lock across the read hangs the two-photograph test.
+
+**Noticed and deliberately not acted on:** `occurrences_of` counts by path, so
+two *copies* of one photograph at `001.jpg` and `007.jpg` are occurrence 0 both,
+have the same content hash, and therefore get the same V2 seed and the same Ken
+Burns move — which is what D-035 says must not happen. D-153 records the
+path-counting choice and its reason (the content hash is computed inside the
+pool), so this is a known trade rather than an oversight, and reopening it is
+the author's call and not this commit's.
+
 ### D-174 — Stage one stops when stage one has failed, and says so without inventing a cancellation · Accepted
 
 Both audits arrived at the same uncommitted `pipeline` edit — one as its author,
@@ -7127,14 +7198,22 @@ edit reached the working tree untested.
 It counts **stage one** now — the stage the money is in — and asserts `1` and
 `0` rather than a bound. Against the code before the edit it reports 50.
 
-**And the multi-producer case is a bound the design guarantees, not a number
-this machine produced.** Four producers are held inside their first item by a
-barrier, so which indices are in flight when the failure is decided is a fact
-rather than a race; after it, each producer can slip at most one more item
-through before its next look at the flag, so the bound is `2n`. The test also
-asserts the three items already in flight **finished** — work started must be
-allowed to complete — which is the property the barrier could otherwise be
-mistaken for breaking.
+**The multi-producer case asserts one thing, and its first version asserted
+two.** Four producers are held inside their first item by a barrier, so which
+indices are in flight when the failure is decided is a fact rather than a race,
+and the three that are running must come back `Done(Ok(_))`: work already paid
+for must not be discarded.
+
+It also claimed a bound of `2n` on how many further items start, reasoning that
+each producer could slip at most one more through before its next look at the
+flag. **That was wrong, and `cargo test --workspace` found it** — `first_failed`
+is stored *after* index 0's closure returns, so a producer descheduled at that
+moment lets the other three churn. Beside two hundred other tests it started
+**16 of 50** and failed. The bound is gone. The "stops admitting" half is exact
+in the serial test, where the answer is 1, and asserting it again loosely bought
+nothing and cost a flake. **A bound that holds on an idle machine is a
+measurement, not a guarantee** — D-162's lesson arriving from the other
+direction.
 
 **The report has two tests and needs both**, because either alone passes against
 a wrong fix: the count, and the absence of the word *cancelled*. A third asserts

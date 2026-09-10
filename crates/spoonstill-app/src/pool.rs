@@ -674,20 +674,27 @@ mod tests {
         );
     }
 
-    /// The barrier with several producers, which is where the real edge is
-    /// (D-174): **work already in flight must be allowed to finish**, and no
-    /// new item may be admitted after the failure.
+    /// The other half of the barrier, with several producers: **work already
+    /// in flight is allowed to finish** (D-174).
     ///
-    /// The four producers are held inside their first item by a barrier, so
-    /// which indices are in flight when the failure is decided is a fact and
-    /// not a race. After that each producer can slip at most one more item
-    /// through before its next look at the flag, which is why the bound is
-    /// `2n - 1` and not `n` — a bound the design guarantees, rather than a
-    /// number this machine happened to produce.
+    /// Four producers are held inside their first item together, so the failure
+    /// at index 0 is decided with three others genuinely running. Those three
+    /// must come back `Done(Ok(_))` — a barrier that discarded them would lose
+    /// narration this run has already paid the provider for.
+    ///
+    /// **It deliberately asserts nothing about how many further items start**,
+    /// and the first version of this test did. That bound is not something the
+    /// design guarantees: `first_failed` is stored *after* index 0's closure
+    /// returns, so a producer descheduled at that moment lets the other three
+    /// churn through as many items as the scheduler allows. Under `cargo test
+    /// --workspace` — where this runs beside two hundred others — it started
+    /// **16 of 50** and failed. The "stops admitting" half is exact in
+    /// `a_first_stage_failure_stops_admitting_more_of_either_stage`, which is
+    /// serial and where the answer is 1; asserting it again here, loosely,
+    /// bought nothing and cost a flake.
     #[test]
-    fn work_already_in_flight_finishes_and_nothing_new_is_admitted() {
+    fn work_already_in_flight_finishes_when_an_earlier_item_fails() {
         const PRODUCERS: usize = 4;
-        let started: Mutex<Vec<usize>> = Mutex::new(Vec::new());
         let gate = std::sync::Barrier::new(PRODUCERS);
 
         let items: Vec<u32> = (0..50).collect();
@@ -697,11 +704,8 @@ mod tests {
             2,
             &Cancel::new(),
             |index, item: &u32| -> Result<u32, String> {
-                if let Ok(mut log) = started.lock() {
-                    log.push(index);
-                }
                 // Every producer is inside its first item together, so the
-                // failure below is decided with all four in flight.
+                // failure below is decided with three others in flight.
                 if index < PRODUCERS {
                     gate.wait();
                 }
@@ -713,25 +717,12 @@ mod tests {
             |_, _, value: &u32| -> Result<u32, String> { Ok(*value) },
         );
 
-        let started = started.into_inner().expect("not poisoned");
-        assert!(
-            started.len() < items.len(),
-            "every narration was bought anyway: {} of {}",
-            started.len(),
-            items.len()
-        );
-        assert!(
-            started.len() < 2 * PRODUCERS,
-            "more than one item slipped past the barrier per producer: {started:?}"
-        );
-        for index in 0..PRODUCERS {
-            assert!(started.contains(&index), "{index} never ran: {started:?}");
-        }
-        // Work already in flight finished rather than being abandoned.
+        assert!(matches!(&firsts[0], Outcome::Done(Err(_))));
         for (index, outcome) in firsts.iter().enumerate().take(PRODUCERS).skip(1) {
             assert!(
                 matches!(outcome, Outcome::Done(Ok(_))),
-                "item {index} was in flight and must have finished"
+                "item {index} was in flight when the failure landed and must \
+                 have finished, not been abandoned"
             );
         }
     }
