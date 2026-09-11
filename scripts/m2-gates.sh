@@ -26,10 +26,19 @@ WORK="$(mktemp -d)"
 # and every `rm -rf "$WORK/..."` below then names an absolute path off the root.
 # Low probability, unrecoverable if it fires, so it is stated rather than
 # assumed (D-175).
+#
+# Tested by what it must not be, never by where it is. The first version of
+# this whitelisted `${TMPDIR:-/tmp}`, `/tmp/*` and `/var/folders/*` — all three
+# macOS shapes — and Git Bash's `mktemp -d` can answer
+# `/c/Users/…/AppData/Local/Temp/tmp.XXXX`, which matches none of them. That
+# would have refused to run the entire suite on the other platform D-071 puts
+# in scope, to guard against something `[ -d "" ]` already catches. A whitelist
+# of locations is one more thing to be wrong about on a machine nobody here has
+# run (D-090's lesson: the legal set is the platform's, not ours).
 case "$WORK" in
-  "${TMPDIR:-/tmp}"*|/tmp/*|/var/folders/*) ;;
-  *) echo "refusing to run: mktemp gave '$WORK', which is not a temporary directory" >&2
-     exit 1;;
+  ""|"/"|"$HOME"|"$PWD")
+    echo "refusing to run: mktemp gave '$WORK', which is not a scratch directory" >&2
+    exit 1;;
 esac
 [ -d "$WORK" ] || { echo "refusing to run: '$WORK' is not a directory" >&2; exit 1; }
 trap 'rm -rf "${WORK:?}"' EXIT

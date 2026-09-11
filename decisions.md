@@ -7094,8 +7094,18 @@ not, and reports a product that is fine as broken.
 **`set -u` does not catch the `rm -rf` sites**, which is why they are worth the
 four characters. A failed `mktemp -d` leaves `WORK` **set and empty**, and every
 `rm -rf "$WORK/..."` then names an absolute path off the root. The mktemp result
-is now checked for being non-empty, a directory, and under the temporary root;
-every removal is `${WORK:?}` / `${proj:?}`.
+is now checked, and every removal is `${WORK:?}` / `${proj:?}`.
+
+**The first version of that check was a macOS whitelist and would have stopped
+the suite dead on Windows.** It accepted `${TMPDIR:-/tmp}`, `/tmp/*` and
+`/var/folders/*` — three macOS shapes — while Git Bash's `mktemp -d` can answer
+`/c/Users/…/AppData/Local/Temp/tmp.XXXX`, which matches none of them. That
+would have refused to run every gate on the other platform D-071 puts in scope,
+to guard against something `[ -d "" ]` already catches. It tests what the
+directory must **not** be — empty, `/`, `$HOME`, the repo — and never where it
+is. D-090's lesson arriving again: the legal set is the platform's, not ours.
+Caught by asking what this change does on Windows *before* handing the tree to
+a Windows session, which is the only reason it was caught at all.
 
 **The `ls | grep` six are harmless where they stand and wrong in this suite**,
 which is the whole argument for changing them: `gate_hostile_names` exists

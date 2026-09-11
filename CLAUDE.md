@@ -190,6 +190,72 @@ cargo build --release -p spoonstill-cli
 cargo run --release -p spoonstill-desktop
 ```
 
+### If you are the Windows session — read this before "optimising for Windows"
+
+**Most of that question already has a measured answer, and it was measured on
+Windows.** 2026-09-05 and 2026-09-07 ran on a Windows 11 machine with an RTX
+3060; `ffmpeg-findings.md` §13 is the result. Do not re-derive any of it:
+
+| already settled, on Windows | answer |
+|---|---|
+| Is orchestration slow on Windows? | **No.** `still validate` on 32 scenes is 0.25 s; a fully cached re-render is 1.16 s, **36 ms a scene**. The time is in the filter graph, as it always was. |
+| Is D-076's pool cap of 4 wrong on a 16-core machine? | **No.** 1→47.2 s, 4→19.9, 8→18.2, 12→**19.8**. It flattens after four and regresses at twelve. |
+| Does the GPU help? | **1.19–1.23x**, and zero memory — the memory is the CPU prescale canvas (D-144). `--encoder auto` exists (D-162). Not the default, for D-036's reason. |
+| Is D-144's pool sizing right on Windows? | **Yes.** Peak 7 163 MB against the model's 2 755 MB/worker — the model sits 15% above the measurement, the safe direction. |
+
+**So "optimise for Windows" is not the task.** The measured answer is that both
+levers are already set correctly, and the biggest lever on a real render is
+D-145's undersized-stills warning, which is a property of the operator's
+photographs and not of the platform.
+
+**What is genuinely open on Windows is the harness, not the product.** The five
+gates below fail for macOS assumptions in `scripts/`, and each is a
+half-hour rather than an investigation because the cause is already known
+(recorded 2026-09-07, still true):
+
+| gate | why it cannot run there |
+|---|---|
+| `gate_bounded_audio`, `gate_tts`, `gate_overlap` | `stub_voice_service` writes a `#!/usr/bin/env bash` stand-in. **Windows cannot execute a shebang.** D-155's class, which fixed the Rust tests and never reached the shell gates. |
+| `gate_settings_untouched` | `stat -c %m` is a GNU/macOS spelling; Git Bash's `stat` prints the mount point, so the gate compares two mount points. |
+| `gate_journal` | the machine-wide log is under `%APPDATA%`, and the gate redirects `HOME`. |
+
+**Two more to check there, both added since that list was written**, and both
+are the same shape — a gate asserting a macOS path or a macOS tool:
+
+- **Gate 7i** greps `"$fake/Library/Application Support/spoonstill/runs.csv"`
+  in four places. That path is macOS's. On Windows the file is under
+  `%APPDATA%`, so those asserts will not find it.
+- **D-171's half of gate 7i** writes and reads `settings.yaml` under the same
+  macOS path.
+
+The fix for all of them is one helper that answers *where does machine state
+live on this platform* and is used by every gate that looks for it — not seven
+hard-coded paths. `spoonstill_state::runs::config_dir` already knows; a gate
+can ask the product (`still diagnostics where`) instead of guessing.
+
+**What to be careful of, because it has already bitten twice.**
+
+- **A gate that passes because it tested nothing.** `stub_voice_service`
+  exports `SPOONSTILL_EDGE_TTS` into the rest of the script, so running the
+  suite with that variable set to something else proves **nothing** about the
+  no-provider path — the stub overrides it. Drive the block directly. A number
+  better than the recorded expectation is the tell (D-154, D-162).
+- **The five failures above are macOS-verified code.** Do not "fix" them in a
+  way this machine cannot re-verify; `README.md` has always said the gates are
+  macOS-only, and the brief is to widen that, not to trade it.
+- **Wait for the CI legs**, both of them. `master` was red from D-168 to
+  2026-09-10 and only the runner could say so, because the failing assertion
+  needed the voice service the runner deliberately does not have (D-137).
+
+**And one thing to check first, which is this session's own risk.** D-175 added
+a `mktemp -d` sanity check to `m1-gates.sh` and `m2-gates.sh`. Its first version
+whitelisted three **macOS** temporary-directory shapes, and Git Bash's `mktemp`
+can answer `/c/Users/…/AppData/Local/Temp/…`, which matches none of them — the
+whole suite would have refused to start. It tests what the directory must not
+be now, never where it is. **If the suite exits immediately on Windows saying
+"refusing to run", that is this guard and it is ours.**
+
+
 ### State as of 2026-09-10 — four places where the next audit finds a number instead of an invitation
 
 **No behaviour changed here.** Four comments and a README section, each carrying
