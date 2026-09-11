@@ -160,9 +160,10 @@ is additionally cross-compiled for `x86_64-pc-windows-msvc` before a tag is cut
 `ffmpeg-findings.md` §13 is the first set of numbers in this project that is not
 macOS.
 
-What remains true is that the **39 `make gates` checks are macOS-only** — they
-are bash, and the Windows leg's `cargo test --workspace` covers the same media
-paths in Rust. If you are the first person to hit something,
+The **39 `make gates` checks now run on Windows too** ([D-176](decisions.md)):
+M2 is 23/23 there under Git Bash. One M1 gate is the exception and says so when
+it skips — cancellation is a console event on Windows and the harness has no way
+to send one, so that assertion stays macOS's. If you are the first person to hit something,
 an [issue](https://github.com/VijaysinghPuwar/spoonstill/issues) with
 `still doctor` output is genuinely useful.
 
@@ -811,7 +812,7 @@ before it is called a test**.
 | UI | 3,636 lines of hand-written HTML/CSS/JS — no framework, no build step |
 | Tests | **646 `#[test]` functions** — 47 unit-test modules, 15 integration suites |
 | Exit gates | **39** shell gates that render real media and assert real properties |
-| Decisions | **142 numbered decisions** in `decisions.md`, each Accepted / Open / Superseded |
+| Decisions | **143 numbered decisions** in `decisions.md`, each Accepted / Open / Superseded |
 | Direct dependencies | **12 third-party crates** at runtime (plus one build-time, one dev-only) — and `spoonstill-core` has **none** |
 | `unsafe` | forbidden at the workspace root |
 | CI jobs per push | 6 — advisories, macOS, Windows, both installers executed, and the gates |
@@ -991,7 +992,7 @@ Read in this order; later files never override earlier ones.
 
 | File | What it is |
 |---|---|
-| [`decisions.md`](decisions.md) | **Single source of truth.** 142 numbered decisions, each with the evidence that produced it. |
+| [`decisions.md`](decisions.md) | **Single source of truth.** 143 numbered decisions, each with the evidence that produced it. |
 | [`plan.md`](plan.md) | Milestones M0–M5, each with entry conditions, deliverables, and exit gates that are runnable commands. |
 | [`ffmpeg-findings.md`](ffmpeg-findings.md) | Benchmarks measured on real hardware, with reproduction commands. Evidence, not policy. |
 | [`PROCESS.md`](PROCESS.md) | How the work is actually done — reproduce, fix, prove the test fails without the fix. |

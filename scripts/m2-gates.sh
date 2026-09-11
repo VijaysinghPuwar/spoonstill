@@ -55,6 +55,65 @@ count_matching() {
   printf '%s' "$n"
 }
 
+# A file's modification time as a plain number, in both `stat`s.
+#
+# There are two `stat`s and they do not share a spelling: BSD's — macOS — is
+# `-f %m`, GNU's — Git Bash, Linux — is `-c %Y`. The gate below was written in
+# the BSD spelling, and on Windows GNU `stat` reads `-f` as `--file-system` and
+# `%m` as a filename, so it printed a six-line filesystem dump for both
+# readings and the comparison was between two dumps that differ in their free
+# block count. It reported `project.yaml` as rewritten by a render that had not
+# touched it.
+#
+# GNU is tried first because the failure directions are not symmetric: BSD
+# `stat` rejects `-c` outright, while GNU `stat` *accepts* `-f` and answers a
+# different question. Trying the spelling that fails cleanly second is what
+# keeps the fallback from being reached by accident.
+#
+# The answer is then required to be a number, so neither branch can hand back a
+# dump, a mount point or an empty string and have the comparison pass by
+# comparing two equal wrong things (D-116, D-154).
+mtime_of() { # path
+  local t
+  t=$(stat -c %Y "$1" 2>/dev/null) || t=$(stat -f %m "$1" 2>/dev/null) || return 1
+  case "$t" in
+    '' | *[!0-9]*)
+      echo "neither stat spelling gave a modification time for '$1': '$t'" >&2
+      return 1;;
+  esac
+  printf '%s' "$t"
+}
+
+# Run a command with everything this machine calls "machine state" — `runs.csv`
+# and `settings.yaml` — redirected into `dir`.
+#
+# `HOME` alone is macOS's answer and nobody else's.
+# `spoonstill_state::runs::config_dir` reads `HOME` there, `APPDATA` on Windows
+# and `XDG_CONFIG_HOME` on Linux, so every gate that redirected `HOME` and then
+# asserted something about a fresh machine redirected **nothing** on Windows
+# and asserted it against the operator's real settings file. Measured: gate 7i
+# sets a fallback voice four steps before it checks that a machine with no
+# fallback writes none, and on Windows both wrote to the same real file, so the
+# second step found the first step's voice and reported the product broken. The
+# suite was also editing the settings of whoever ran it.
+#
+# All three variables are set rather than one chosen by `uname`, because each
+# platform reads exactly one of them and ignores the other two. There is no
+# branch here to get wrong, and nothing in the harness has to hold a second
+# copy of a rule that already lives in `config_dir`.
+#
+# `APPDATA` is converted because it is read by a native Windows process that
+# joins it to a path; the POSIX spelling this shell uses is not a thing
+# `Path::join` can do anything with.
+with_machine_state() { # dir, then the command and its arguments
+  local dir="$1"; shift
+  local appdata="$dir"
+  if command -v cygpath >/dev/null 2>&1; then
+    appdata="$(cygpath -w "$dir")" || return 1
+  fi
+  HOME="$dir" APPDATA="$appdata" XDG_CONFIG_HOME="$dir" "$@"
+}
+
 # Where this machine keeps `runs.csv` and `settings.yaml`, **asked of the
 # product** rather than spelled out (D-071).
 #
@@ -70,7 +129,7 @@ count_matching() {
 # cares about that (D-090).
 machine_state_dir() { # HOME to ask under
   local csv
-  csv=$(HOME="$1" "$STILL" diagnostics where 2>/dev/null \
+  csv=$(with_machine_state "$1" "$STILL" diagnostics where 2>/dev/null \
     | sed -n 's|^\(.*runs\.csv\).*|\1|p' | head -1)
   [ -n "$csv" ] || return 1
   dirname "$csv"
@@ -356,6 +415,33 @@ cp "\$STUB_MP3" "\$out"
 STUB
   chmod +x "$WORK/stub-edge-tts"
   export SPOONSTILL_EDGE_TTS="$WORK/stub-edge-tts" STUB_MP3="$WORK/stub.mp3"
+
+  # Windows spawns this through `CreateProcess`, which cannot execute a
+  # shebang — the file above is text there, not a program, and the three gates
+  # that need speech failed with the service reported missing (D-155's class,
+  # which fixed the Rust tests and never reached the shell gates).
+  #
+  # The stand-in is not rewritten in batch. A second implementation of the same
+  # behaviour is a second thing to keep in step, and the bash one is the half
+  # that is verified on the platform the gates were written on. What Windows
+  # gets is a two-line trampoline into *that* file, so the two platforms run
+  # one stand-in and cannot drift.
+  #
+  # The interpreter is named absolutely, and it is `$BASH` — the shell already
+  # running this script, not a bare name resolved against whatever `PATH`
+  # cmd.exe inherits. That is the same rule D-155 settled and D-103 states for
+  # the product: a binary is located, never named. It also means the trampoline
+  # adds no dependency the harness did not already have, which `timeout.exe`
+  # and `ping` would each have done (and `timeout.exe` refuses to run at all
+  # with stdin redirected, which is how every child here is spawned).
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*)
+      printf '@echo off\r\n"%s" "%s" %%*\r\n' \
+        "$(cygpath -w "$BASH")" "$(cygpath -w "$WORK/stub-edge-tts")" \
+        > "$WORK/stub-edge-tts.cmd" || return 1
+      export SPOONSTILL_EDGE_TTS="$WORK/stub-edge-tts.cmd"
+      ;;
+  esac
 }
 
 # --- gate 4e: a cached segment of the wrong length is not reused ------------
@@ -544,7 +630,7 @@ gate_reorder() {
   # since D-169: without it, what this gate creates would depend on whoever is
   # running it.
   rm -rf "$WORK/reorder-fresh" "$WORK/reorder-home"; mkdir -p "$WORK/reorder-home"
-  HOME="$WORK/reorder-home" "$STILL" new "$WORK/reorder-fresh" "$media/p1.jpg" \
+  with_machine_state "$WORK/reorder-home" "$STILL" new "$WORK/reorder-fresh" "$media/p1.jpg" \
     >/dev/null 2>&1 || return 1
   grep -q '^motion_seed: v2$' "$WORK/reorder-fresh/project.yaml" || {
     echo "a new project does not declare its motion seed"; return 1; }
@@ -654,6 +740,26 @@ check "odd dimensions and a Unicode filename survive the join" gate_hostile
 # quietly become silence, so the render must fail and name the missing tool.
 gate_tts() {
   local out status
+  # This gate asks its question about the provider the render will *use*, so it
+  # must not inherit one. `stub_voice_service` exports `SPOONSTILL_EDGE_TTS`
+  # into the rest of the script and four gates above this one call it, so by
+  # the time this runs the stand-in is the provider — while the branch below
+  # still decides on `command -v edge-tts`, which is a different question.
+  #
+  # On a machine with no `edge-tts` — the CI runner, where D-137 arranged for
+  # exactly that so this gate exercises the half a developer's machine cannot —
+  # the leaked stand-in answers, the render **succeeds**, and the branch that
+  # was entered demands it fail. Measured here by hiding `edge-tts` from `PATH`:
+  # `status=0` against a gate asserting non-zero. That is a gate that is red on
+  # the runner and green everywhere it is looked at, which is the shape of the
+  # failure D-155 and the D-168 regression both had.
+  #
+  # Unsetting is what the gate meant before the stand-in existed, and it is the
+  # same on both platforms: with `edge-tts` installed this renders through the
+  # real provider, and without it the refusal half runs. The one gate below
+  # that needs speech calls `stub_voice_service` itself, so nothing downstream
+  # depends on the export surviving this.
+  unset SPOONSTILL_EDGE_TTS STUB_MP3
   rm -rf fixtures/projects/mixed/.spoonstill
   out=$("$STILL" render fixtures/projects/mixed/ --out "$WORK/mixed.mp4" 2>&1)
   status=$?
@@ -947,10 +1053,10 @@ gate_journal() {
   printf 'output: film.mp4\naspect: 16:9\nshort_edge: 540\nfps: 30\n' > "$proj/project.yaml"
   cp fixtures/generated/land.jpg "$proj/001.jpg" || return 1
 
-  HOME="$home" "$STILL" validate "$proj" >/dev/null 2>&1 || return 1
-  HOME="$home" "$STILL" subtitles >/dev/null 2>&1 || return 1
+  with_machine_state "$home" "$STILL" validate "$proj" >/dev/null 2>&1 || return 1
+  with_machine_state "$home" "$STILL" subtitles >/dev/null 2>&1 || return 1
   # A failure, which is the whole reason the file exists.
-  HOME="$home" "$STILL" validate "$WORK/no-such-folder" >/dev/null 2>&1 && {
+  with_machine_state "$home" "$STILL" validate "$WORK/no-such-folder" >/dev/null 2>&1 && {
     echo "validate on a missing folder reported success"; return 1; }
 
   [ -f "$csv" ] || { echo "nothing was written to runs.csv at all"; return 1; }
@@ -969,7 +1075,7 @@ gate_journal() {
 
   # And a render still writes what D-093 asked for — the wrapper's row *and*
   # the detailed events, in both files.
-  HOME="$home" "$STILL" render "$proj" --out "$WORK/journal.mp4" >/dev/null 2>&1 || return 1
+  with_machine_state "$home" "$STILL" render "$proj" --out "$WORK/journal.mp4" >/dev/null 2>&1 || return 1
   grep -q '","render","journal-project","command finished"' "$csv" || {
     echo "the render command itself is not in the log"; return 1; }
   grep -q '"film complete"' "$csv" || {
@@ -1010,7 +1116,7 @@ YAML
 
   local before_hash before_time
   before_hash=$(shasum -a 256 "$proj/project.yaml" | cut -d' ' -f1)
-  before_time=$(stat -f %m "$proj/project.yaml")
+  before_time=$(mtime_of "$proj/project.yaml") || return 1
 
   # Everything that touches a project: validate, add media, render, render
   # again from cache, and rearrange the scenes.
@@ -1023,7 +1129,7 @@ YAML
 
   local after_hash after_time
   after_hash=$(shasum -a 256 "$proj/project.yaml" | cut -d' ' -f1)
-  after_time=$(stat -f %m "$proj/project.yaml")
+  after_time=$(mtime_of "$proj/project.yaml") || return 1
 
   [ "$before_hash" = "$after_hash" ] || {
     echo "project.yaml was rewritten:"; diff <(echo "$before_hash") <(echo "$after_hash")
@@ -1171,8 +1277,27 @@ gate_voice_unchosen() {
   printf 'Part four begins here.' > "$proj/001.txt"
   printf 'And this is the second scene.' > "$proj/002.txt"
 
+  # A machine with no fallback voice of its own, because that is the machine
+  # this half is about. The redirect below already carries the note that it
+  # asserts "the rule and not whatever the machine running it happens to be set
+  # to"; these three renders are the same claim and never got the same
+  # treatment, so they read the real machine's `settings.yaml`.
+  #
+  # That is not hypothetical: this suite sets a fallback voice four steps down,
+  # and until `with_machine_state` existed those writes landed on the real file
+  # on Windows. So a second run of the gates found the voice the first run had
+  # set, the project was no longer unchosen, no warning was printed, and the
+  # gate reported the warning unwired. It would do the same on a Mac belonging
+  # to anyone who has ever run `still voices --use`.
+  #
+  # It also makes the two `silenced` assertions below mean what they say: under
+  # the ambient machine they would pass whether `--voice` did anything or not,
+  # because a fallback would have silenced the warning on its own (D-154).
+  local unset_home="$WORK/unchosen-unset-home"
+  rm -rf "$unset_home"; mkdir -p "$unset_home"
+
   local out
-  out=$("$STILL" render "$proj" --out "$WORK/un.mp4" 2>&1)
+  out=$(with_machine_state "$unset_home" "$STILL" render "$proj" --out "$WORK/un.mp4" 2>&1)
 
   grep -q 'warning: 2 spoken scenes name no voice' <<<"$out" || {
     echo "$out"; echo "two unchosen scenes did not warn"; return 1; }
@@ -1192,12 +1317,12 @@ gate_voice_unchosen() {
   # rule and not whatever the machine running it happens to be set to.
   local fake="$WORK/unchosen-home" rc=0
   rm -rf "$fake"; mkdir -p "$fake"
-  HOME="$fake" "$STILL" voices --use en-GB-RyanNeural >/dev/null 2>&1 || {
+  with_machine_state "$fake" "$STILL" voices --use en-GB-RyanNeural >/dev/null 2>&1 || {
     echo "could not set a fallback voice"; return 1; }
   local state
   state="$(machine_state_dir "$fake")" || {
     echo "could not ask where this machine keeps its state"; return 1; }
-  out=$(HOME="$fake" "$STILL" render "$proj" --out "$WORK/un5.mp4" 2>&1) || rc=$?
+  out=$(with_machine_state "$fake" "$STILL" render "$proj" --out "$WORK/un5.mp4" 2>&1) || rc=$?
   grep -q 'names\? no voice' <<<"$out" && {
     echo "$out"; echo "a machine fallback did not silence the warning"; return 1; }
   # The warning is silenced only by the scenes actually carrying the fallback,
@@ -1215,7 +1340,8 @@ gate_voice_unchosen() {
 
   # And answering it works. Either spelling, and neither may still warn —
   # a warning that survives its own fix is worse than no warning.
-  out=$("$STILL" render "$proj" --out "$WORK/un2.mp4" --voice en-GB-RyanNeural 2>&1)
+  out=$(with_machine_state "$unset_home" "$STILL" render "$proj" --out "$WORK/un2.mp4" \
+    --voice en-GB-RyanNeural 2>&1)
   grep -qE 'names? no voice' <<<"$out" && {
     echo "$out"; echo "--voice did not silence it"; return 1; }
 
@@ -1228,7 +1354,7 @@ gate_voice_unchosen() {
   # anything at all — a gate that passes by finding nothing to check (D-154).
   local fake="$WORK/unchosen-home"
   rm -rf "$fake"; mkdir -p "$fake"
-  HOME="$fake" "$STILL" voices --use en-AU-NatashaNeural >/dev/null 2>&1 || {
+  with_machine_state "$fake" "$STILL" voices --use en-AU-NatashaNeural >/dev/null 2>&1 || {
     echo "could not set a fallback voice"; return 1; }
 
   # Setting the preference must not need the voice service. This gate first
@@ -1238,8 +1364,9 @@ gate_voice_unchosen() {
   # where it happens to be the real one (D-168).
   local nohome="$WORK/unchosen-noprovider"
   rm -rf "$nohome"; mkdir -p "$nohome"
-  HOME="$nohome" SPOONSTILL_EDGE_TTS=/nonexistent/edge-tts \
-    "$STILL" voices --use en-AU-NatashaNeural >"$WORK/nouse.log" 2>&1 || {
+  SPOONSTILL_EDGE_TTS=/nonexistent/edge-tts \
+    with_machine_state "$nohome" "$STILL" voices --use en-AU-NatashaNeural \
+    >"$WORK/nouse.log" 2>&1 || {
     cat "$WORK/nouse.log"
     echo "a fallback voice could not be set without the voice service"; return 1; }
   grep -q 'not checked' "$WORK/nouse.log" || {
@@ -1252,7 +1379,7 @@ gate_voice_unchosen() {
     "$nostate/settings.yaml" || {
     echo "it said it set the voice and did not"; return 1; }
   local rc=0
-  out=$(HOME="$fake" "$STILL" render "$proj" --out "$WORK/un5.mp4" 2>&1) || rc=$?
+  out=$(with_machine_state "$fake" "$STILL" render "$proj" --out "$WORK/un5.mp4" 2>&1) || rc=$?
   grep -qE 'names? no voice' <<<"$out" && {
     echo "$out"; echo "a machine fallback did not silence the warning"; return 1; }
   # The warning is silenced only by the scenes actually carrying the fallback,
@@ -1274,7 +1401,7 @@ gate_voice_unchosen() {
   printf 'One line.' > "$named/001.txt"
   printf 'tts:\n  voice: en-US-GuyNeural\n' > "$named/project.yaml"
   rc=0
-  out=$(HOME="$fake" "$STILL" render "$named" --out "$WORK/un6.mp4" 2>&1) || rc=$?
+  out=$(with_machine_state "$fake" "$STILL" render "$named" --out "$WORK/un6.mp4" 2>&1) || rc=$?
   if [ "$rc" -eq 0 ]; then
     grep -q 'voice=en-US-GuyNeural' \
       "$state/runs.csv" || {
@@ -1282,7 +1409,7 @@ gate_voice_unchosen() {
   fi
 
   printf 'tts:\n  voice: en-GB-RyanNeural\n' > "$proj/project.yaml"
-  out=$("$STILL" render "$proj" --out "$WORK/un3.mp4" 2>&1)
+  out=$(with_machine_state "$unset_home" "$STILL" render "$proj" --out "$WORK/un3.mp4" 2>&1)
   grep -qE 'names? no voice' <<<"$out" && {
     echo "$out"; echo "tts.voice in project.yaml did not silence it"; return 1; }
 
@@ -1293,16 +1420,16 @@ gate_voice_unchosen() {
   local made="$WORK/unchosen-made"
   rm -rf "$made"
   printf 'A line to speak.' > "$WORK/unchosen-line.txt"
-  HOME="$fake" "$STILL" new "$made" fixtures/generated/land.jpg \
+  with_machine_state "$fake" "$STILL" new "$made" fixtures/generated/land.jpg \
     "$WORK/unchosen-line.txt" >/dev/null 2>&1 || {
     echo "still new failed"; return 1; }
   grep -q 'voice: en-AU-NatashaNeural' "$made/project.yaml" || {
     cat "$made/project.yaml"; echo "a new project did not record the voice"; return 1; }
 
   # The machine changes its mind; the folder does not.
-  HOME="$fake" "$STILL" voices --use en-US-GuyNeural >/dev/null 2>&1 || return 1
+  with_machine_state "$fake" "$STILL" voices --use en-US-GuyNeural >/dev/null 2>&1 || return 1
   rc=0
-  out=$(HOME="$fake" "$STILL" render "$made" --out "$WORK/un7.mp4" 2>&1) || rc=$?
+  out=$(with_machine_state "$fake" "$STILL" render "$made" --out "$WORK/un7.mp4" 2>&1) || rc=$?
   if [ "$rc" -eq 0 ]; then
     grep -q 'voice=en-AU-NatashaNeural' \
       "$state/runs.csv" || {
@@ -1320,7 +1447,7 @@ gate_voice_unchosen() {
   local broke="$state/settings.yaml"
   printf 'default_voice: "en-GB-Rya' > "$broke"
   rm -f "$broke.broken"
-  out=$(HOME="$fake" "$STILL" voices en-GB 2>&1) || true
+  out=$(with_machine_state "$fake" "$STILL" voices en-GB 2>&1) || true
   grep -q 'settings file is damaged' <<<"$out" || {
     echo "$out"; echo "a damaged settings file was ignored in silence"; return 1; }
   # The sentence says what it cost them, which is a voice — not that a YAML
@@ -1328,13 +1455,13 @@ gate_voice_unchosen() {
   grep -q 'which voice a project that names none' <<<"$out" || {
     echo "$out"; echo "the message did not say what the damage cost"; return 1; }
 
-  HOME="$fake" "$STILL" voices --use en-GB-RyanNeural >/dev/null 2>&1 || {
+  with_machine_state "$fake" "$STILL" voices --use en-GB-RyanNeural >/dev/null 2>&1 || {
     echo "could not set a voice over a damaged file"; return 1; }
   grep -q 'en-GB-Rya' "$broke.broken" || {
     ls "$(dirname "$broke")"; echo "the damaged file was replaced, not kept"; return 1; }
   grep -q 'default_voice: en-GB-RyanNeural' "$broke" || {
     cat "$broke"; echo "the new setting did not take"; return 1; }
-  out=$(HOME="$fake" "$STILL" voices en-GB 2>&1) || true
+  out=$(with_machine_state "$fake" "$STILL" voices en-GB 2>&1) || true
   grep -q 'settings file is damaged' <<<"$out" && {
     echo "$out"; echo "the warning survived its own fix"; return 1; }
 
@@ -1342,7 +1469,7 @@ gate_voice_unchosen() {
   # writing it would record the absence of a decision as though it were one.
   local bare="$WORK/unchosen-bare"
   rm -rf "$bare"; rm -rf "$WORK/unchosen-home2"; mkdir -p "$WORK/unchosen-home2"
-  HOME="$WORK/unchosen-home2" "$STILL" new "$bare" fixtures/generated/land.jpg \
+  with_machine_state "$WORK/unchosen-home2" "$STILL" new "$bare" fixtures/generated/land.jpg \
     >/dev/null 2>&1 || { echo "still new failed on a bare machine"; return 1; }
   grep -q 'voice:' "$bare/project.yaml" && {
     cat "$bare/project.yaml"; echo "a machine with no fallback wrote a voice"; return 1; }

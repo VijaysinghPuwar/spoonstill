@@ -208,27 +208,42 @@ levers are already set correctly, and the biggest lever on a real render is
 D-145's undersized-stills warning, which is a property of the operator's
 photographs and not of the platform.
 
-**What is genuinely open on Windows is the harness, not the product.** The five
-gates below fail for macOS assumptions in `scripts/`, and each is a
-half-hour rather than an investigation because the cause is already known
-(recorded 2026-09-07, still true):
+**What was genuinely open on Windows was the harness, not the product — and it
+is done (D-176).** M2 scored **17 of 23** here and now scores **23 of 23**. The
+diff that did it touches `scripts/` only: nothing about the films, the caches or
+the profile assertions was ever wrong on this platform.
 
-| gate | why it cannot run there |
-|---|---|
-| `gate_bounded_audio`, `gate_tts`, `gate_overlap` | `stub_voice_service` writes a `#!/usr/bin/env bash` stand-in. **Windows cannot execute a shebang.** D-155's class, which fixed the Rust tests and never reached the shell gates. |
-| `gate_settings_untouched` | `stat -c %m` is a GNU/macOS spelling; Git Bash's `stat` prints the mount point, so the gate compares two mount points. |
-| `gate_journal` | the machine-wide log is under `%APPDATA%`, and the gate redirects `HOME`. |
+| gate | why it could not run there | now |
+|---|---|---|
+| `gate_bounded_audio`, `gate_tts`, `gate_overlap` | `stub_voice_service` writes a `#!/usr/bin/env bash` stand-in and **Windows cannot execute a shebang** (D-155's class) | a two-line `.cmd` trampolines into that same file through `$BASH` — one stand-in, not two |
+| `gate_settings_untouched` | `stat -f %m` is BSD's spelling; GNU `stat` reads `-f` as `--file-system` and answers a filesystem dump | `mtime_of` tries `-c %Y` first and requires a number back |
+| gate 7i, and 16 other sites | `HOME` is macOS's answer; machine state is under `%APPDATA%` here | `with_machine_state` sets all three variables — no `uname` branch to get wrong |
+| M1 gate 5 | `kill -INT` never reaches a native process: a 3600-frame render **finished every frame** while `wait` returned 130 | skips on Windows and says why (D-134, gate 7h's precedent) |
 
-**Two of those were found and fixed here before the handoff**, which is why the
-list is shorter than it was. Seven sites across gates 7f and 7i hard-coded
-`$HOME/Library/Application Support/spoonstill/…` — macOS's answer and nobody
-else's — so on Windows every one of them looked for a file that was never going
-to exist. They ask the product now: `machine_state_dir` runs `still diagnostics
-where`, which prints the path `spoonstill_state::runs::config_dir` actually
-chose, and is therefore right on both platforms. Verified still 39/39 here.
+**Do not add an eighteenth.** A gate that needs machine state calls
+`with_machine_state "$DIR" "$STILL" …`; nothing spells the path out, and
+nothing redirects `HOME` alone.
 
-**Do not add an eighth.** A gate that needs machine state calls
-`machine_state_dir "$HOME_TO_ASK_UNDER"`; nothing spells the path out.
+**Two traps this left behind, both stated in D-176.** `gate_tts` decided which
+half of D-020 to assert from `command -v edge-tts` while the render obeyed
+`SPOONSTILL_EDGE_TTS`, which four earlier gates had exported — so on the CI
+runner, which deliberately has no `edge-tts` (D-137), the leaked stand-in spoke,
+the render succeeded, and the branch demanded it fail. Measured. And M1 gate 5's
+skip is loud on purpose: under a signal that is not delivered **two of its three
+assertions still pass**, so making it green by relaxing the third leaves a gate
+asserting nothing (D-116).
+
+**Smart App Control is the thing that will waste your day here, and it is not
+ours.** This machine enforces it, and it blocks freshly linked unsigned binaries
+**by hash** — proc-macro DLLs, `cargo test` binaries, and
+`target/release/still.exe`, which gives `Permission denied` and can fail every
+gate in a run. Three consecutive runs scored 6/8, 5/8 and 4/8 on M1 with no code
+changing. **Rebuilding the blocked file clears it** (`cargo clean --release -p
+<crate>` then build), which is how the 23/23 above was taken. It is also why
+`cargo clippy --workspace` cannot finish here: `webview2-com-sys`'s build script
+is blocked outright, so `apps/desktop` does not build. Check
+`VerifiedAndReputablePolicyState` under `HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy`
+before concluding anything is a regression.
 
 **What to be careful of, because it has already bitten twice.**
 

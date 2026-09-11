@@ -7626,3 +7626,113 @@ block at the top already states.
 Every requirement in this file is traceable to a document that *is* here. If the
 master brief resurfaces, reconcile it against this file explicitly; it does not
 win on age.
+
+### D-176 — The gates run on Windows, and what cannot run there says so · Accepted
+
+The first session to run `make gates` on Windows scored **17 of 23** on M2 and
+6 of 8 on M1. The five M2 failures were already diagnosed in `CLAUDE.md` and
+none of them was a defect in the product: the diff that fixes them touches
+`scripts/` only, and the films, the caches and the profile assertions were
+correct on this platform all along. M2 is **23/23** here now.
+
+**The stand-in voice service is one implementation, trampolined.**
+`stub_voice_service` writes a `#!/usr/bin/env bash` file and points
+`SPOONSTILL_EDGE_TTS` at it. Windows spawns that through `CreateProcess`, which
+cannot execute a shebang — the file is text there, not a program — so the three
+gates that need speech failed with the service reported missing. D-155's class
+exactly, which fixed the Rust tests and never reached the shell gates.
+
+Rewriting the stand-in in batch was rejected: a second implementation of the
+same behaviour is a second thing to keep in step, and the bash one is the half
+that is verified on the platform the gates were written on. Windows gets a
+two-line `.cmd` that runs **that same file** through `$BASH` — the shell already
+interpreting the suite, named absolutely rather than resolved against whatever
+`PATH` cmd.exe inherits (D-103's rule, and D-155's). It therefore adds no
+dependency the harness did not already have, which is what ruled out `ping` for
+the delay and `timeout.exe`, the latter refusing to run at all with stdin
+redirected — which is how every child here is spawned.
+
+Checked before it was built: a `.cmd` named in `SPOONSTILL_EDGE_TTS` really is
+spawnable by the product on Windows, measured through `still voices` rather than
+assumed from Rust's documentation.
+
+**And that stand-in was leaking into a gate that must not have one.**
+`stub_voice_service` exports into the rest of the script, and four gates later
+`gate_tts` decides which half of D-020 to assert by asking `command -v edge-tts`
+— a different question from the one the render answers, which is
+`SPOONSTILL_EDGE_TTS`. On a machine with no `edge-tts`, **which is the CI runner
+D-137 arranged deliberately**, the leaked stand-in speaks, the render succeeds,
+and the branch that was entered demands it fail. Measured by hiding `edge-tts`
+from `PATH`: `status=0` against a gate asserting non-zero. A gate red on the
+runner and green everywhere anyone looks at it — the shape D-155 and the D-168
+regression both had. The gate unsets what it did not ask for, which is what it
+meant before the stand-in existed.
+
+**`stat` has two spellings and only one of them fails when it is wrong.** The
+mtime check was BSD's `-f %m`; GNU `stat` reads `-f` as `--file-system` and
+answers a six-line filesystem dump, so the gate compared two dumps differing in
+their free block count and reported a render as having rewritten `project.yaml`.
+`mtime_of` tries GNU's `-c %Y` **first**, because BSD rejects `-c` outright while
+GNU *accepts* `-f` and answers a different question — the spelling that fails
+cleanly belongs second. The result is then required to be a number, so no branch
+can hand back a dump or an empty string and have the comparison pass by
+comparing two equal wrong things (D-116, D-154).
+
+**`HOME` is macOS's answer to where machine state lives, and nobody else's.**
+`config_dir` reads `HOME` on macOS, `APPDATA` on Windows and `XDG_CONFIG_HOME`
+on Linux. Seventeen sites redirected `HOME` and so redirected **nothing** here:
+every assertion about a fresh machine was made against the real
+`settings.yaml`, and the suite was **editing the settings of whoever ran it**.
+Gate 7i sets a fallback voice four steps before checking that a machine with no
+fallback writes none, so the second step found the first step's voice and
+reported the product broken.
+
+`with_machine_state` sets all three variables rather than choosing one by
+`uname`, because each platform reads exactly one and ignores the rest: there is
+no branch here to get wrong, and the harness holds no second copy of a rule that
+already lives in `config_dir`. `APPDATA` is converted with `cygpath`, because it
+is read by a native process that joins it to a path. This is D-071's existing
+rule — *a gate that needs machine state asks the product* — extended from
+`machine_state_dir`, which asked correctly and was then handed a `HOME` that
+meant nothing.
+
+**Gate 7i's first three renders were about a machine with no fallback and did
+not redirect at all.** The gate already carries the note that redirecting
+asserts "the rule and not whatever the machine running it happens to be set to";
+those three never got it. It fails on any machine whose owner has ever run
+`still voices --use`, Mac included. Redirecting them also makes the two
+*silenced* assertions mean what they say: under the ambient machine they would
+pass whether `--voice` did anything or not (D-154).
+
+**Cancellation is a console event on Windows, and the harness cannot send one.**
+M1's gate 5 sends `kill -INT`. Measured rather than reasoned about: a
+3600-frame render, signalled the moment it reported progress, **rendered every
+one of its 3600 frames and wrote a 32 MB film**, while `wait` returned 130.
+The signal reached MSYS's job record and nothing else.
+
+The product's half is built — `ctrlc::set_handler` registers a
+`SetConsoleCtrlHandler` there, so a real Ctrl-C in a real terminal reaches the
+same `request()`. What does not exist is a way for this shell to deliver
+`CTRL_C_EVENT` to a native process it started with redirected pipes. So the gate
+**skips on Windows and says why**, which is gate 7h's precedent in this same
+suite and D-134's rule: a gate that fails for a reason that is not a defect is a
+gate people learn to ignore.
+
+That skip is stated loudly because two of the gate's three assertions *pass*
+under the broken signal: 130 is non-zero, so "an interrupted render reported
+success" is satisfied by a render that was never interrupted, and a render that
+completes leaves no `.partial-` file. Only the destination check fails. A later
+session that makes this green by relaxing that one check will have a gate that
+asserts nothing — D-116's trap, laid where the next person will step.
+
+**Not fixed, and not ours: Smart App Control.** This machine enforces it
+(`VerifiedAndReputablePolicyState: 1`), and it blocks freshly linked unsigned
+binaries by hash — proc-macro DLLs, `cargo test` binaries, and
+`target/release/still.exe` itself, which produced `Permission denied` across
+whole gate runs and a different score on each of three consecutive runs. It is
+why `cargo clippy --workspace` cannot complete here: `webview2-com-sys`'s build
+script is blocked outright. Rebuilding a blocked file clears it, which is why
+the 23/23 above is a real result and not a lucky one. No harness change can fix
+an OS policy that refuses to run the product, and turning it off is the
+machine owner's decision and irreversible, so it is recorded rather than worked
+around.

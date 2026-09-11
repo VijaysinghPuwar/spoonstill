@@ -105,6 +105,34 @@ check "still render-scene with a Unicode, spaced path" gate_four
 # render finishes before ever reporting progress, the gate says so instead of
 # guessing, because at that point it is not testing cancellation at all.
 gate_five() {
+  # Cancellation is a console event on Windows, and this shell cannot send one.
+  #
+  # The product's half is built: `ctrlc::set_handler` registers a
+  # `SetConsoleCtrlHandler` there, so a real Ctrl-C in a real terminal reaches
+  # the same `request()` this gate is about. What does not exist is a way for
+  # the harness to deliver `CTRL_C_EVENT` to a native process it started with
+  # redirected pipes — MSYS's `kill -INT` is not that event.
+  #
+  # Measured here rather than assumed, because the failure is a quiet one. A
+  # 3600-frame render, signalled the moment it reported progress: `wait`
+  # returned **130**, and the render went on to finish every frame and write a
+  # 32 MB film. So the signal reached MSYS's job record and nothing else.
+  #
+  # That is worth stating precisely, because two of this gate's three
+  # assertions *pass* under it: 130 is non-zero, so "an interrupted render
+  # reported success" is satisfied by a render that was never interrupted, and
+  # a render that completes leaves no `.partial-` file behind. Only the
+  # destination check fails. A future session that makes this gate green by
+  # relaxing that one check will have a gate that asserts nothing at all —
+  # D-116's trap, and the reason this skips loudly instead.
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*)
+      echo "no way to send a console Ctrl-C to a native process from this shell"
+      echo "— cancellation is not exercised here; the assertion is macOS's (D-134)"
+      return 0
+      ;;
+  esac
+
   local progress="$WORK/c.progress"
   : > "$progress"
   "$STILL" render-scene --image fixtures/generated/land.jpg \
