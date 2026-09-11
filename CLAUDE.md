@@ -219,19 +219,16 @@ half-hour rather than an investigation because the cause is already known
 | `gate_settings_untouched` | `stat -c %m` is a GNU/macOS spelling; Git Bash's `stat` prints the mount point, so the gate compares two mount points. |
 | `gate_journal` | the machine-wide log is under `%APPDATA%`, and the gate redirects `HOME`. |
 
-**Two more to check there, both added since that list was written**, and both
-are the same shape — a gate asserting a macOS path or a macOS tool:
+**Two of those were found and fixed here before the handoff**, which is why the
+list is shorter than it was. Seven sites across gates 7f and 7i hard-coded
+`$HOME/Library/Application Support/spoonstill/…` — macOS's answer and nobody
+else's — so on Windows every one of them looked for a file that was never going
+to exist. They ask the product now: `machine_state_dir` runs `still diagnostics
+where`, which prints the path `spoonstill_state::runs::config_dir` actually
+chose, and is therefore right on both platforms. Verified still 39/39 here.
 
-- **Gate 7i** greps `"$fake/Library/Application Support/spoonstill/runs.csv"`
-  in four places. That path is macOS's. On Windows the file is under
-  `%APPDATA%`, so those asserts will not find it.
-- **D-171's half of gate 7i** writes and reads `settings.yaml` under the same
-  macOS path.
-
-The fix for all of them is one helper that answers *where does machine state
-live on this platform* and is used by every gate that looks for it — not seven
-hard-coded paths. `spoonstill_state::runs::config_dir` already knows; a gate
-can ask the product (`still diagnostics where`) instead of guessing.
+**Do not add an eighth.** A gate that needs machine state calls
+`machine_state_dir "$HOME_TO_ASK_UNDER"`; nothing spells the path out.
 
 **What to be careful of, because it has already bitten twice.**
 

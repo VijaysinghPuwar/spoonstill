@@ -55,6 +55,27 @@ count_matching() {
   printf '%s' "$n"
 }
 
+# Where this machine keeps `runs.csv` and `settings.yaml`, **asked of the
+# product** rather than spelled out (D-071).
+#
+# Seven gates hard-coded `$HOME/Library/Application Support/spoonstill/…`, which
+# is macOS's answer and nobody else's: on Windows the same state is under
+# `%APPDATA%`, so every one of those assertions looked for a file that was never
+# going to be there. `still diagnostics where` prints the path
+# `spoonstill_state::runs::config_dir` actually chose, which is the only thing
+# that is right on both platforms.
+#
+# The `sed` keeps everything up to `runs.csv` rather than cutting on whitespace,
+# because "Application Support" has a space in it and this suite is the one that
+# cares about that (D-090).
+machine_state_dir() { # HOME to ask under
+  local csv
+  csv=$(HOME="$1" "$STILL" diagnostics where 2>/dev/null \
+    | sed -n 's|^\(.*runs\.csv\).*|\1|p' | head -1)
+  [ -n "$csv" ] || return 1
+  dirname "$csv"
+}
+
 check() { # description, then a command
   local what="$1"; shift
   # A gate with no command is a gate that passes by doing nothing. This
@@ -919,7 +940,9 @@ check "narration and rendering overlap, and the film is unchanged by it" gate_ov
 # this platform, which is also why this gate is macOS-only like the rest.
 gate_journal() {
   local home="$WORK/journal-home" proj="$WORK/journal-project"
-  local csv="$home/Library/Application Support/spoonstill/runs.csv"
+  local csv
+  csv="$(machine_state_dir "$home")/runs.csv" || {
+    echo "could not ask where this machine keeps its state"; return 1; }
   rm -rf "$home" "$proj"; mkdir -p "$home" "$proj"
   printf 'output: film.mp4\naspect: 16:9\nshort_edge: 540\nfps: 30\n' > "$proj/project.yaml"
   cp fixtures/generated/land.jpg "$proj/001.jpg" || return 1
@@ -1171,6 +1194,9 @@ gate_voice_unchosen() {
   rm -rf "$fake"; mkdir -p "$fake"
   HOME="$fake" "$STILL" voices --use en-GB-RyanNeural >/dev/null 2>&1 || {
     echo "could not set a fallback voice"; return 1; }
+  local state
+  state="$(machine_state_dir "$fake")" || {
+    echo "could not ask where this machine keeps its state"; return 1; }
   out=$(HOME="$fake" "$STILL" render "$proj" --out "$WORK/un5.mp4" 2>&1) || rc=$?
   grep -q 'names\? no voice' <<<"$out" && {
     echo "$out"; echo "a machine fallback did not silence the warning"; return 1; }
@@ -1183,7 +1209,7 @@ gate_voice_unchosen() {
   # `runs.csv` carries no `voice=` row to find.
   if [ "$rc" -eq 0 ]; then
     grep -q 'voice=en-GB-RyanNeural' \
-      "$fake/Library/Application Support/spoonstill/runs.csv" || {
+      "$state/runs.csv" || {
       echo "the fallback was not the voice that spoke"; return 1; }
   fi
 
@@ -1219,8 +1245,11 @@ gate_voice_unchosen() {
   grep -q 'not checked' "$WORK/nouse.log" || {
     cat "$WORK/nouse.log"
     echo "it set the voice but claimed to have checked a catalogue it never saw"; return 1; }
+  local nostate
+  nostate="$(machine_state_dir "$nohome")" || {
+    echo "could not ask where this machine keeps its state"; return 1; }
   grep -q 'default_voice: en-AU-NatashaNeural' \
-    "$nohome/Library/Application Support/spoonstill/settings.yaml" || {
+    "$nostate/settings.yaml" || {
     echo "it said it set the voice and did not"; return 1; }
   local rc=0
   out=$(HOME="$fake" "$STILL" render "$proj" --out "$WORK/un5.mp4" 2>&1) || rc=$?
@@ -1232,7 +1261,7 @@ gate_voice_unchosen() {
   # only where the render finished, and says which case it was.
   if [ "$rc" -eq 0 ]; then
     grep -q 'voice=en-AU-NatashaNeural' \
-      "$fake/Library/Application Support/spoonstill/runs.csv" || {
+      "$state/runs.csv" || {
       echo "the fallback was not the voice that spoke"; return 1; }
   else
     echo "    (no voice service here — asserted the warning, not the audio)"
@@ -1248,7 +1277,7 @@ gate_voice_unchosen() {
   out=$(HOME="$fake" "$STILL" render "$named" --out "$WORK/un6.mp4" 2>&1) || rc=$?
   if [ "$rc" -eq 0 ]; then
     grep -q 'voice=en-US-GuyNeural' \
-      "$fake/Library/Application Support/spoonstill/runs.csv" || {
+      "$state/runs.csv" || {
       echo "the machine's fallback overruled a project's own voice"; return 1; }
   fi
 
@@ -1276,7 +1305,7 @@ gate_voice_unchosen() {
   out=$(HOME="$fake" "$STILL" render "$made" --out "$WORK/un7.mp4" 2>&1) || rc=$?
   if [ "$rc" -eq 0 ]; then
     grep -q 'voice=en-AU-NatashaNeural' \
-      "$fake/Library/Application Support/spoonstill/runs.csv" || {
+      "$state/runs.csv" || {
       echo "the project did not keep the voice it was made with"; return 1; }
   fi
 
@@ -1288,7 +1317,7 @@ gate_voice_unchosen() {
   # It asserts the **output** and never the exit code, for gate 7's reason —
   # the line is printed before the provider is asked anything, so it holds on a
   # machine with no `edge-tts` (D-020, D-137).
-  local broke="$fake/Library/Application Support/spoonstill/settings.yaml"
+  local broke="$state/settings.yaml"
   printf 'default_voice: "en-GB-Rya' > "$broke"
   rm -f "$broke.broken"
   out=$(HOME="$fake" "$STILL" voices en-GB 2>&1) || true
