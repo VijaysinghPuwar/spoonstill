@@ -7656,17 +7656,33 @@ Checked before it was built: a `.cmd` named in `SPOONSTILL_EDGE_TTS` really is
 spawnable by the product on Windows, measured through `still voices` rather than
 assumed from Rust's documentation.
 
-**And that stand-in was leaking into a gate that must not have one.**
-`stub_voice_service` exports into the rest of the script, and four gates later
-`gate_tts` decides which half of D-020 to assert by asking `command -v edge-tts`
-— a different question from the one the render answers, which is
-`SPOONSTILL_EDGE_TTS`. On a machine with no `edge-tts`, **which is the CI runner
-D-137 arranged deliberately**, the leaked stand-in speaks, the render succeeds,
-and the branch that was entered demands it fail. Measured by hiding `edge-tts`
-from `PATH`: `status=0` against a gate asserting non-zero. A gate red on the
-runner and green everywhere anyone looks at it — the shape D-155 and the D-168
-regression both had. The gate unsets what it did not ask for, which is what it
-meant before the stand-in existed.
+**A gate that borrows the stand-in now gives it back, however it leaves.**
+`stub_voice_service` exports into the shell, and both gates that call it removed
+the export as their **last statement** — after ten `return 1` paths. A gate that
+failed therefore left `SPOONSTILL_EDGE_TTS` pointing at its stand-in for every
+gate that ran afterwards.
+
+That is how the shebang defect presented, and the presentation was misleading:
+`gate_bounded_audio` returned at its first render, the export survived, and
+`gate_tts` four gates later failed against a stand-in it never asked for. One
+broken gate reported as two, and the second report named the wrong cause. The
+borrow is returned on every path now, by a wrapper that is the body's only
+caller.
+
+**The first draft of this decision got that wrong, and the correction is the
+point.** It claimed the leak was unconditional and therefore that `gate_tts` was
+red on the CI runner — with a `status=0` "measurement" to prove it. The
+measurement was of a stand-in exported by hand in a scratch shell, not of the
+script, which has cleaned up after itself on the success path since the
+stand-in was written. The runner was green, and the run log says so.
+
+Checking that is what found the real defect, which is narrower and more useful:
+not *the export leaks* but *the export leaks when a gate fails*, invisible on
+the platform where the gate passes. **A gate's own cleanup is a claim about its
+failure paths, and the only way to read it is to look at where they return.**
+`gate_tts` keeps a defensive `unset` — one line, and it makes a gate that
+branches on tool availability independent of what ran before it — but it is
+belt and braces and the comment there says so.
 
 **`stat` has two spellings and only one of them fails when it is wrong.** The
 mtime check was BSD's `-f %m`; GNU `stat` reads `-f` as `--file-system` and

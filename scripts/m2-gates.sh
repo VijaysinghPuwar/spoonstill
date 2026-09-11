@@ -515,7 +515,31 @@ check "a cached segment of the wrong length is re-rendered, not reused" \
 #
 # Five voices over four scenes is five generations of both layers. The derived
 # half must end at three generations; the spoken half must end at five.
+# A gate that borrows the stand-in gives it back, however it leaves.
+#
+# `stub_voice_service` exports into the shell, and both gates that call it
+# removed the export as their **last statement** — after ten `return 1` paths.
+# So a gate that failed left `SPOONSTILL_EDGE_TTS` pointing at its stand-in for
+# every gate that ran after it.
+#
+# That is not theoretical and it is how this was found: on Windows the stand-in
+# could not be executed at all, `gate_bounded_audio` returned at its first
+# render, the export survived, and `gate_tts` four gates later failed against a
+# stand-in it never asked for. One broken gate reported as two, and the second
+# report named the wrong cause. On macOS the gate passes, the last line runs,
+# and none of this is visible — which is why it survived.
+#
+# The borrow is returned on every path now. The body is a separate function and
+# this wrapper is the only caller, so there is no exit from it that skips the
+# `unset`.
 gate_bounded_audio() {
+  local rc=0
+  gate_bounded_audio_inner || rc=$?
+  unset SPOONSTILL_EDGE_TTS STUB_MP3
+  return "$rc"
+}
+
+gate_bounded_audio_inner() {
   local proj="$WORK/bounded-audio"
   local cache="$proj/$STATE/cache/audio"
   mkdir -p "$proj"
@@ -565,7 +589,6 @@ gate_bounded_audio() {
     --keep-cache 2>&1) || { echo "$out"; return 1; }
   grep -q "swept" <<<"$out" && { echo "--keep-cache swept anyway"; return 1; }
 
-  unset SPOONSTILL_EDGE_TTS STUB_MP3
   return 0
 }
 check "the audio cache is bounded, and nothing that cost a call is swept" gate_bounded_audio
@@ -740,25 +763,17 @@ check "odd dimensions and a Unicode filename survive the join" gate_hostile
 # quietly become silence, so the render must fail and name the missing tool.
 gate_tts() {
   local out status
-  # This gate asks its question about the provider the render will *use*, so it
-  # must not inherit one. `stub_voice_service` exports `SPOONSTILL_EDGE_TTS`
-  # into the rest of the script and four gates above this one call it, so by
-  # the time this runs the stand-in is the provider — while the branch below
-  # still decides on `command -v edge-tts`, which is a different question.
+  # This gate decides which half of D-020 to assert from `command -v edge-tts`,
+  # and the render obeys `SPOONSTILL_EDGE_TTS`. Those are two questions, and a
+  # gate whose branch and whose subject disagree is only correct while nothing
+  # else has set that variable.
   #
-  # On a machine with no `edge-tts` — the CI runner, where D-137 arranged for
-  # exactly that so this gate exercises the half a developer's machine cannot —
-  # the leaked stand-in answers, the render **succeeds**, and the branch that
-  # was entered demands it fail. Measured here by hiding `edge-tts` from `PATH`:
-  # `status=0` against a gate asserting non-zero. That is a gate that is red on
-  # the runner and green everywhere it is looked at, which is the shape of the
-  # failure D-155 and the D-168 regression both had.
-  #
-  # Unsetting is what the gate meant before the stand-in existed, and it is the
-  # same on both platforms: with `edge-tts` installed this renders through the
-  # real provider, and without it the refusal half runs. The one gate below
-  # that needs speech calls `stub_voice_service` itself, so nothing downstream
-  # depends on the export surviving this.
+  # The gates that borrow the stand-in now return it on every path, so nothing
+  # upstream leaves it set — this is belt and braces rather than the fix, and it
+  # is kept because the cost is one line and the failure it prevents is a gate
+  # asserting the opposite of what it says. Its value is stated honestly: it
+  # makes this gate independent of what ran before it, which a gate branching on
+  # tool availability should be.
   unset SPOONSTILL_EDGE_TTS STUB_MP3
   rm -rf fixtures/projects/mixed/.spoonstill
   out=$("$STILL" render fixtures/projects/mixed/ --out "$WORK/mixed.mp4" 2>&1)
@@ -980,7 +995,31 @@ check "an undersized still warns, names a size, and that size silences it" gate_
 #
 # What is asserted is an *ordering of events*, never a wall-clock number: a
 # shared runner is slow for reasons that are not defects.
+# A gate that borrows the stand-in gives it back, however it leaves.
+#
+# `stub_voice_service` exports into the shell, and both gates that call it
+# removed the export as their **last statement** — after ten `return 1` paths.
+# So a gate that failed left `SPOONSTILL_EDGE_TTS` pointing at its stand-in for
+# every gate that ran after it.
+#
+# That is not theoretical and it is how this was found: on Windows the stand-in
+# could not be executed at all, `gate_bounded_audio` returned at its first
+# render, the export survived, and `gate_tts` four gates later failed against a
+# stand-in it never asked for. One broken gate reported as two, and the second
+# report named the wrong cause. On macOS the gate passes, the last line runs,
+# and none of this is visible — which is why it survived.
+#
+# The borrow is returned on every path now. The body is a separate function and
+# this wrapper is the only caller, so there is no exit from it that skips the
+# `unset`.
 gate_overlap() {
+  local rc=0
+  gate_overlap_inner || rc=$?
+  unset SPOONSTILL_EDGE_TTS STUB_MP3
+  return "$rc"
+}
+
+gate_overlap_inner() {
   local proj="$WORK/overlap"
   mkdir -p "$proj"
   printf 'output: film.mp4\naspect: 16:9\nshort_edge: 540\nfps: 30\n' > "$proj/project.yaml"
@@ -1029,7 +1068,6 @@ gate_overlap() {
   cmp -s "$WORK/overlap.mp4" "$WORK/overlap-twin.mp4" || {
     echo "two pipelined runs at different job counts produced different films"; return 1; }
 
-  unset SPOONSTILL_EDGE_TTS STUB_MP3
   return 0
 }
 check "narration and rendering overlap, and the film is unchanged by it" gate_overlap

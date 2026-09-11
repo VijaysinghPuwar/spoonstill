@@ -224,14 +224,20 @@ the profile assertions was ever wrong on this platform.
 `with_machine_state "$DIR" "$STILL" …`; nothing spells the path out, and
 nothing redirects `HOME` alone.
 
-**Two traps this left behind, both stated in D-176.** `gate_tts` decided which
-half of D-020 to assert from `command -v edge-tts` while the render obeyed
-`SPOONSTILL_EDGE_TTS`, which four earlier gates had exported — so on the CI
-runner, which deliberately has no `edge-tts` (D-137), the leaked stand-in spoke,
-the render succeeded, and the branch demanded it fail. Measured. And M1 gate 5's
-skip is loud on purpose: under a signal that is not delivered **two of its three
-assertions still pass**, so making it green by relaxing the third leaves a gate
-asserting nothing (D-116).
+**Two traps this left behind, both stated in D-176.** A gate that borrows the
+stand-in returned it as its **last statement**, after ten `return 1` paths — so
+a gate that *failed* left `SPOONSTILL_EDGE_TTS` set for every gate after it.
+That is how the shebang defect presented: one broken gate reported as two, and
+the second report named the wrong cause. Invisible on macOS, where the gate
+passes and the last line runs. And M1 gate 5's skip is loud on purpose: under a
+signal that is not delivered **two of its three assertions still pass**, so
+making it green by relaxing the third leaves a gate asserting nothing (D-116).
+
+**D-176's own first draft got the first of those wrong** — it called the leak
+unconditional and produced a `status=0` "measurement" that was taken in a
+scratch shell rather than from the script, then concluded a green runner was
+red. Worth knowing because the correction is the more useful fact: the export
+leaks **when a gate fails**, which is exactly the case macOS never sees.
 
 **Smart App Control is the thing that will waste your day here, and it is not
 ours.** This machine enforces it, and it blocks freshly linked unsigned binaries
