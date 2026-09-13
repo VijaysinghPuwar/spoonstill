@@ -1455,23 +1455,49 @@ gate_voice_unchosen() {
   # voice after the machine changes its mind — which is what keeps ten parts of
   # one film matched a month later, on a machine that has never heard of this
   # one (D-169).
+  #
+  # On a machine of its own, and that is the assertion rather than tidiness.
+  # `runs.csv` is append-only and this half greps it for a voice: the D-168
+  # render five steps up had already written `voice=en-AU-NatashaNeural` into
+  # the file `$fake` holds, so the grep found *that* row and passed whatever
+  # this project did. Reproduced by deleting the `tts:` block from the folder
+  # `still new` had just written — the film then spoke `en-US-GuyNeural`, the
+  # machine's new answer and the exact thing D-169 exists to prevent, and the
+  # gate still reported the voice kept. A state directory nothing else writes
+  # to is what makes the row this half looks for a row this half wrote (D-154,
+  # the trap this gate's own comments name twice).
+  local madehome="$WORK/unchosen-made-home" madestate
+  rm -rf "$madehome"; mkdir -p "$madehome"
+  with_machine_state "$madehome" "$STILL" voices --use en-AU-NatashaNeural \
+    >/dev/null 2>&1 || { echo "could not set a fallback voice"; return 1; }
+  madestate="$(machine_state_dir "$madehome")" || {
+    echo "could not ask where this machine keeps its state"; return 1; }
+
   local made="$WORK/unchosen-made"
   rm -rf "$made"
   printf 'A line to speak.' > "$WORK/unchosen-line.txt"
-  with_machine_state "$fake" "$STILL" new "$made" fixtures/generated/land.jpg \
+  with_machine_state "$madehome" "$STILL" new "$made" fixtures/generated/land.jpg \
     "$WORK/unchosen-line.txt" >/dev/null 2>&1 || {
     echo "still new failed"; return 1; }
   grep -q 'voice: en-AU-NatashaNeural' "$made/project.yaml" || {
     cat "$made/project.yaml"; echo "a new project did not record the voice"; return 1; }
 
   # The machine changes its mind; the folder does not.
-  with_machine_state "$fake" "$STILL" voices --use en-US-GuyNeural >/dev/null 2>&1 || return 1
+  with_machine_state "$madehome" "$STILL" voices --use en-US-GuyNeural \
+    >/dev/null 2>&1 || return 1
   rc=0
-  out=$(with_machine_state "$fake" "$STILL" render "$made" --out "$WORK/un7.mp4" 2>&1) || rc=$?
+  out=$(with_machine_state "$madehome" "$STILL" render "$made" \
+    --out "$WORK/un7.mp4" 2>&1) || rc=$?
   if [ "$rc" -eq 0 ]; then
     grep -q 'voice=en-AU-NatashaNeural' \
-      "$state/runs.csv" || {
+      "$madestate/runs.csv" || {
       echo "the project did not keep the voice it was made with"; return 1; }
+    # And nothing spoke the machine's new answer. This is the half a grep for
+    # the *right* voice cannot see on its own: both rows can sit in one file at
+    # once, and only the absence of this one says the fallback was overruled.
+    grep -q 'voice=en-US-GuyNeural' "$madestate/runs.csv" && {
+      echo "the machine's new fallback was spoken over the folder's own voice"
+      return 1; }
   fi
 
   # D-171. A settings file that is there and cannot be used is *said*, and the
@@ -1519,7 +1545,14 @@ gate_voice_unchosen() {
   cp fixtures/generated/land.jpg "$silent/001.jpg" || return 1
   "$FFMPEG" -y -loglevel error -f lavfi -i "sine=frequency=440:duration=1" \
     -ar 48000 -ac 1 "$silent/001.wav" || return 1
-  out=$("$STILL" render "$silent" --out "$WORK/un4.mp4" 2>&1)
+  # Under the same machine with no fallback as the three renders at the top,
+  # because that is the only machine on which this claim says anything: where a
+  # fallback is set, *nothing* warns, and the assertion passes by finding
+  # nothing to check. It was the one call left in this gate reading the real
+  # machine's settings, which is also how the suite came to write into the
+  # activity log of whoever ran it (D-154, D-176).
+  out=$(with_machine_state "$unset_home" "$STILL" render "$silent" \
+    --out "$WORK/un4.mp4" 2>&1)
   grep -qE 'names? no voice' <<<"$out" && {
     echo "$out"; echo "a project with nothing to speak was asked for a voice"; return 1; }
 

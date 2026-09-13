@@ -274,6 +274,54 @@ be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
 
+### State as of 2026-09-12 — a gate was green because another gate had been there first
+
+**D-177 — a gate greps a log it filled, not one another gate filled.** D-176's
+Windows work was checked line by line on this Mac before anything was built on
+top of it: `make gates` 39/39, `make lint` green (clippy, fmt, `actionlint`,
+`shellcheck`), `cargo audit --deny warnings` clean, CI green on both commits.
+Every claim D-176 makes holds — `mtime_of`'s fallback order is right (BSD `stat`
+rejects `-c` outright, measured), `with_machine_state` matches
+`runs::config_dir` exactly, and the export leak is real and is fixed: the old
+shape leaks after a failing body, the wrapper does not.
+
+**What that check found is in neither audit and is older than D-176.** Gate 7i's
+D-169 half — *a project keeps the voice it was made with after the machine
+changes its mind* — grepped `runs.csv` for `voice=en-AU-NatashaNeural`, and the
+D-168 half five steps above renders the same project under the same redirected
+machine state with the same voice. The row was already there. Reproduced by
+deleting the `tts:` block from the folder `still new` had just written: the film
+spoke `en-US-GuyNeural`, which is the failure in full, and the gate reported the
+voice kept.
+
+Fixed with a state directory nothing else writes to, not with a voice nobody
+else uses — the latter holds only until somebody adds a step, and fails silently
+when they do. A second assertion states the other half, which a grep for the
+*right* voice cannot see: **no row says `en-US-GuyNeural`**. Mutation-tested
+both ways.
+
+**And the last call in that gate read the operator's own machine.** The
+silent-project half redirected nothing, so on any machine with a fallback set
+*nothing* warns and it passed by finding nothing to check — and wrote into that
+operator's real `runs.csv` besides, which is D-176's own complaint about
+seventeen other sites. It was the one `"$STILL"` left in gate 7i without
+`with_machine_state`; there are none now.
+
+**The shape to carry forward:** where a gate greps an append-only file, the
+question is not *is the right thing in it* but *could only this step have put it
+there*. **`make gates` is 39 of 39** — gate 7i grew an assertion and lost a
+dependency on its own history.
+
+**Two things worth knowing, neither a defect.** `with_machine_state` redirects
+`APPDATA`, which on Windows is *also* a binary search path —
+`tools.rs` looks for `edge-tts` under `%APPDATA%\Python\*\Scripts`, the
+`pip install --user` location — so a gate running under it cannot see a provider
+installed that way, and the `if rc -eq 0` halves quietly become no-ops.
+`USERPROFILE` is not redirected, so scoop and pipx still resolve. And the
+`.cmd` trampoline's `%*` forwarding has no test and no macOS-side proof; it is
+fine for the paths the gates pass (all under `mktemp -d`, no spaces) and is the
+first thing to suspect if a stand-in ever gets an argument with a space in it.
+
 ### State as of 2026-09-10 — four places where the next audit finds a number instead of an invitation
 
 **No behaviour changed here.** Four comments and a README section, each carrying

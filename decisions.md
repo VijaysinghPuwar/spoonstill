@@ -7752,3 +7752,62 @@ the 23/23 above is a real result and not a lucky one. No harness change can fix
 an OS policy that refuses to run the product, and turning it off is the
 machine owner's decision and irreversible, so it is recorded rather than worked
 around.
+
+### D-177 — A gate greps a log it filled, not one another gate filled · Accepted
+
+`make gates` is 39 of 39 on macOS and 23 of 23 on Windows, and one of those 39
+was passing because of a row a different step had written four renders earlier.
+
+Gate 7i's D-169 half is the claim that **a project made while a machine fallback
+is set keeps that voice after the machine changes its mind** — the thing that
+keeps ten parts of one film matched a month later. It asserted it by rendering
+the folder and grepping `runs.csv` for `voice=en-AU-NatashaNeural`.
+
+`runs.csv` is append-only, and the D-168 half five steps above renders the *same*
+project under the *same* redirected machine state with that *same* voice. So the
+row was already in the file before this half rendered anything.
+
+**Reproduced rather than reasoned about**, by making the regression D-169 exists
+to prevent: the `tts:` block was deleted from the folder `still new` had just
+written, which is exactly the state of a project made before D-169 landed. The
+film then spoke `en-US-GuyNeural` — the machine's *new* answer, the failure in
+full — and the gate reported the voice kept. The voice rows in order say it
+plainly:
+
+```
+voice=en-AU-NatashaNeural     <- the D-168 half's render of $proj
+voice=en-AU-NatashaNeural     <- ditto, its second scene
+voice=en-US-GuyNeural         <- $made, having kept nothing
+```
+
+**The fix is a state directory nothing else writes to**, not a different voice.
+Picking a voice no other step uses is what the D-168 half's own comment already
+does, and it is the weaker answer: it holds only until somebody adds a step, and
+the failure when they do is silent. A fresh `with_machine_state` directory makes
+the row this half greps for a row this half wrote, by construction, and needs
+nobody to remember anything.
+
+**A second assertion goes with it, and it is the one that states the property.**
+Both rows can sit in one file at once, so a grep for the *right* voice cannot
+see an overrule on its own — only the *absence* of `voice=en-US-GuyNeural` says
+the machine's new answer was spoken by nothing. Mutation-tested both ways: clean,
+one Natasha row and a pass; mutated, one Guy row and both assertions fire.
+
+**And the last call in that gate was reading the operator's own machine.** The
+silent-project half — *a project with nothing to speak is never asked for a
+voice* — rendered without redirecting anything. On a machine whose owner has run
+`still voices --use`, **nothing** warns, so that assertion passed by finding
+nothing to check; it also wrote into that operator's real activity log, which is
+the complaint D-176 makes about seventeen other sites. It runs under the same
+no-fallback machine as the three renders at the top of the gate now.
+
+**What this is an instance of.** D-176 fixed a `HOME` redirect that redirected
+nothing and D-154 named the vacuous resume gate; both are *a gate that passes by
+finding nothing to check*. This is the third shape of it: **a gate that passes by
+finding something another gate left behind.** The tell is the same one D-162 and
+D-154 record — an assertion that cannot fail for the reason it names. Where a
+gate greps an append-only file, the question to ask is not *is the right thing in
+it* but *could only this step have put it there*.
+
+**`make gates` is 39 of 39**, unchanged in count: gate 7i grew an assertion and
+lost a dependency on its own history.
