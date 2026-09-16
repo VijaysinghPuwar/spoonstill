@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use spoonstill_core::diagnostics::{Diagnostics, Event};
 
-use crate::atomic::{ensure_parent, move_into_place, partial_path};
+use crate::atomic::{Partial, ensure_parent, partial_path, sweep_partials};
 use crate::command::FfmpegCommand;
 use crate::error::MediaError;
 use crate::probe::{self, DEFAULT_PROBE_TIMEOUT, ProbeResult};
@@ -65,6 +65,12 @@ pub struct Expectation<'a> {
     pub profile: &'a SegmentProfile,
     /// Total frames, summed from the segments' asserted frame counts.
     pub frames: u64,
+    /// Each segment's asserted frame count, in film order (D-178).
+    ///
+    /// The total alone says a film is short; these say **where** it stopped,
+    /// which is the difference between a report an operator can act on and
+    /// one that names the only file that is not at fault.
+    pub segment_frames: &'a [u64],
     /// Total duration, computed from those frames rather than measured.
     pub duration: f64,
     /// Frame rate, for the tolerance.
@@ -99,6 +105,27 @@ pub fn is_safe_list_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+/// Which segment the join stopped at, given how many frames it actually wrote.
+///
+/// The first segment whose running total passes `actual` is the one FFmpeg
+/// could not read through: everything before it is in the film, and it and
+/// everything after it is not.
+///
+/// Returns `None` when the film is not short — attribution is only meaningful
+/// for content that is missing off the end, and a film that is *longer* than
+/// its parts is a different fault with a different cause.
+#[must_use]
+pub fn stopped_at(segment_frames: &[u64], actual: u64) -> Option<usize> {
+    let mut running = 0u64;
+    for (index, frames) in segment_frames.iter().enumerate() {
+        running = running.saturating_add(*frames);
+        if running > actual {
+            return Some(index);
+        }
+    }
+    None
+}
+
 /// Join validated segments into one film, and validate that too.
 ///
 /// `expected_total` is the sum of the segment durations as *computed* from
@@ -111,7 +138,9 @@ pub fn is_safe_list_name(name: &str) -> bool {
 /// segments do not share one directory, or when a filename is not one we
 /// generated; [`MediaError::ProfileMismatch`] when the joined film does not
 /// match the profile or drifts by more than a frame from `expected_total`;
-/// and anything the process boundary reports.
+/// [`MediaError::JoinStopped`] when it is short by whole segments, which names
+/// the scene it stopped at and discards that segment (D-178); and anything the
+/// process boundary reports.
 pub fn concat(
     tools: &Tools,
     segments: &[PathBuf],
@@ -121,7 +150,7 @@ pub fn concat(
 ) -> Result<Film, MediaError> {
     let list = write_list(segments, dest)?;
 
-    let result = run(tools, &list, dest, expect, log);
+    let result = run(tools, &list, segments, dest, expect, log);
 
     // The list is scaffolding, not an artifact. It goes whether or not the
     // join worked — a leftover `.concat-*.txt` in a project folder is the kind
@@ -133,12 +162,31 @@ pub fn concat(
 fn run(
     tools: &Tools,
     list: &Path,
+    segments: &[PathBuf],
     dest: &Path,
     expect: &Expectation<'_>,
     log: &dyn Diagnostics,
 ) -> Result<Film, MediaError> {
     ensure_parent(dest)?;
-    let temporary = partial_path(dest);
+
+    // Litter from a run that died between writing this file and renaming it —
+    // a crash, a force quit, a power cut. It is dot-prefixed, so the operator
+    // cannot see it in Finder to delete it themselves, and it is the size of a
+    // whole film. Swept before the join rather than after, so it goes even
+    // when this run fails too. Scoped to this exact destination name, because
+    // this is the operator's own folder and not a cache we own.
+    let freed = sweep_partials(dest);
+    if freed > 0 {
+        log.record(
+            &Event::info("concat", "swept an abandoned film")
+                .with("path", dest.display().to_string())
+                .with("freed_bytes", freed.to_string()),
+        );
+    }
+
+    // Removes itself on every failure path below, including a failed rename.
+    let temporary = Partial::beside(dest);
+    let temporary_path = temporary.path().to_path_buf();
 
     let mut command = FfmpegCommand::new(tools.ffmpeg());
     command
@@ -149,19 +197,13 @@ fn run(
         .args(["-f", "concat", "-safe", "0"])
         .input(list)
         .args(["-c", "copy"])
-        .arg(&temporary);
+        .arg(&temporary_path);
 
     let child = command.spawn()?;
     let display = child.display().to_string();
     log.record(&Event::info("ffmpeg", "running").with("command", display.clone()));
 
-    let finished = match child.wait_until(CONCAT_TIMEOUT) {
-        Ok(finished) => finished,
-        Err(error) => {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(error);
-        }
-    };
+    let finished = child.wait_until(CONCAT_TIMEOUT)?;
 
     if !finished.status.success() {
         log.record(
@@ -169,19 +211,12 @@ fn run(
                 .with("command", display)
                 .with("stderr", finished.stderr.clone()),
         );
-        let _ = std::fs::remove_file(&temporary);
         finished.ok()?;
     }
 
-    let film = match validate(tools, &temporary, expect, log) {
-        Ok(film) => film,
-        Err(error) => {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(error);
-        }
-    };
+    let film = validate(tools, &temporary_path, segments, expect, log)?;
 
-    move_into_place(&temporary, dest)?;
+    temporary.move_into_place(dest)?;
 
     Ok(Film {
         path: dest.to_path_buf(),
@@ -213,6 +248,7 @@ fn run(
 fn validate(
     tools: &Tools,
     path: &Path,
+    segments: &[PathBuf],
     expect: &Expectation<'_>,
     log: &dyn Diagnostics,
 ) -> Result<Film, MediaError> {
@@ -242,6 +278,39 @@ fn validate(
     let mut wrong: Vec<profile::Mismatch> = Vec::new();
 
     if let Some(declared) = video.nb_frames.filter(|d| *d != expect.frames) {
+        // A short film is not a fact about the film. FFmpeg's concat demuxer
+        // stops at a segment it cannot read through and exits 0 with no
+        // warning, so the missing frames are an address: the first segment
+        // whose running total passes what was actually written (D-178).
+        //
+        // Reported instead of the `nb_frames` mismatch rather than alongside
+        // it, because the two say the same thing and only one of them names a
+        // file the operator can do something about.
+        if let Some(index) =
+            stopped_at(expect.segment_frames, declared).filter(|i| *i < segments.len())
+        {
+            log.record(
+                &Event::error("concat", "the join stopped part way through the film")
+                    .with("segment", segments[index].display().to_string())
+                    .with("scene", (index + 1).to_string())
+                    .with("of", segments.len().to_string())
+                    .with("expected_frames", expect.frames.to_string())
+                    .with("actual_frames", declared.to_string()),
+            );
+            // Discarded, so the next render rebuilds that one scene instead of
+            // failing in exactly this way forever. The file is provably
+            // unusable: it passed the header checks and the picture is not
+            // there, which is the same judgement `render_one` makes when a
+            // cached segment fails its probe.
+            let _ = std::fs::remove_file(&segments[index]);
+            return Err(MediaError::JoinStopped {
+                segment: segments[index].clone(),
+                ordinal: index + 1,
+                of: segments.len(),
+                expected: expect.frames,
+                actual: declared,
+            });
+        }
         wrong.push(profile::Mismatch {
             field: "nb_frames",
             expected: expect.frames.to_string(),
@@ -389,6 +458,92 @@ mod tests {
             ".hidden.mp4",
         ] {
             assert!(!is_safe_list_name(hostile), "{hostile:?} must be refused");
+        }
+    }
+
+    /// D-178, reproduced from the operator's own `runs.csv`.
+    ///
+    /// A 50-scene 4K film came back as 4244 frames of 10522, four times, with
+    /// FFmpeg exiting 0 every time. The frame counts below are the ones that
+    /// run rendered, read out of the log: scenes 1..=22 sum to 4243, so the
+    /// join stopped at **scene 23**, whose segment had been written to an SMB
+    /// volume that logged `Error closing file: Bad file descriptor`.
+    ///
+    /// The one-frame overshoot is the point. The film is 4244 and the scenes
+    /// before it total 4243, so a rule that looked for an exact boundary would
+    /// find none; the rule is the first running total to *pass* what was
+    /// written.
+    #[test]
+    fn the_scene_a_short_film_stopped_at_is_named() {
+        // Every `-frames:v` for the 50 scenes of that render, in film order.
+        let frames: Vec<u64> = vec![
+            209, 257, 196, 182, 170, 213, 143, 260, 260, 191, 239, 209, 225, 140, 143, 155, 177,
+            183, 194, 171, 137, 189, // 22 scenes: 4243 frames
+            122, 170, 253, 158, 231, 164, 216, 338, 273, 140, 263, 206, 203, 80, 266, 99, 234, 150,
+            226, 270, 159, 219, 191, 248, 274, 298, 386, 442,
+        ];
+        assert_eq!(frames.len(), 50);
+        assert_eq!(
+            frames.iter().sum::<u64>(),
+            10522,
+            "the run's expected total"
+        );
+        assert_eq!(frames[..22].iter().sum::<u64>(), 4243);
+
+        assert_eq!(
+            stopped_at(&frames, 4244),
+            Some(22),
+            "scenes 1..=22 are in the film, so the join stopped at scene 23"
+        );
+
+        // A film that is whole has nothing to attribute.
+        let whole: u64 = frames.iter().sum();
+        assert_eq!(stopped_at(&frames, whole), None);
+        // Nor has one that is somehow longer than its parts — a different
+        // fault, which still goes through the ordinary mismatch report.
+        assert_eq!(stopped_at(&frames, whole + 1), None);
+    }
+
+    /// The boundaries, because off-by-one here names the wrong scene and sends
+    /// the operator to a file that is fine.
+    #[test]
+    fn attribution_lands_on_the_first_segment_not_wholly_in_the_film() {
+        let frames = [10, 10, 10];
+        // Nothing written at all: the very first segment is the one.
+        assert_eq!(stopped_at(&frames, 0), Some(0));
+        // Part way through the first.
+        assert_eq!(stopped_at(&frames, 5), Some(0));
+        // Exactly the first, whole: it is in, so the second is the suspect.
+        assert_eq!(stopped_at(&frames, 10), Some(1));
+        assert_eq!(stopped_at(&frames, 11), Some(1));
+        assert_eq!(stopped_at(&frames, 20), Some(2));
+        assert_eq!(stopped_at(&frames, 30), None);
+        // No segments, nothing to blame.
+        assert_eq!(stopped_at(&[], 0), None);
+    }
+
+    /// The message exists to replace one that named the film — the single file
+    /// in the whole run that is not at fault — so what it says is asserted,
+    /// not just that it is an error.
+    #[test]
+    fn the_report_names_the_scene_the_file_and_the_way_out() {
+        let error = MediaError::JoinStopped {
+            segment: PathBuf::from("/p/.spoonstill/segments/seg-9c1d8ae0f0e62406.mp4"),
+            ordinal: 23,
+            of: 50,
+            expected: 10522,
+            actual: 4244,
+        };
+        let text = error.to_string();
+        for wanted in [
+            "scene 23 of 50",
+            "4244 frames of 10522",
+            "exited 0",
+            "seg-9c1d8ae0f0e62406.mp4",
+            "discarded",
+            "Render again",
+        ] {
+            assert!(text.contains(wanted), "{wanted:?} missing from:\n{text}");
         }
     }
 

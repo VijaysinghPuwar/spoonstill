@@ -86,6 +86,33 @@ pub enum MediaError {
         /// Every field that differs, named individually.
         mismatches: Vec<Mismatch>,
     },
+    /// The join ran, exited 0, and stopped part way through the segment list
+    /// (D-178).
+    ///
+    /// This is [`ProfileMismatch`](MediaError::ProfileMismatch)'s finding
+    /// turned into an address. FFmpeg's concat demuxer stops at a segment it
+    /// cannot read past and **exits 0 with no warning** — the whole reason
+    /// D-041 makes the assertion ours — so the film comes back short and the
+    /// mismatch names the *film*, which is the one file that is not at fault.
+    /// Every scene passed its own assertion, so an operator reading that has
+    /// nowhere to go and every retry fails identically.
+    ///
+    /// The frame counts say exactly where it stopped: the first segment whose
+    /// running total passes the film's own count is the one the join could not
+    /// read through.
+    JoinStopped {
+        /// The segment the join stopped at.
+        segment: PathBuf,
+        /// Its place in the film, counting from one — the scene an operator
+        /// can go and look at.
+        ordinal: usize,
+        /// How many scenes there are.
+        of: usize,
+        /// Frames the film should have had.
+        expected: u64,
+        /// Frames it actually has.
+        actual: u64,
+    },
     /// Filesystem trouble around a segment, with the path attached.
     Io {
         /// What we were doing.
@@ -165,6 +192,24 @@ impl fmt::Display for MediaError {
                      (D-041). That is why this is checked here."
                 )
             }
+            MediaError::JoinStopped {
+                segment,
+                ordinal,
+                of,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "the film is missing scene {ordinal} of {of} and everything after it: \
+                 FFmpeg joined {actual} frames of {expected} and exited 0 without a \
+                 warning (D-041).\n  \
+                 Scene {ordinal}'s cached segment is damaged — an intact header over a \
+                 picture that stops early, which is what a copy interrupted part way, or a \
+                 write to a network volume that failed to close, leaves behind.\n  \
+                 It has been discarded: {path}\n  \
+                 Render again and that one scene is rebuilt.",
+                path = segment.display(),
+            ),
             MediaError::Io {
                 doing,
                 path,

@@ -7811,3 +7811,212 @@ it* but *could only this step have put it there*.
 
 **`make gates` is 39 of 39**, unchanged in count: gate 7i grew an assertion and
 lost a dependency on its own history.
+
+### D-178 — A short join names the scene, and a failed export leaves nothing invisible · Accepted
+
+**Reported as** *"when I export, the file is hidden in the folder — I have to
+export several times to make it visible."* Two defects, one visible to the
+operator and one underneath it, and the visible one is a **consequence** of the
+invisible one. Both were read out of `runs.csv` rather than reasoned about.
+
+#### What actually happened
+
+Four exports on 2026-09-15, 06:23 to 06:35, of a 50-scene 4K project. Every one
+failed the D-041 film assertion with the same three numbers:
+
+```
+nb_frames:      expected 10522, found 4244
+video duration: expected 350.733333, found 141.465333
+```
+
+**The arithmetic is an address.** Summing the `-frames:v` of all fifty scenes
+out of the same log: scenes 1..=22 total **4243** frames and the film holds
+**4244**. So the film is scenes 1 to 22 and stops. Scene 23's segment,
+`seg-9c1d8ae0f0e62406.mp4`, was rendered at 05:33:51 onto the SMB volume
+`/Volumes/home/…` — the run that also logged `Error closing file: Bad file
+descriptor` and nine `ffprobe … no response after 30s`. The project folder was
+then copied to `~/Downloads`, damaged segment and all.
+
+The reuse check (D-110) reads the container header — profile plus declared
+`nb_frames` — and that file's header is intact. Its picture is not. FFmpeg's
+concat demuxer stopped at it and **exited 0 with no warning**, which is the
+exact behaviour `ffmpeg-findings.md` §5 measured and the entire reason D-041
+makes the assertion ours.
+
+#### Why it could never recover
+
+The assertion caught it, so no wrong film shipped — that half worked. What it
+then reported was the **film**, which is the one file in the run that is not at
+fault, and nothing evicted the bad segment. Every retry reused it and failed
+identically. The operator, reading an error about a file they never made, did
+the only thing available: moved the destination. `ch 4/ch 4.mp4`, then
+`Downloads/ch 4.mp4`, then `Downloads/cha 4.mp4`. Three folders, four failures.
+
+`MediaError::JoinStopped` replaces the `nb_frames` mismatch when the film is
+short: the first segment whose running total passes what was actually written
+is the one the join could not read through. It names the scene, names the file,
+**discards it**, and says that rendering again rebuilds that one scene. The
+eviction is the same judgement `render_one` already makes when a cached segment
+fails its probe — a file that passed the header checks and has no picture is
+not a segment, whatever its name says.
+
+**The one-frame overshoot is why the rule is stated as it is.** The film is
+4244 and the scenes before the break total 4243, so a rule looking for an exact
+boundary finds none. It is the first running total to *pass* the count, not to
+equal it.
+
+#### The hidden file
+
+`atomic::partial_path` writes `.<name>.partial-<pid>-<n>.<ext>` beside the
+destination. The leading dot is right while the run is alive: a half-written
+film is not mistaken for a finished one, not indexed, not picked up by a backup
+mid-write. It is wrong the moment the run is not alive, and **the destination
+of a film is the operator's own folder, not a cache we own** — so four
+invisible part-films accumulated across three folders with nothing in the
+product able to see them again, and nothing in Finder able to show them.
+
+Measured first, because the obvious theory was wrong: a dot-to-visible rename
+sets **no** hidden flag (`ls -lO` shows none, no xattr) and Finder does list the
+renamed file. It is not a flag and not an "execution policy". It is litter.
+What the operator described as *the file is hidden, and exporting again makes
+it visible* is a correct observation with an incorrect cause: a failed export
+leaves an invisible part-film, and a later successful one produces a visible
+`.mp4`.
+
+Two changes, because the leak has two halves:
+
+- **`atomic::Partial`** — an RAII guard. Every failure path in
+  write-beside-then-rename has to remove the temporary, and there is always one
+  more path than the author remembered. The one that shipped was a **failed
+  rename**: `move_into_place(&temporary, dest)?` propagated with `?` and left
+  the file. A guard cannot be skipped by a `?` and runs while a panic unwinds,
+  which is D-123's reasoning applied to the one artifact an operator actually
+  looks for.
+- **`atomic::sweep_partials`** — litter from a run this process never saw: a
+  crash, a force quit, a power cut. Run **before** the join rather than after,
+  so it goes even when this run fails too.
+
+**The sweep's predicate is the whole safety argument**, because it deletes
+inside a folder this program does not own. `is_abandoned_partial`'s rule in
+`film.rs` — starts with a dot, contains `.partial-` — is safe inside
+`.spoonstill/` and is **not** safe in `~/Downloads`, where it would take a
+stranger's `.notes.partial-backup.txt`. `is_partial_of` matches the exact shape
+`partial_path` writes, scoped to one destination filename, with both counters
+required to be digits. Pinned to the writer by
+`what_partial_path_writes_is_what_the_sweep_recognises`, so the two cannot
+drift apart into a sweep that recognises nothing.
+
+#### One hole in the sweep, found by reviewing it rather than by it going wrong
+
+The render lock is per **project** (D-113), and a destination folder is not a
+project. Two projects exporting to one path — which is already last-writer-wins
+and already loses somebody's film — would have had the second run's pre-join
+sweep delete the first run's part-film *mid-write*, turning a silent overwrite
+into a rename failing with an `ENOENT` nobody could explain. Strictly worse than
+what it replaced.
+
+So a partial that has been written to within the last minute is left alone: a
+file something is still writing has just been written to, and a join is a stream
+copy that writes continuously. The guard **delays** collection rather than
+preventing it — litter from a crash thirty seconds ago survives one render and
+goes on the next — which is the right way round, because being wrong in that
+direction costs a render's delay and being wrong in the other deletes a film
+somebody is making.
+
+The clock is a parameter (`sweep_partials_settled_before`), so the rule is
+testable without sleeping for a minute — D-144's shape: the input that decides
+is passed in, not arranged for.
+
+#### Mutations
+
+Five, each caught by exactly one test. Restoring `self.keep = true` on a failed
+rename fails `a_failed_rename_does_not_leave_an_invisible_file_behind`; making
+`sweep_partials` return 0 fails
+`litter_from_a_dead_run_is_swept_and_a_strangers_file_is_not` and nothing else;
+the attribution tests are built from the log's own fifty frame counts, so
+`the_scene_a_short_film_stopped_at_is_named` reproduces 10522/4243/4244 rather
+than agreeing with whatever the new code computes.
+
+#### Not done, deliberately
+
+**The reuse check still reads the header.** Verifying a cached segment's bytes
+means decoding it, and D-096 is explicit that the reuse check must stay as fast
+on six hours as on four seconds — at 500 scenes that costs more than the
+re-encode it would save. The trade is unchanged; what changes is that being
+wrong about it is now self-repairing instead of permanent.
+
+### D-179 — A probe that ran out of time is tried again, because the stall is not the file · Accepted
+
+**Found while reading the same `runs.csv` as D-178**, and it is the reason that
+log had a damaged segment in it at all. Ten `ffprobe` calls ran out of time on
+the SMB volume `/Volumes/home/…`, each one failing the scene it belonged to.
+
+**What they have in common is not size, and that is the whole decision.**
+
+```
+36.7s  decoding  .seg-1dacd883fec0044e.mp4.partial-28740-197.mp4
+31.1s  decoding  .seg-c0f89088c4c2f8d2.mp4.partial-2198-88.mp4
+30.0s  header    12.jpeg
+30.0s  header    tts-c550868aa8c2bc33.wav
+        … ten in total
+```
+
+Three of them are a **1376x768 JPEG and two normalized narrations** — files of a
+few hundred kilobytes. No amount of scaling the ceiling by file size would have
+saved one of them, which is the fix that suggests itself and is wrong.
+
+**Nine of the ten are a read-after-write.** Seven are `.partial-` segments
+probed the instant FFmpeg wrote and closed them, and two are normalized
+narrations the same. Only `12.jpeg` is a plain read of a file that had been
+sitting there. A share that has just taken a write and has not settled is the
+textbook transient stall, and the same volume probed hundreds of other files in
+those runs without trouble.
+
+So the ceiling stays where it is and a probe that hits it is **tried once
+more**. This is D-094's judgement arriving at the other process boundary: a
+failure whose cause is a network is retried, and one whose cause is the media is
+not. An `ffprobe` that ran and reported the file is not media has answered the
+question; asking again gets the same answer more slowly.
+
+**`DEFAULT_PROBE_TIMEOUT`'s own comment claimed the property the log
+disproves** — *"Generous against a slow network volume, short against a hang."*
+It was generous against neither. The comment now says what the evidence says,
+which is D-151's rule about a program's own writing.
+
+**What it costs is stated rather than hidden:** a probe that is genuinely stuck
+takes twice the ceiling to report. That is the trade — one extra wait on a hang,
+against a 500-scene render failing because a share hiccuped once. It costs
+nothing on a working machine, because it is only reached after a probe has
+already run out of time.
+
+**D-096 is untouched.** That decision scaled the *counting* probe by frames and
+was right; four hour-long scenes failing at a flat 30 s is a different fault
+with a different cause. Seven of the ten timeouts here are counting probes that
+had already been given D-096's larger ceiling and stalled anyway, which is what
+says the remaining problem is not arithmetic.
+
+**Tested at both levels, because one of them is D-116's trap.** `with_retries`
+is separate from `probe_inner` so the rule can be driven by a closure that fails
+on demand — a policy tested only through a real `ffprobe` is tested on the one
+input that cannot exhibit the case it is about. The wiring is then proved
+against a **real** `ffprobe` on a FIFO with no writer, which is the one input
+measured to make it block rather than answer: both attempts run out of time and
+the clock has to show two. Asserted as a **lower** bound on elapsed time, the
+safe direction on a shared runner (D-130) — a loaded machine makes it more true,
+never less. Unix only, and said so rather than skipped silently, because there
+is no FIFO to make on Windows.
+
+Two mutations, each caught. `PROBE_RETRIES = 0` — the shipped behaviour — fails
+both tests, the wiring one reporting *"waited 426ms for a ceiling of 400ms"*.
+Retrying `Err(_)` rather than only a timeout fails the policy test alone, on the
+arm that says a verdict about the file is not retried.
+
+**And end to end, twice over.** A segment damaged the way the SMB volume damaged
+one — zeroed through the middle of `mdat`, header untouched — makes the join
+stop and exit 0, is named, is discarded, and leaves the output folder holding
+nothing invisible. Rendering again reuses five of six segments, rebuilds the one,
+and produces a film **byte-identical** to one built from a cache that was never
+damaged. Compared against a control project of the **same folder name**, because
+`project_id` is the basename and it seeds the move (D-035) — the first attempt at
+that comparison used a differently-named folder and reported a difference that
+was correct and meaningless, which is D-146's own trap repeated.

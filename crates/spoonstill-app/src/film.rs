@@ -698,7 +698,10 @@ pub fn render_project(
     });
 
     let paths: Vec<PathBuf> = rendered.iter().map(|s| s.path.clone()).collect();
-    let frames: u64 = rendered.iter().map(|s| u64::from(s.frames)).sum();
+    // Per segment as well as in total: the total says a film is short, and
+    // these say which scene the join stopped at (D-178).
+    let segment_frames: Vec<u64> = rendered.iter().map(|s| u64::from(s.frames)).collect();
+    let frames: u64 = segment_frames.iter().sum();
     // Computed from the asserted frame counts, never measured back off the
     // segments: the film is checked against what the scenes *are*, and a
     // segment that drifted would already have failed its own assertion.
@@ -714,6 +717,7 @@ pub fn render_project(
         &concat::Expectation {
             profile: &profile::SegmentProfile::for_output(output),
             frames,
+            segment_frames: &segment_frames,
             duration: expected_total,
             fps: output.fps(),
         },

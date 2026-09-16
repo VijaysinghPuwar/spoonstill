@@ -274,6 +274,90 @@ be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
 
+### State as of 2026-09-16 — the export was failing, and the evidence was invisible
+
+**D-178 and D-179, both read out of the operator's own `runs.csv` rather than
+reasoned about.** Reported as *"when I export, the file is hidden in the folder
+— I have to export several times to make it visible."* That sentence is a
+correct observation with an incorrect cause, and finding the real one needed the
+log rather than the code.
+
+**The exports were failing.** Four in twelve minutes, all identical: `nb_frames:
+expected 10522, found 4244`. Summing every `-frames:v` in the same log, scenes
+1..=22 total **4243** and the film holds **4244** — so the film is scenes 1 to 22
+and stops. Scene 23's segment was written onto the SMB volume in the run that
+also logged `Error closing file: Bad file descriptor`, and the folder was then
+copied to `~/Downloads` with it. **Its header is intact and its picture is not**,
+so the reuse check (D-110, header-only by D-096's design) accepted it and
+FFmpeg's concat demuxer stopped at it and exited 0. D-041 exactly.
+
+**The assertion caught it and then named the film** — the one file in the run
+that is not at fault — and evicted nothing, so every retry failed the same way
+forever. `MediaError::JoinStopped` names the scene, names the file, discards it,
+and says that rendering again rebuilds it. The **one-frame overshoot is why the
+rule is "the first running total to *pass* the count"**, not to equal it.
+
+**The hidden file is the consequence, not a flag.** Measured before theorising:
+a dot-to-visible rename sets no hidden flag and Finder does list the renamed
+file. What accumulated was `.ch 4.mp4.partial-<pid>-<n>.mp4` — `partial_path`'s
+own scaffolding, which is right while a run is alive and litter the moment it is
+not, and **the film's destination is the operator's folder, not `.spoonstill/`,
+so D-109's sweep never looked there**. A failed export left an invisible
+part-film; a later successful one produced a visible `.mp4`. Hence "several
+exports made it visible".
+
+`atomic::Partial` is an RAII guard — the path that shipped was a **failed
+rename** propagating with `?` — and `atomic::sweep_partials` collects litter
+from runs this process never saw.
+
+**Three traps in this work worth carrying forward, because two of them were
+mine.**
+
+- **The sweep's predicate is the whole safety argument.** `film.rs`'s
+  `is_abandoned_partial` — starts with a dot, contains `.partial-` — is safe in
+  `.spoonstill/` and **not** safe in `~/Downloads`, where it takes a stranger's
+  `.notes.partial-backup.txt`. `is_partial_of` is scoped to one destination
+  filename and pinned to what `partial_path` writes, so the two cannot drift
+  into a sweep that recognises nothing.
+- **The render lock is per project; a destination folder is not a project.**
+  The first sweep would have deleted a *concurrent* run's in-flight film,
+  turning a last-writer-wins overwrite into an unexplainable `ENOENT`. A
+  partial written to within the last minute is now left alone — it delays
+  collection rather than preventing it, which is the right way round.
+- **A `#[cfg(unix)]` test file with its imports at the top fails Windows CI.**
+  `RUSTFLAGS: -D warnings` turns six unused imports into six errors. Caught by
+  D-132's cross-check, which is the reason that cross-check exists — run it
+  before calling a session finished, not only before a tag.
+
+**D-179: a probe that ran out of time is tried again.** Ten `ffprobe` timeouts
+in the same log, and **nine are a read-after-write on the network volume** —
+seven `.partial-` segments probed the instant FFmpeg closed them, two normalized
+narrations. Three of the ten are files of a few hundred kilobytes, so **scaling
+the ceiling by size, which is the fix that suggests itself, would have saved
+none of them**. The ceiling stays and the probe is retried once: D-094's
+judgement at the other process boundary. `DEFAULT_PROBE_TIMEOUT`'s own comment
+claimed to be *"generous against a slow network volume"* and the log disproved
+it; it says what the evidence says now.
+
+**Verified end to end, and the repair is byte-exact.** A segment damaged the way
+the volume damaged one — zeroed through `mdat`, header untouched — makes the
+join stop, is named, is discarded, and leaves the output folder holding nothing
+invisible; the next render rebuilds that one scene and produces a film
+**byte-identical to one built from a cache that was never damaged**. Compared
+against a control project of the **same folder name**, because `project_id` is
+the basename and seeds the move (D-035) — the first comparison used a different
+name and reported a difference that was correct and meaningless, which is
+D-146's trap repeated.
+
+**And the README's `47 unit-test modules, 15 integration suites` was counted by
+nothing** — D-175 derived the two numbers either side of it and left that half
+alone, so it went stale on the first commit that added a suite. Derived now, and
+it caught itself on the commit that added it.
+
+**`make gates` 39/39, `make lint` green, `cargo test --workspace` 642 passed /
+10 ignored, `cargo audit --deny warnings` clean, and the D-132 Windows
+cross-check clean.**
+
 ### State as of 2026-09-12 — a gate was green because another gate had been there first
 
 **D-177 — a gate greps a log it filled, not one another gate filled.** D-176's
@@ -2064,7 +2148,7 @@ exact thing the top of this file warns about.
 
 Run `make gates` first: **M0 8/8, M1 8/8, M2 23/23**, plus `cargo fmt --check`,
 `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test
---workspace` (630 tests, 10 ignored — `make lint` also runs `shellcheck`
+--workspace` (642 tests, 10 ignored — `make lint` also runs `shellcheck`
 since D-175). Then `cargo audit --deny warnings` (D-129), which is
 new and is the one check that can fail without the code changing.
 
@@ -3020,7 +3104,11 @@ before touching `MotionSeed`, `MotionSpec::seeded`, the segment filename,
 `occurrences_of`, or what `create_project` writes**, and **D-154 before starting
 M3, writing `state.db`, or assuming resume needs one**, **D-162 before touching
 `VideoEncoder`, `quality_args`, `resolve_encoder`, the `-c:v` arguments in
-`scene.rs`, or the software arm of `segment_key`**, **D-155 before writing
+`scene.rs`, or the software arm of `segment_key`**, **D-178 before touching
+`atomic::Partial`, `sweep_partials`, `is_partial_of`, `concat::stopped_at`,
+`MediaError::JoinStopped`, or anything that writes beside a destination and
+renames**, **D-179 before giving a probe a constant timeout or removing the
+retry in `probe_inner`**, **D-155 before writing
 a test that spawns a program, or naming a binary a `/bin/` path**, **D-156
 before touching `create_project`, `newProject`, `Session`'s root, or anything
 that decides which project the window has open**, **D-157 before touching

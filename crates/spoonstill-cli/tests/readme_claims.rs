@@ -123,6 +123,57 @@ fn test_functions() -> usize {
     found
 }
 
+/// How many integration suites there are: `.rs` files directly under a crate's
+/// `tests/` directory, less the shared helper module.
+fn integration_suites() -> usize {
+    let mut found = 0;
+    for crate_dir in ["crates", "apps"] {
+        let Ok(crates) = std::fs::read_dir(root().join(crate_dir)) else {
+            continue;
+        };
+        for entry in crates.flatten() {
+            let Ok(files) = std::fs::read_dir(entry.path().join("tests")) else {
+                continue;
+            };
+            found += files
+                .flatten()
+                .filter(|f| {
+                    let path = f.path();
+                    // `mod.rs` is a helper shared by the suites beside it, not
+                    // a suite — it declares no `#[test]` of its own and cargo
+                    // builds no binary for it.
+                    path.extension().is_some_and(|e| e == "rs")
+                        && path.file_name().is_some_and(|n| n != "mod.rs")
+                })
+                .count();
+        }
+    }
+    found
+}
+
+/// D-178. The same defect D-175 found, in the half of that sentence it left
+/// alone.
+///
+/// D-175 derived the `#[test]` count and the decision count and stopped there,
+/// so *"47 unit-test modules, 15 integration suites"* on the same line stayed
+/// uncounted — and went stale on the next commit that added a suite, which is
+/// how this was noticed. A number nothing counts is a number that is wrong
+/// eventually; there is no version of that sentence worth keeping by hand.
+#[test]
+fn the_readme_counts_the_integration_suites_that_exist() {
+    let counted = integration_suites();
+    let readme = read("README.md");
+    let phrase = format!("{counted} integration suites");
+    assert!(
+        readme.contains(&phrase),
+        "README.md should say {phrase:?}; it says: {:?}",
+        readme
+            .lines()
+            .find(|l| l.contains("integration suites"))
+            .unwrap_or("(no such line)"),
+    );
+}
+
 /// D-175. Two more numbers this README states and nothing counted.
 ///
 /// Measured at the time of writing: **601 claimed against 626 real**, and 131

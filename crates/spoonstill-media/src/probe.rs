@@ -26,9 +26,15 @@ use crate::tools::Tools;
 
 /// Default ceiling for a single probe.
 ///
-/// Generous against a slow network volume, short against a hang. A probe that
-/// takes longer than this on a still or a narration clip is not slow, it is
-/// stuck.
+/// Short against a hang. It used to claim to be "generous against a slow
+/// network volume" as well, and the operator's own log disproved that: ten
+/// probes ran out of time on an SMB share, three of them on a 1376x768 JPEG
+/// and two normalized narrations — files of a few hundred kilobytes, where no
+/// amount of scaling by size would have helped (D-179).
+///
+/// Raising it was the wrong answer for the same reason. What those failures
+/// have in common is not size, it is a **stall**, so the ceiling stays where
+/// it is and a probe that hits it is tried again ([`PROBE_RETRIES`]).
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What counting the frames of one segment adds to that, per frame (D-096).
@@ -247,7 +253,57 @@ pub fn probe_counting_frames(
     probe_inner(tools, path, timeout, true)
 }
 
+/// How many times a probe that ran out of time is tried again (D-179).
+///
+/// **One.** The evidence is nine of ten timeouts in the reporting operator's
+/// `runs.csv` being a **read-after-write on a network volume**: seven
+/// `.partial-` segments probed immediately after FFmpeg wrote and closed them,
+/// and two normalized narrations the same. Only one was a plain read of a file
+/// that had been sitting there. A share that has just taken a write and has
+/// not settled is the textbook transient stall, and the same volume probed
+/// hundreds of other files in those runs successfully.
+///
+/// So this is D-094's judgement applied to the other process boundary: a
+/// failure whose cause is a network is retried, and one whose cause is the
+/// media is not. It costs nothing on a working machine, because it is only
+/// reached after a probe has already run out of time.
+///
+/// **What it costs when the probe is genuinely stuck** is stated rather than
+/// hidden: reporting takes twice the ceiling. That is the trade — one extra
+/// wait on a hang, against a render of 500 scenes failing because a share
+/// hiccuped once.
+const PROBE_RETRIES: u32 = 1;
+
 fn probe_inner(
+    tools: &Tools,
+    path: &Path,
+    timeout: Duration,
+    count_frames: bool,
+) -> Result<ProbeResult, MediaError> {
+    with_retries(|| probe_once(tools, path, timeout, count_frames))
+}
+
+/// Run `attempt` again if — and only if — it ran out of time.
+///
+/// Separate from [`probe_inner`] so the rule can be stated against a closure
+/// that fails on demand: a policy tested only through a real `ffprobe` is a
+/// policy tested on the one input that cannot exhibit the case it is about.
+///
+/// **Only a timeout is retried.** An `ffprobe` that ran and reported the file
+/// is not media has answered the question, and asking it again gets the same
+/// answer more slowly — which is D-094's distinction between a failure caused
+/// by a network and one caused by the content.
+fn with_retries<T>(mut attempt: impl FnMut() -> Result<T, MediaError>) -> Result<T, MediaError> {
+    let mut tries = 0;
+    loop {
+        match attempt() {
+            Err(MediaError::Timeout { .. }) if tries < PROBE_RETRIES => tries += 1,
+            outcome => return outcome,
+        }
+    }
+}
+
+fn probe_once(
     tools: &Tools,
     path: &Path,
     timeout: Duration,
@@ -401,6 +457,68 @@ struct RawStream {
 
 #[cfg(test)]
 mod tests {
+    /// D-179. The rule, stated against a closure so every case is reachable.
+    ///
+    /// A probe that ran out of time is tried once more; anything else is
+    /// reported as it stands. Driving this through a real `ffprobe` could only
+    /// ever exercise the path that does *not* time out, which is D-116's trap.
+    #[test]
+    fn only_a_timeout_is_retried_and_only_once() {
+        use std::cell::Cell;
+
+        let timeout = || MediaError::Timeout {
+            command: "ffprobe -i x".to_owned(),
+            waited: Duration::from_secs(30),
+        };
+
+        // A stall that clears: one timeout, then an answer.
+        let calls = Cell::new(0);
+        let outcome = with_retries(|| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                Err(timeout())
+            } else {
+                Ok("probed")
+            }
+        });
+        assert_eq!(outcome.expect("the retry answers"), "probed");
+        assert_eq!(calls.get(), 2, "the stall must be tried again exactly once");
+
+        // A stall that does not clear: reported, not retried forever.
+        let calls = Cell::new(0);
+        let outcome: Result<&str, _> = with_retries(|| {
+            calls.set(calls.get() + 1);
+            Err(timeout())
+        });
+        assert!(matches!(outcome, Err(MediaError::Timeout { .. })));
+        assert_eq!(
+            calls.get(),
+            1 + PROBE_RETRIES as i32,
+            "a stuck probe must still be reported, not retried endlessly"
+        );
+
+        // A file that is not media: answered once. Retrying this only makes an
+        // operator wait twice as long for the same sentence.
+        let calls = Cell::new(0);
+        let outcome: Result<&str, _> = with_retries(|| {
+            calls.set(calls.get() + 1);
+            Err(MediaError::UnusableInput {
+                path: PathBuf::from("/p/notes.txt"),
+                detail: "not media".into(),
+            })
+        });
+        assert!(matches!(outcome, Err(MediaError::UnusableInput { .. })));
+        assert_eq!(calls.get(), 1, "a verdict about the file is not retried");
+
+        // And the ordinary case costs nothing.
+        let calls = Cell::new(0);
+        let outcome = with_retries(|| {
+            calls.set(calls.get() + 1);
+            Ok("probed")
+        });
+        assert_eq!(outcome.expect("fine"), "probed");
+        assert_eq!(calls.get(), 1);
+    }
 
     /// The bug this exists for (D-096): a fixed 30 s allowed about 35 000
     /// frames, so every hour-long scene of a six-hour film failed its own
