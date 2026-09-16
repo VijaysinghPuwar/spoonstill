@@ -151,6 +151,89 @@ fn integration_suites() -> usize {
     found
 }
 
+/// Lines of a kind of source, under `crates/` and `apps/`.
+fn lines_of(extensions: &[&str]) -> usize {
+    fn walk(dir: &Path, extensions: &[&str], found: &mut usize) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|n| n == "target") {
+                    continue;
+                }
+                walk(&path, extensions, found);
+            } else if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| extensions.contains(&e))
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                *found += text.lines().count();
+            }
+        }
+    }
+    let mut found = 0;
+    walk(&root().join("crates"), extensions, &mut found);
+    walk(&root().join("apps"), extensions, &mut found);
+    found
+}
+
+/// The size claims, **within 3%** rather than exactly.
+///
+/// D-175's other counters are exact because they move rarely and a drift of one
+/// is a real fact about the tree. A line count moves on every commit, and a
+/// test that fails on every commit is a test people route around — which is the
+/// same trap as a flaky one (D-121). So these are stated rounded and checked
+/// loosely: close enough to be true, loose enough that only real drift fails.
+///
+/// It was drift that put them here. The README claimed 37,715 Rust lines
+/// against 41,754 real and 3,636 UI lines against 3,788, neither caused by the
+/// commit that noticed.
+///
+/// **The tolerance is 3% because the first attempt was 10% and caught neither
+/// of them** — the Rust claim was 9.67% out and the UI claim 4.0%, both inside
+/// a tenth. A test written for a drift it then lets through is the trap D-116
+/// names, and it passed on its first run looking correct. Both historical
+/// numbers fail at 3%, which is what says the bound means something; at ~1,250
+/// lines of Rust it is several sessions' work away, not every commit.
+#[test]
+fn the_readme_size_claims_are_close_to_the_tree() {
+    let readme = read("README.md");
+    for (label, counted, marker) in [
+        ("Rust", lines_of(&["rs"]), "lines** across 6 crates"),
+        (
+            "UI",
+            lines_of(&["html", "css", "js"]),
+            "lines of hand-written",
+        ),
+    ] {
+        let line = readme
+            .lines()
+            .find(|l| l.contains(marker))
+            .unwrap_or_else(|| panic!("README.md no longer states a {label} size"));
+        let claimed: usize = line
+            .split('~')
+            .nth(1)
+            .and_then(|rest| {
+                rest.split_whitespace()
+                    .next()
+                    .map(|n| n.replace([',', '*'], ""))
+            })
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("could not read a number out of: {line}"));
+
+        let drift = claimed.abs_diff(counted) as f64 / counted as f64;
+        assert!(
+            drift <= 0.03,
+            "README.md claims ~{claimed} {label} lines; there are {counted} \
+             ({:.0}% out). Round the claim to the nearest hundred.",
+            drift * 100.0,
+        );
+    }
+}
+
 /// D-178. The same defect D-175 found, in the half of that sentence it left
 /// alone.
 ///

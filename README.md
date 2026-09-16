@@ -495,6 +495,10 @@ into it**. So:
   Measured at 500 scenes — killed at 60 s with 167 done, the resume reused
   exactly 167 and produced a film identical to a clean run.
 - Change one narration in a 500-scene project and **499 segments are reused**.
+- A cached segment that turns out to be **damaged** — copied in half-finished,
+  or written to a network volume whose close failed — is caught when the film
+  is joined, named by scene, and thrown away. Render again and that one scene
+  is rebuilt. It cannot leave a project permanently unrenderable.
 - Change the subtitle theme, or the voice, or the resolution — and change it
   back — and both answers are still there. The cache keeps the live set plus
   **two spare generations**, so flipping between two looks is free while the
@@ -534,6 +538,34 @@ bad row. It names the file, the scene and what to do:
 | *…characters no bundled font can draw…* | The caption would render as empty boxes. Bengali, Tamil, Arabic, Chinese and emoji are not drawn yet. |
 | *`edge-tts` is not on this machine…* | `still doctor --install`, or press **Install it for me** in the window. |
 | *2 of 3 stills are smaller than the 1920x1080 frame…* | A **warning**, not an error — the film renders. It names a `--short-edge` that shows every scene at its own detail. |
+
+**If a render fails, nothing is left behind and nothing is hidden.** The film
+is written to a temporary beside its destination and moved into place only once
+it has been checked, so a failed or killed render leaves the folder as it found
+it. It used to leave that temporary — dot-prefixed, so invisible in Finder —
+which read as *"the export is hidden and I have to do it again to see it"*. It
+was not hidden; the export had failed and a later one succeeded. Litter from an
+older build is swept the next time you render to that folder.
+
+**If a render says the film is missing a scene**, it names which one:
+
+```
+still: the film is missing scene 23 of 50 and everything after it: FFmpeg
+       joined 4244 frames of 10522 and exited 0 without a warning (D-041).
+  Scene 23's cached segment is damaged — an intact header over a picture that
+  stops early, which is what a copy interrupted part way, or a write to a
+  network volume that failed to close, leaves behind.
+  It has been discarded: …/.spoonstill/segments/seg-9c1d8ae0f0e62406.mp4
+  Render again and that one scene is rebuilt.
+```
+
+**Render to a local disk.** Rendering onto a network share — SMB, a NAS, a
+mounted volume — is the one setup known to produce that damaged segment, and it
+is also where every `ffprobe` timeout in the author's own logs came from: nine
+of ten were spoonstill reading a file back immediately after writing it to the
+share. Those are retried now, and a damaged segment repairs itself, but the
+share is still the slowest and least reliable place to put `.spoonstill/`.
+Render locally and copy the finished film across.
 
 **Every command writes down what it did.** There are two logs: the project's own
 JSON Lines under `.spoonstill/`, and one machine-wide `runs.csv` covering every
@@ -808,9 +840,9 @@ before it is called a test**.
 
 | | |
 |---|---|
-| Rust | **37,715 lines** across 6 crates + a Tauri app · edition 2024, pinned to 1.94 |
-| UI | 3,636 lines of hand-written HTML/CSS/JS — no framework, no build step |
-| Tests | **659 `#[test]` functions** — 47 unit-test modules, 16 integration suites |
+| Rust | **~41,800 lines** across 6 crates + a Tauri app · edition 2024, pinned to 1.94 |
+| UI | ~3,800 lines of hand-written HTML/CSS/JS — no framework, no build step |
+| Tests | **660 `#[test]` functions** — 47 unit-test modules, 16 integration suites |
 | Exit gates | **39** shell gates that render real media and assert real properties |
 | Decisions | **146 numbered decisions** in `decisions.md`, each Accepted / Open / Superseded |
 | Direct dependencies | **12 third-party crates** at runtime (plus one build-time, one dev-only) — and `spoonstill-core` has **none** |
@@ -831,6 +863,7 @@ measured here. A sample of what is in it, and what each number changed:
 | What does a worker cost? | 768 MB at 1080p, **2630 MB at 4K** | A 4K render on 8 GB drops to two workers instead of freezing the machine. |
 | Does concat validate anything? | **No.** A mismatched segment joins with exit 0 | We assert the full segment profile ourselves, per field. |
 | Is a 4K caption cheap to draw? | It was **604 ms** per cue — cost grew with the *fourth* power of resolution | Rewrote dilate as a sliding-window max and blur with a running sum: **62 ms**, byte-identical output. |
+| Why do probes time out on a NAS? | **9 of 10** were a read-after-write on the share, and 3 were files of a few hundred KB | Scaling the ceiling by size fixes none of them; the probe is retried once instead. |
 | Does polling cost anything? | A flat 20 ms poll made `still validate` on 200 scenes take 11.82 s | Proportional backoff plus concurrent probes: **1.31 s — 9× faster**. |
 
 ### Tests that guard the rules
@@ -895,6 +928,19 @@ obvious fix was wrong, and the test that fails without it.
   still draws Hindi wrong laid out one character at a time. Fixed with a real
   shaper, while proving three Latin captions render **byte-identically** before
   and after. *(D-157)*
+- **The export that was "hidden in the folder".** It was not hidden and it was
+  not an export: four renders in twelve minutes had all failed, each leaving an
+  invisible `.partial-` file, and a later successful one produced the visible
+  `.mp4` — which read as the export finally revealing itself. Underneath was a
+  segment written to a network share with an **intact header over an incomplete
+  picture**: FFmpeg's concat demuxer stopped at it and exited 0, and the
+  assertion that caught it named the *film*, the one file in the run that was
+  not at fault. The frame counts say where it stopped. *(D-178)*
+- **A probe timeout that scaling by file size would not have fixed.** Ten
+  `ffprobe` calls ran out of time on one volume; three were files of a few
+  hundred kilobytes, and nine of the ten were a read-after-write on a share.
+  The obvious fix — a bigger, size-proportional ceiling — addresses none of
+  them. *(D-179)*
 - **A test that passed by finding nothing to check.** More than one, in fact —
   a resume gate that ran with a warm cache and killed a process that had already
   exited; a gate that reported PASS while running no command at all for three
