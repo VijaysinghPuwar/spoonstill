@@ -274,6 +274,82 @@ be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
 
+### State as of 2026-09-20 — the Windows session's work, checked on the Mac before it was believed
+
+**D-188 and D-189 are a Windows session's own findings, and they hold here.**
+No macOS behaviour changed: `make gates` **39/39**, `make lint` green
+(clippy, fmt, `actionlint`, `shellcheck`), `cargo audit --deny warnings`
+clean, CI green on `66c6d6b`, and `cargo test --workspace` **686 passed / 11
+ignored** against that session's 680 on Windows — the six are the unix-only
+tests, which is D-179's rule reading correctly from the other side.
+
+**The claim worth testing was that nothing moves on disk**, because
+`AUDIO_CACHE_DIR` went from the string `"cache/audio"` to `["cache",
+"audio"]` and a cache that moved would re-speak and re-encode every project
+on this machine. It does not move: on macOS both spellings build the same
+`PathBuf`. Proven rather than reasoned — two projects whose caches were
+written by the **previous** binary re-rendered under the new one and reused
+**100 of 100** and **22 of 22** narrations and segments, both films
+**byte-identical** to the ones taken before the pull.
+
+**"Did it cost the Mac anything" needs numbers, and the gates are pass/fail**,
+so a before was taken on `cdcfbd5` while that session was still running. Two
+benchmarks: a synthetic 100-scene project with every still and narration
+deliberately **distinct** (so nothing collapses through D-108's single-flight
+or D-173's memo and quietly measures less work), and a copy of the operator's
+own folder — 22 scenes, every still 1376x768, subtitles burned in, several
+photographs repeated.
+
+| | before | after |
+|---|---|---|
+| synthetic cold render | 20.63 / 19.54 / 18.83 s | 18.40 / 19.38 / 19.08 s |
+| synthetic warm render | 2.305 / 2.314 / 2.158 s | 2.072 / 2.099 / 2.085 s |
+| real cold render | 32.83 / 31.81 / 33.35 s | 33.35 / 32.43 / 31.75 s |
+| real warm render | 0.791 / 0.785 / 0.779 s | 0.792 / 0.799 / 0.810 s |
+| real peak RSS | 3061 MB | 3057 MB |
+
+Every sample falls inside the other set's spread, and the two movements over
+2% point in **opposite** directions — which is noise, not a change, and is
+what the diff predicts: a constant's type, an error enum on the ingest
+*failure* path, and a format string. **The synthetic peak RSS moved 1550 ->
+1333 MB and that number is not believed**: `ps` sampled every 150 ms across a
+19 s render with four workers starting and stopping can miss a peak. The real
+project's, where scenes are long and the peak is broad, is flat.
+
+**Two traps avoided rather than discovered, both already written down here.**
+The benchmark folder's basename is fixed, because `project_id` is the
+basename and it seeds the move (D-035) — D-146 and D-178 each compared two
+folders with different names once. And the real project's speech cache is
+warmed once and then only `.spoonstill/segments` is cleared, so the measured
+run makes no network call: the live voice service cannot be benchmarked
+(D-146 measured 22.4/25.1/38.1 against 15.5/24.3/68.2, one of them a D-094
+retry), and the harness **asserts the audio cache still exists** before it
+starts rather than reporting whatever it gets.
+
+**One thing is open and is the reason to read this paragraph.** One full-suite
+run reported **685 passed / 1 failed** twenty minutes after `make gates` had
+passed the same suite on the same tree. 685 + 1 = 686, so a test did fail.
+**Its name is not known** — that run was piped through an `awk` summary and
+the detail was discarded, which is the mistake to not repeat. It did not
+recur in **ten** further full-suite runs, nor in **sixteen** targeted runs
+of the two suites that assert a wall clock (`edge_retry`'s
+`waited < 2s` and `segment_integrity`'s `recv_timeout`) driven under eight
+CPU hogs. It is **not attributable to D-188/D-189**: the diff touches neither
+file nor anything either test exercises, and both predate it. By D-121's
+standard one failure in twelve runs is a test people learn to re-run, so the
+first move if it returns is to **capture the name**, not to theorise about it
+— run `cargo test --workspace` with the output kept, not summarised.
+
+**And D-189's deliberate gap is closed from the side that could close it.**
+That session scoped `.gitattributes` to `*.sh` and said why: `make` is not
+installed on the Windows machine, so a Makefile line would have been added on
+the strength of *"it is probably better there"*. `Makefile text eol=lf` is
+there now, checked on the machine that has `make` — the blob is 110 LF lines
+and 0 CRLF, `git status` is clean after adding it, nothing else renormalises,
+and `make gates` still runs 39 of 39. Still not claimed: that `make` works on
+Windows.
+
+
 ### State as of 2026-09-20 — the mac's work, executed on Windows, and two things the log had been saying all along
 
 **This session ran on Windows 11** (Ryzen 7 7700X 8C/16T, RTX 3060, 15.2 GB).
@@ -516,7 +592,8 @@ making one on the strength of *"it is probably better there"* is the thing
 this file warns against. It is two lines whenever somebody is at a Windows
 machine to look at it.
 
-**`make gates` 39/39, `cargo test --workspace` 682 passed / 11 ignored,
+**`make gates` 39/39, `cargo test --workspace` 682 passed / 11 ignored
+(686 as of 2026-09-20, after D-188's tests),
 `make lint` green, `cargo audit --deny warnings` clean, and the D-132 Windows
 cross-check clean** — run after every one of the eight steps, not only at the
 end. `make lint` earned its keep at step 5 by catching a `type_complexity`

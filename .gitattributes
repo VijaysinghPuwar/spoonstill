@@ -17,3 +17,22 @@
 # (`git show HEAD:scripts/m2-gates.sh` is 1651 LF and 0 CRLF), and `eol=lf`
 # only says "check it out the way it is stored".
 *.sh text eol=lf
+
+# The Makefile is LF on every checkout too, for the same reason and with the
+# same evidence (D-189).
+#
+# D-189 took the scripts and deliberately left this one, because `make` is not
+# installed on the Windows machine and the hazard could not be tested there.
+# The hazard is not hypothetical: every recipe line is handed to a shell, so a
+# trailing `\r` becomes part of the last token exactly as it does in a `.sh` —
+# and `make lint`, which is where D-175's shellcheck run lives, is itself a
+# recipe.
+#
+# No-op where the file is already LF, which is checkable rather than hoped
+# for: `git show HEAD:Makefile` is 110 LF lines and 0 CRLF, and `eol=lf` only
+# says "check it out the way it is stored". `git status` is clean after adding
+# this line on macOS, and `make gates` still runs.
+#
+# NOT claimed: that `make` now works on Windows. Nothing here has run it there
+# — this removes one known reason it would not, and that is all.
+Makefile text eol=lf

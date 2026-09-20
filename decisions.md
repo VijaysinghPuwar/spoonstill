@@ -8917,3 +8917,26 @@ on the strength of "it is probably better there" is the thing this project
 keeps writing down as the mistake. `* text=auto` was not taken for the same
 reason: it renormalises every file in the tree, including fixtures, and the
 measurement only covers shell scripts.
+
+**Taken on the Mac the same day, for the half that could be checked there.**
+`Makefile text eol=lf` is in `.gitattributes` now. The reasoning above is
+right about what that session could prove and the gap it leaves is one this
+machine can close from the other side: `git show HEAD:Makefile` is **110 LF
+lines and 0 CRLF**, so the attribute only says "check it out the way it is
+stored", and on macOS the whole change is inspected rather than assumed —
+`git status` is clean after adding the line, no other file renormalises, and
+`make gates` still runs 39 of 39.
+
+The hazard is the one the paragraph above names and is worth stating once
+more, because it is circular: every recipe line is handed to a shell, so a
+trailing `` becomes part of the last token exactly as it does in a `.sh` —
+and `make lint`, which is where D-175's `shellcheck` run lives, **is itself a
+recipe**. A CRLF Makefile is a broken linter reporting on scripts it has
+already been told to check with a broken shell.
+
+**Still not claimed: that `make` works on Windows.** Nothing has run it
+there, and this removes one known reason it would not — that is the whole of
+it. `* text=auto` remains untaken for the reason above, unchanged: the
+measurement covers shell scripts and a Makefile, and renormalising the
+fixtures is exactly the kind of change this project does not make on a
+guess.
