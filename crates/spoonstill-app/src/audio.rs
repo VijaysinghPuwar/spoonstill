@@ -60,8 +60,25 @@ use spoonstill_media::scene::Cancel;
 use spoonstill_media::{MediaError, Tools};
 use spoonstill_tts::TtsError;
 
-/// Where normalized audio lives, under [`STATE_DIR`].
-pub const AUDIO_CACHE_DIR: &str = "cache/audio";
+/// Where normalized audio lives, under [`STATE_DIR`], one path component per
+/// entry (D-188).
+///
+/// **Two components rather than the string `"cache/audio"`**, because
+/// `Path::join` takes a separator inside its argument verbatim: on Windows
+/// that produced `…\.spoonstill\cache/audio\tts-….wav` in every place this
+/// program writes a path down — `runs.csv`, the project's own JSON Lines, the
+/// diagnostics bundle a stranger reads, and the `scene resolved` line an
+/// operator is sent to look at. Counted in this machine's real log: of
+/// 25 479 rows, **15 572 carry `cache/audio` and 92 carry `cache\audio`** —
+/// two spellings of one directory in one file, so a search for either misses
+/// the other.
+///
+/// **The directory on disk does not move**, which is the whole reason this is
+/// safe to change: Win32 accepts either separator, so both spellings name
+/// `.spoonstill\cache\audio` and no cached narration is orphaned. Only what is
+/// printed changes — which is exactly the second half of D-142's complaint,
+/// one constant along.
+pub const AUDIO_CACHE_DIR: [&str; 2] = ["cache", "audio"];
 
 /// How much provider padding a spoken scene keeps, and the fact that a
 /// supplied recording keeps all of its own.
@@ -221,7 +238,9 @@ impl AudioCache {
     #[must_use]
     pub fn in_project(root: &Path) -> Self {
         AudioCache {
-            directory: root.join(STATE_DIR).join(AUDIO_CACHE_DIR),
+            directory: AUDIO_CACHE_DIR
+                .iter()
+                .fold(root.join(STATE_DIR), |path, part| path.join(part)),
             measured: Arc::default(),
         }
     }
@@ -907,6 +926,57 @@ mod tests {
             cache
                 .path_for("file", 0x1234_5678_9abc_def0)
                 .ends_with("file-123456789abcdef0.wav")
+        );
+    }
+
+    /// D-188. The cache path is spelled the way the platform spells a path.
+    ///
+    /// Three assertions, and they do not all bite on the same machine, which
+    /// is worth stating rather than leaving for the next reader to work out
+    /// (D-179's rule):
+    ///
+    /// - the **constant** may not carry a separator of its own. This is the
+    ///   one that fails everywhere, and it is the one that stops the defect
+    ///   coming back as `["cache/audio"]`.
+    /// - the **components** are the four they should be. Vacuous on unix,
+    ///   where `/` already is the separator and `join("cache/audio")` splits
+    ///   into the same two components.
+    /// - the **printed** form carries no separator but this platform's. This
+    ///   is the assertion that actually failed: on Windows the old spelling
+    ///   displayed as `…\.spoonstill\cache/audio`, and that string is what
+    ///   went into `runs.csv`, the project log and the diagnostics bundle.
+    ///   Trivially true on unix.
+    ///
+    /// What is **not** asserted, because it is not true: that anything moved.
+    /// Win32 accepts either separator, so both spellings open the same
+    /// directory and every narration already cached is still found.
+    #[test]
+    fn the_audio_cache_path_is_spelled_the_way_this_platform_spells_one() {
+        assert!(
+            AUDIO_CACHE_DIR
+                .iter()
+                .all(|part| !part.contains('/') && !part.contains('\\')),
+            "a path component may not carry a separator: {AUDIO_CACHE_DIR:?}"
+        );
+
+        let cache = AudioCache::in_project(Path::new("root"));
+        let parts: Vec<String> = cache
+            .directory()
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(parts, vec!["root", STATE_DIR, "cache", "audio"]);
+
+        let shown = cache.directory().display().to_string();
+        let foreign = if std::path::MAIN_SEPARATOR == '/' {
+            '\\'
+        } else {
+            '/'
+        };
+        assert!(
+            !shown.contains(foreign),
+            "the cache path prints as {shown:?}, which mixes separators — that \
+             string is what reaches runs.csv and the diagnostics bundle"
         );
     }
 

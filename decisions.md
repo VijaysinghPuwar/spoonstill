@@ -8759,3 +8759,161 @@ first attempt at this reported no change and read as a clean refutation.
 run after rebuilding it. Five runs each says 0.06 → 0.01. A benchmark whose
 first sample is the first execution of a freshly linked binary is measuring
 the loader.
+
+### D-188 — A path is spelled once, and a copy says which step refused it · Accepted
+
+**Both found by reading this machine's own `runs.csv` rather than the code,
+and both are Windows-only in their effect.** Neither changes a frame of any
+film.
+
+#### A path component may not carry a separator
+
+`AUDIO_CACHE_DIR` was the string `"cache/audio"`, joined as one component.
+`Path::join` takes a separator inside its argument verbatim, so on Windows
+every audio artifact this program wrote down read
+
+```
+C:\Users\…\.spoonstill\cache/audio\tts-ba5c505aeeb3fda0.wav
+```
+
+**Counted, not estimated:** of 25 479 rows of this operator's activity log,
+**15 572 carry `cache/audio` and 92 carry `cache\audio`** — two spellings of
+one directory in one file, which means a `grep` for either one misses the
+other. Those rows are `runs.csv`, the project's own JSON Lines, the
+diagnostics bundle a stranger is sent (D-016), and the `scene resolved` line
+an operator is pointed at when a render fails.
+
+**Nothing moves on disk and no cache is invalidated**, which is the whole
+reason this is a safe change: Win32 accepts either separator, both spellings
+open `.spoonstill\cache\audio`, and the cache key has never contained the
+directory — it is `{kind}-{key:016x}` and nothing more. Verified by
+re-rendering a 300-scene project after the change and reusing **300 of 300**
+narrations and **300 of 300** segments, byte-identical.
+
+This is the second half of D-142's complaint one constant along: *"every path
+spoonstill prints wears the prefix too."* It is `["cache", "audio"]` now, so
+the defect cannot come back as a string, and a test refuses a separator inside
+any component.
+
+**The test does not bite everywhere and says so** (D-179's rule). The
+constant check fails on every platform; the component check is vacuous on
+unix, where `/` already is the separator; and the printed-form check — the one
+that actually failed — is trivially true on unix. Stating that is the
+difference between a test and a test people trust.
+
+#### A failed copy names the step, not just the two files
+
+`copy_in` does **three** things — read the source and write a temporary beside
+the destination, claim the destination name, rename the temporary onto it —
+and reported all three as
+
+```
+could not copy <source> to <destination>: <the operating system's words>
+```
+
+So the message named two files and neither need be the one that was refused.
+
+**This is not hypothetical.** The same log holds four consecutive `add_media`
+failures against an SMB share on 2026-09-16, all reading `Access is denied.
+(os error 5)`, and nothing in it can say whether the share refused the
+photograph being read, the scene name being claimed, or the dot-prefixed
+temporary — three faults with three different remedies. Attributing it needed
+a purpose-built probe and physical access to the machine, which is exactly
+what the log exists to avoid. D-091's rule: a message an operator cannot act
+on is the same class of defect as a wrong number.
+
+`CopyStep` is `ReadingSource | WritingTemporary | Claiming | Renaming`, and
+the first two are told apart by **asking** rather than guessing: `fs::copy` is
+one call over two files and its error does not say which, so a failure opens
+the source once more. One syscall on a path that has already failed, and it
+turns "one of these two" into *"the source itself could not be read, so
+nothing about the project folder is at fault"* or *"the source reads, and
+`.001.jpeg.partial-11928-3.jpeg` — the temporary it is copied to beside
+`001.jpeg` — could not be written"*. The second of those is the remedy nobody
+would ever guess from a message naming only `001.jpeg`, and a share that
+refuses names beginning with a dot is an ordinary Samba configuration.
+
+**Three of the four steps are driven end to end; `Renaming` is not, and that
+is written down rather than left as a hole.** Making a rename fail while the
+claim succeeds needs a seam this function does not have. Its words are
+asserted directly instead, alongside the other three — which is where the
+value is: a `match` whose arms all produced one sentence would pass the wiring
+test perfectly while recording the step and saying it uselessly (D-116).
+
+#### And the claim handle is closed before the rename
+
+The claim is a **name reservation**, but `if let Err(e) = claim` leaves the
+`Ok(File)` alive to the end of the function, so the rename replaced a path
+this process still held open for writing. **Proven open rather than argued:**
+opening the destination with a share mode of zero while `copy_in` held it is
+refused.
+
+**It is not a defect anything here reproduces, and that is stated rather than
+dressed up.** Rust opens with `FILE_SHARE_DELETE`, and both NTFS and the
+operator's own SMB share rename over it regardless — measured, including
+against the exact `\192.168.0.2\home\main` path the failures above name. It
+is closed because it costs one line and because it is what the comment beside
+it always claimed was happening, not because a bug was found.
+
+#### What was looked for and refuted
+
+The Sep-16 `Access is denied` does **not** reproduce: the same `still add`
+against the same share today fails with `There is not enough space on the disk
+(os error 112)`, and `Z:` reports **0 bytes free of 32.6 TB** — a quota on the
+NAS, which is the operator's storage and not this program. No fix is invented
+for it. What is ours is that the log could not say so.
+
+Also refuted, from the same log: a reading that the scene counter fails to
+advance because three `add_media` attempts all targeted `001.jpeg`. It
+advances correctly — a copy failure stops the ingest by design, so nothing
+ever landed and the next free slot is `001` every time. And a reading that the
+segment cache is dead because 18 of 19 finished films report
+`reused_segments=0`: every one of those is a **different project folder**,
+each rendered once, and the one folder rendered twice changed between runs.
+Measured directly instead — a 300-scene project re-rendered warm reuses
+300 of 300 and 300 of 300, 2 m 47 s against 10.9 s, byte-identical.
+
+### D-189 — A shell script is LF on every checkout · Accepted
+
+**`make lint`'s shell half could not pass on Windows, and not one of the
+findings was about the scripts.** D-175 wired `shellcheck -S warning
+scripts/*.sh` into `make lint` and got it to zero on macOS. Measured here on
+2026-09-20 with `core.autocrlf=true`, the same command reports **53**:
+
+| code | count | what it is |
+| --- | --- | --- |
+| SC1017 | **50** | literal carriage return |
+| SC1041, SC1042 | 3 | a heredoc terminator the CR made unrecognisable |
+
+**The scripts are not at fault and that is checkable in one step:** strip the
+CR into a scratch directory and the same `shellcheck` invocation is
+**completely clean**. The files are LF in the repository — `git show
+HEAD:scripts/m2-gates.sh` is 1 651 LF and 0 CRLF — and CRLF only in the
+working tree, because `core.autocrlf=true` rewrites them on checkout.
+
+`*.sh text eol=lf` in `.gitattributes`. After forcing a re-checkout all five
+scripts are LF, `shellcheck -S warning scripts/*.sh` is clean, `bash -n`
+passes on all five, and **`git status` reports no change** — which is the
+whole argument that this is safe. Git already stores LF; the attribute only
+says check it out that way.
+
+**It is a no-op for macOS and Linux, and that is inspected rather than
+assumed.** Every `.sh` blob in the repository is already LF, so a checkout
+there is byte-identical before and after.
+
+**It is not only the linter**, which is why this is worth a decision rather
+than a comment. A trailing `` becomes part of the last token for several
+`sh` builds — the D-155 class one layer down, a harness that works on one
+platform and not the other for a reason nothing in it mentions. The gates did
+run with CRLF here (M1 8/8, M2 23/23), so nothing was broken; what was broken
+was the tool that checks them, and D-175's whole point is that a clean run
+means a new finding is a new defect. Fifty standing findings is a run nobody
+reads.
+
+**Scoped to `*.sh` deliberately.** `Makefile` is CRLF here too and a CRLF
+recipe is a real hazard, but **`make` is not installed on this machine**, so
+that is a claim this session cannot test — and a `.gitattributes` line added
+on the strength of "it is probably better there" is the thing this project
+keeps writing down as the mistake. `* text=auto` was not taken for the same
+reason: it renormalises every file in the tree, including fixtures, and the
+measurement only covers shell scripts.

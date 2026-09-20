@@ -251,9 +251,52 @@ pub enum IngestError {
         from: PathBuf,
         /// Where it was going.
         to: PathBuf,
+        /// Which of the three things [`copy_in`] does actually failed (D-188).
+        step: CopyStep,
+        /// The temporary the copy is written to before it is renamed, named
+        /// because on two of the three steps it is the file the system
+        /// refused — and it is not the file the operator can see.
+        temporary: PathBuf,
         /// The operating system's reason.
         detail: String,
     },
+}
+
+/// Which step of a copy failed (D-188).
+///
+/// Getting a file into a project is **three** operations, not one: read the
+/// source and write a temporary beside the destination, claim the destination
+/// name, rename the temporary onto it. Until this existed all three reported
+/// `could not copy <source> to <destination>: <the operating system's words>`,
+/// so the message named two files and neither of them need be the one that
+/// was refused.
+///
+/// This is not hypothetical. This machine's own `runs.csv` holds four
+/// consecutive `add_media` failures against an SMB share, all reading
+/// `Access is denied. (os error 5)`, and nothing in the log can say whether
+/// the share refused the photograph being read, the scene name being claimed,
+/// or the dot-prefixed temporary — three different faults with three different
+/// remedies. Finding out took a purpose-built probe and physical access to the
+/// machine, which is precisely what a diagnostics log exists to avoid (D-016),
+/// and it is D-091's rule about a message an operator cannot act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyStep {
+    /// The source could not be read.
+    ReadingSource,
+    /// The source reads, and the temporary beside the destination could not
+    /// be written.
+    ///
+    /// Its own step rather than lumped in with the read, because the two are
+    /// fixed in different places and `fs::copy` is one call over two files:
+    /// see the probe in [`copy_in`] that tells them apart. This is also the
+    /// step a share with an opinion about names beginning with a dot fails,
+    /// while leaving the scene name itself perfectly writable — which is a
+    /// remedy nobody would ever guess from a message naming only `001.jpeg`.
+    WritingTemporary,
+    /// Claiming the destination name, once the bytes are safely beside it.
+    Claiming,
+    /// Renaming the finished temporary onto the claimed name.
+    Renaming,
 }
 
 impl std::fmt::Display for IngestError {
@@ -271,12 +314,47 @@ impl std::fmt::Display for IngestError {
             IngestError::NotAProject { path } => {
                 write!(f, "{} is not a folder", path.display())
             }
-            IngestError::Copy { from, to, detail } => write!(
-                f,
-                "could not copy {} to {}: {detail}",
-                from.display(),
-                to.display()
-            ),
+            IngestError::Copy {
+                from,
+                to,
+                step,
+                temporary,
+                detail,
+            } => {
+                // The sentence an operator already knows, then the one fact
+                // that tells them where to look. The temporary is named by
+                // file name rather than in full: it sits beside `to`, whose
+                // folder is on the line already.
+                let scaffolding = temporary
+                    .file_name()
+                    .unwrap_or(temporary.as_os_str())
+                    .to_string_lossy();
+                let name = to.file_name().unwrap_or(to.as_os_str()).to_string_lossy();
+                let step = match step {
+                    CopyStep::ReadingSource => {
+                        "the source itself could not be read, so nothing about the \
+                         project folder is at fault"
+                            .to_owned()
+                    }
+                    CopyStep::WritingTemporary => format!(
+                        "the source reads, and {scaffolding} — the temporary it is \
+                         copied to beside {name} — could not be written"
+                    ),
+                    CopyStep::Claiming => {
+                        format!("the source copied, and then the name {name} could not be claimed")
+                    }
+                    CopyStep::Renaming => format!(
+                        "the source copied, and then {scaffolding} could not be \
+                         renamed onto {name}"
+                    ),
+                };
+                write!(
+                    f,
+                    "could not copy {} to {}: {detail} — {step}",
+                    from.display(),
+                    to.display()
+                )
+            }
         }
     }
 }
@@ -612,13 +690,30 @@ fn copy_in(root: &Path, source: &Path, stem: &str) -> Result<Copied, IngestError
     // The copy is O(1) on APFS, so this is invisible on the developer's own
     // disk and seconds long on the operator's.
     let temporary = spoonstill_media::atomic::partial_path(&destination);
+    // Each of the three steps below says which one it was (D-188). They fail
+    // for different reasons and are fixed in different places, and until this
+    // existed they were one sentence.
+    let failed = |step: CopyStep, detail: String| IngestError::Copy {
+        from: source.to_path_buf(),
+        to: destination.clone(),
+        step,
+        temporary: temporary.clone(),
+        detail,
+    };
+
     fs::copy(source, &temporary).map_err(|e| {
         let _ = fs::remove_file(&temporary);
-        IngestError::Copy {
-            from: source.to_path_buf(),
-            to: destination.clone(),
-            detail: e.to_string(),
-        }
+        // `fs::copy` is one call over two files and its error does not say
+        // which one it is about. Asking costs a single syscall on a path that
+        // has already failed, and it turns "one of these two" into an answer
+        // — which is the difference between "your photograph is unreadable"
+        // and "this folder will not accept a name beginning with a dot".
+        let step = if fs::File::open(source).is_err() {
+            CopyStep::ReadingSource
+        } else {
+            CopyStep::WritingTemporary
+        };
+        failed(step, e.to_string())
     })?;
 
     // Rule 2 of the module note: never overwrite. `create_new` is the check and
@@ -629,28 +724,37 @@ fn copy_in(root: &Path, source: &Path, stem: &str) -> Result<Copied, IngestError
         .write(true)
         .create_new(true)
         .open(&destination);
-    if let Err(e) = claim {
-        let _ = fs::remove_file(&temporary);
-        return Err(IngestError::Copy {
-            from: source.to_path_buf(),
-            to: destination,
-            detail: if e.kind() == std::io::ErrorKind::AlreadyExists {
-                "a file of that name is already in the project".to_owned()
-            } else {
-                e.to_string()
-            },
-        });
-    }
+    let claimed = match claim {
+        Ok(handle) => handle,
+        Err(e) => {
+            let _ = fs::remove_file(&temporary);
+            return Err(failed(
+                CopyStep::Claiming,
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    "a file of that name is already in the project".to_owned()
+                } else {
+                    e.to_string()
+                },
+            ));
+        }
+    };
+    // The claim is a *name reservation*, and an `if let Err(..)` on the
+    // `Result` leaves the `Ok(File)` alive to the end of the function — so
+    // the rename below used to replace a path this process still had open for
+    // writing. Proven open rather than assumed: opening the destination with
+    // a share mode of zero while `copy_in` held it is refused. NTFS and the
+    // SMB share measured here both rename over it regardless, because Rust
+    // opens with `FILE_SHARE_DELETE` — so this is a latent hazard on any
+    // filesystem that does not honour that, not a defect anything here
+    // reproduces. Closing it costs one line and is what the comment above
+    // always claimed was happening.
+    drop(claimed);
 
     // Over our own empty claim, which `rename` replaces atomically (D-119).
     if let Err(e) = fs::rename(&temporary, &destination) {
         let _ = fs::remove_file(&temporary);
         let _ = fs::remove_file(&destination);
-        return Err(IngestError::Copy {
-            from: source.to_path_buf(),
-            to: destination.clone(),
-            detail: e.to_string(),
-        });
+        return Err(failed(CopyStep::Renaming, e.to_string()));
     }
 
     Ok(Copied {
@@ -1303,6 +1407,124 @@ mod tests {
             "the real name was created for a copy that never happened"
         );
         assert!(leftovers(&project).is_empty(), "{:?}", leftovers(&project));
+    }
+
+    /// D-188. A failed copy says **which** of the four things it was doing.
+    ///
+    /// Three of the four are driven end to end here; the fourth,
+    /// [`CopyStep::Renaming`], needs the rename to fail while the claim
+    /// succeeds, and there is no portable way to arrange that without a seam
+    /// this function does not have. Its words are asserted directly in
+    /// [`every_step_of_a_copy_says_something_different`] instead, which is
+    /// where the value is — saying so rather than leaving a silent hole
+    /// (D-179's rule).
+    ///
+    /// The distinction that matters is the first two: `fs::copy` is one call
+    /// over two files, and "your photograph is unreadable" and "this folder
+    /// refused a name beginning with a dot" are different faults with
+    /// different remedies. Before this they were one sentence, which is why
+    /// four `Access is denied` rows in this machine's own `runs.csv` could
+    /// not be attributed without a purpose-built probe.
+    #[test]
+    fn a_failed_copy_says_which_step_failed() {
+        let temp = Temp::new("copysteps");
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).expect("project");
+        let source = temp.file("src/photo.jpg", b"a photograph");
+
+        let step_of = |error: &IngestError| match error {
+            IngestError::Copy { step, .. } => *step,
+            other => panic!("expected a copy failure, got {other}"),
+        };
+
+        // 1. The source cannot be read. Nothing about the folder is at fault,
+        //    and the message must not send the operator to look at it.
+        let missing = temp.0.join("src/not-here.jpg");
+        let error = copy_in(&project, &missing, "001").expect_err("no such source");
+        assert_eq!(step_of(&error), CopyStep::ReadingSource);
+        assert!(
+            error
+                .to_string()
+                .contains("source itself could not be read"),
+            "{error}"
+        );
+
+        // 2. The source reads and the temporary cannot be written. A folder
+        //    that is not there stands in for a folder that will not take the
+        //    name — the same failure one layer out, and the only one of the
+        //    two a test can arrange on every platform.
+        let nowhere = temp.0.join("project/not-a-folder");
+        let error = copy_in(&nowhere, &source, "001").expect_err("no such folder");
+        assert_eq!(step_of(&error), CopyStep::WritingTemporary);
+        let shown = error.to_string();
+        assert!(shown.contains("the source reads"), "{shown}");
+        assert!(
+            shown.contains(".partial-"),
+            "the temporary is the file that was refused and must be named: {shown}"
+        );
+
+        // 3. The name is already taken. The bytes copied; the folder is fine;
+        //    what is wrong is that a scene is already called this.
+        fs::write(project.join("001.jpg"), b"the operator's own").expect("seed");
+        let error = copy_in(&project, &source, "001").expect_err("must not overwrite");
+        assert_eq!(step_of(&error), CopyStep::Claiming);
+        assert!(
+            error.to_string().contains("already in the project"),
+            "{error}"
+        );
+    }
+
+    /// And the four steps do not read alike (D-188).
+    ///
+    /// Without this, a `match` whose arms all produced the same sentence
+    /// would satisfy the wiring test above perfectly — the step would be
+    /// *recorded* correctly and *said* uselessly, which is the defect
+    /// this decision is about rather than an adjacent one (D-116).
+    #[test]
+    fn every_step_of_a_copy_says_something_different() {
+        let sentence = |step: CopyStep| {
+            IngestError::Copy {
+                from: PathBuf::from("/photos/holiday.jpg"),
+                to: PathBuf::from("/project/001.jpg"),
+                step,
+                temporary: PathBuf::from("/project/.001.jpg.partial-42-0.jpg"),
+                detail: "Access is denied. (os error 5)".to_owned(),
+            }
+            .to_string()
+        };
+
+        let all = [
+            CopyStep::ReadingSource,
+            CopyStep::WritingTemporary,
+            CopyStep::Claiming,
+            CopyStep::Renaming,
+        ]
+        .map(sentence);
+
+        for (i, one) in all.iter().enumerate() {
+            assert!(
+                one.contains("Access is denied. (os error 5)"),
+                "the operating system's own words must survive: {one}"
+            );
+            assert!(
+                one.contains("holiday.jpg") && one.contains("001.jpg"),
+                "both files an operator can see must still be named: {one}"
+            );
+            for other in &all[i + 1..] {
+                assert_ne!(
+                    one, other,
+                    "two steps read identically, so recording them apart bought nothing"
+                );
+            }
+        }
+
+        // The two that turn on the temporary name it; the two that do not,
+        // do not — a message about an unreadable photograph that mentions a
+        // dotfile the operator cannot see is worse than one that does not.
+        assert!(!all[0].contains(".partial-"), "{}", all[0]);
+        assert!(all[1].contains(".partial-"), "{}", all[1]);
+        assert!(!all[2].contains(".partial-"), "{}", all[2]);
+        assert!(all[3].contains(".partial-"), "{}", all[3]);
     }
 
     /// Rule 2 of the module note still holds, and now the claim is made *after*

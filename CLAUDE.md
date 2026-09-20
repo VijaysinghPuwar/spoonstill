@@ -274,6 +274,139 @@ be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
 
+### State as of 2026-09-20 — the mac's work, executed on Windows, and two things the log had been saying all along
+
+**This session ran on Windows 11** (Ryzen 7 7700X 8C/16T, RTX 3060, 15.2 GB).
+Its job was to take 2026-09-12 to 2026-09-19's work — D-177 through D-187,
+`v0.1.11` and `v0.1.12`, none of it executed on this platform — and find out
+whether it holds here. **It does.** Nothing in D-177..D-187 needed a Windows
+fix, and that is the main result.
+
+| checked here | result |
+|---|---|
+| `cargo test --workspace` | **680 pass, 11 ignored, 0 fail** — 643 in the six crates, 37 in `apps/desktop`. Three of those 680 are this session's own; the gap to the mac's 682 is `edge_retry.rs`, which is `#![cfg(unix)]` whole and says so |
+| clippy, `-D warnings`, all targets | clean |
+| `cargo fmt --check` | clean |
+| `apps/desktop` on Windows | **builds and its 37 tests pass**, including every new D-182/D-183/D-185 test |
+| 300-scene cold render, `--jobs 4`, captions on | **2 m 47 s**, 18 451 frames, **615.055 s against 615.033 s expected** — 22 ms across 300 joins |
+| the same project re-rendered warm | **300 of 300 narrations and 300 of 300 segments reused**, 10.9 s, **byte-identical** |
+| `runs.csv` rolling at 16 MB | happened for real mid-stress-test, correctly: `runs-previous.csv` at 16 777 684 bytes and a fresh file |
+
+**D-179's probe retry would have saved a real render on this machine.** The
+`battleship 2` scene that died on 2026-09-07 died on `no response after 36.8 s`
+from an `ffprobe -count_frames` against a `.partial-` segment FFmpeg had just
+closed — the read-after-write stall D-179 is about, in this operator's own log,
+three weeks before the fix was written.
+
+#### Two defects, both read out of `runs.csv` rather than out of the code (D-188)
+
+**A path component may not carry a separator.** `AUDIO_CACHE_DIR` was the
+string `"cache/audio"` joined as one component, so every audio path this
+program wrote down on Windows read `…\.spoonstill\cache/audio\tts-….wav`.
+**Counted: of 25 479 rows, 15 572 carry `cache/audio` and 92 carry
+`cache\audio`** — two spellings of one directory in one file, so a search for
+either misses the other. Nothing moves on disk and no cache is invalidated;
+proven by the 300-of-300 warm reuse above, taken after the change.
+
+**A failed copy says which of its four steps failed.** The four `add_media`
+failures on 2026-09-16 all read `Access is denied. (os error 5)` and nothing in
+the log could say whether the share refused the photograph, the scene name, or
+the dot-prefixed temporary. `CopyStep` names it, and the first two are told
+apart by *asking* — one extra `File::open` on a path that has already failed.
+
+**The `Access is denied` itself is not ours and no fix was invented for it.**
+The same `still add` against the same share today gives `There is not enough
+space on the disk (os error 112)`, and `Z:` reports **0 bytes free of 32.6 TB**
+— a quota on the NAS.
+
+#### Three readings of that log that do not survive being checked
+
+Worth recording because all three are the kind of thing a plausible summary
+produces, and each took minutes to refute against the machine itself.
+
+- ***"the scene counter is not advancing — three sources all went to
+  `001.jpeg`."*** It advances correctly. A copy failure stops the ingest by
+  design, so nothing ever landed and the next free slot is `001` every time.
+- ***"cache reuse is effectively zero — 18 of 19 films report
+  `reused_segments=0`."*** Every one of those is a **different project
+  folder**, each rendered once; the one folder rendered twice changed between
+  runs. Measured directly instead: 300 of 300, byte-identical.
+- ***"edge-tts keeps going missing."*** All four `1 thing spoonstill needs is
+  still missing` rows are the **gate suite's own** `doctor` calls, which run
+  under `with_machine_state` — and D-177 already wrote down that redirecting
+  `APPDATA` hides a `pip install --user` provider on Windows. `still doctor`
+  reports `ok edge` here.
+
+#### The GPU question, measured on this build rather than argued
+
+**Yes, it can use the RTX 3060, and no, it is not the default.** `--encoder
+auto` (D-162) selects `h264_nvenc` here — 120 NVENC invocations across the
+benchmark, zero errors, every segment still passing the D-041 profile
+assertion. 40 scenes at 1080p, `--jobs 4`, audio cache warm, segments cleared
+between runs, three runs each on an idle machine:
+
+| encoder | runs (s) | mean |
+|---|---|---|
+| `libx264` (default) | 19.04 / 20.13 / 20.78 | **19.98** |
+| `h264_nvenc` (`--encoder auto`) | 16.78 / 16.49 / 16.74 | **16.67** |
+
+**1.20x** — which is D-162's 1.19x and D-159's 1.23x confirmed a third time,
+not improved on. D-036's default stands: the filter graph is the cost, not the
+encoder. `still doctor` also reports `h264_amf` and `h264_mf` usable here and
+`h264_qsv` correctly not, on a machine with no Intel graphics.
+
+#### Smart App Control will cost you an hour here if you do not know about it
+
+It is **on** (`VerifiedAndReputablePolicyState` = 1) and it blocks freshly
+linked unsigned binaries by hash — which reads exactly like a test failure:
+
+```
+error: test failed, to rerun pass `-p spoonstill-cli --test readme_claims`
+Caused by: An Application Control policy has blocked this file. (os error 4551)
+```
+
+Relinking clears it (`rm` the blocked `target/**/deps/*.exe`, or `cargo clean
+-p <crate>`), but **a freshly built proc-macro DLL can be blocked again**, so
+the desktop build needs a loop: build, read `can't find crate for \`x\``,
+`cargo clean -p x`, repeat. It took two passes here and then `apps/desktop`
+built and tested normally. CLAUDE.md said clippy "cannot finish here"; that is
+not true — only the `cargo-clippy.exe` shim is blocked, and
+`RUSTC_WORKSPACE_WRAPPER=clippy-driver cargo check --all-targets` is the same
+lint and runs fine.
+
+#### `make lint`'s shell half could not pass here, and not one finding was the scripts' fault (D-189)
+
+`shellcheck -S warning scripts/*.sh` reports **53** on Windows — **50** of them
+SC1017 *literal carriage return* — because `core.autocrlf=true` checks the
+scripts out CRLF while the repository stores them LF. Strip the CR and the same
+run is **completely clean**, so D-175's work holds and it is the spelling on
+disk that is wrong. `*.sh text eol=lf` in `.gitattributes`; after a forced
+re-checkout all five are LF, shellcheck is clean, `bash -n` passes on all five,
+and **`git status` reports no change**, which is the argument that it is safe.
+A no-op on macOS, where every `.sh` blob is already LF.
+
+**`make` is not installed on this machine at all**, which is why every gate run
+above is `bash scripts/mN-gates.sh` rather than `make gates`. `Makefile` is
+CRLF here too and a CRLF recipe is a real hazard, but that is untestable from
+here and was left alone rather than guessed at.
+
+#### Left alone, deliberately
+
+- **D-187's `ctime` test still has no Windows counterpart.** The obvious
+  instrument, `MetadataExt::change_time()`, is **unstable** in Rust 1.94
+  (`windows_change_time`), and no stable signal distinguishes a renamed file
+  from an untouched one — mtime, size, creation time and file index all
+  survive a rename. The honest `cfg(not(unix))` note the mac session wrote is
+  the right answer and stays.
+- **The claim handle in `copy_in` was closed, and that is not a bug fix.**
+  It was proven open across the rename (a share-mode-zero open is refused
+  while `copy_in` holds it) and both NTFS and this operator's SMB share
+  rename over it regardless, because Rust opens with `FILE_SHARE_DELETE`.
+  Closed because it costs one line, not because anything reproduced.
+- **Fullwidth punctuation still boxes.** `＄` and `！` are in Halfwidth and
+  Fullwidth Forms, which no bundled face covers; D-157 already warns and
+  bundling another Noto is tens of megabytes.
+
 ### State as of 2026-09-19 — the audit's work order, executed end to end
 
 **All eight steps of `AI Model/claude/plan.md` are done: D-180 through D-187.**
@@ -3277,7 +3410,9 @@ before touching `MotionSeed`, `MotionSpec::seeded`, the segment filename,
 `occurrences_of`, or what `create_project` writes**, and **D-154 before starting
 M3, writing `state.db`, or assuming resume needs one**, **D-162 before touching
 `VideoEncoder`, `quality_args`, `resolve_encoder`, the `-c:v` arguments in
-`scene.rs`, or the software arm of `segment_key`**, **D-178 before touching
+`scene.rs`, or the software arm of `segment_key`**, **D-188 before touching
+`AUDIO_CACHE_DIR`, `CopyStep`, `ingest::copy_in`, or the wording of
+`ProblemKind::UndersizedSources`**, **D-178 before touching
 `atomic::Partial`, `sweep_partials`, `is_partial_of`, `concat::stopped_at`,
 `MediaError::JoinStopped`, or anything that writes beside a destination and
 renames**, **D-179 before giving a probe a constant timeout or removing the

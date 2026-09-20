@@ -1,0 +1,19 @@
+# Shell scripts are LF on every platform, including a Windows checkout (D-189).
+#
+# Measured 2026-09-20 on Windows 11 with `core.autocrlf=true`: the scripts are
+# LF in the repository and CRLF in the working tree, and `shellcheck -S warning
+# scripts/*.sh` — which D-175 wired into `make lint` — then reports **53**
+# findings, **50** of them SC1017 "literal carriage return" plus three parses
+# it confuses. Stripping the CR makes the same run completely clean, so the
+# scripts themselves are fine and this is purely how they are spelled on disk.
+#
+# It is not only the linter. A `\r` at the end of a line becomes part of the
+# last token for several `sh` builds, which is the D-155 class of failure one
+# layer down — a harness that works on one platform and not the other for a
+# reason nothing in it mentions.
+#
+# This is a no-op for macOS and Linux, and that is checkable rather than
+# hoped for: every `.sh` blob in the repository is already LF
+# (`git show HEAD:scripts/m2-gates.sh` is 1651 LF and 0 CRLF), and `eol=lf`
+# only says "check it out the way it is stored".
+*.sh text eol=lf

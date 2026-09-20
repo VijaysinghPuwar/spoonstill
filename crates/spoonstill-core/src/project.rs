@@ -684,13 +684,19 @@ impl fmt::Display for ProblemKind {
                 out_height,
                 native_short_edge,
             } => {
+                // The noun agrees with the **total** and the verb with the
+                // count, because they are different numbers: "1 of 6 stills
+                // is smaller". Tying both to the count gave "1 of 6 still is",
+                // which appeared thirteen times in this operator's own log
+                // before anybody read one (D-188).
                 write!(
                     f,
-                    "{scenes} of {total} still{} smaller than the \
+                    "{scenes} of {total} still{} {} smaller than the \
                      {out_width}x{out_height} frame and will be enlarged to \
                      fill it — the smallest is scene {smallest} at \
                      {width}x{height}; ",
-                    if *scenes == 1 { " is" } else { "s are" }
+                    if *total == 1 { "" } else { "s" },
+                    if *scenes == 1 { "is" } else { "are" }
                 )?;
                 match native_short_edge {
                     Some(edge) => write!(
@@ -1039,6 +1045,54 @@ mod tests {
             image: Some("img/001.jpg".to_owned()),
             ..SceneDraft::default()
         }
+    }
+
+    /// D-188. The undersized warning agrees with itself.
+    ///
+    /// Two numbers, two agreements: the **noun** is about how many stills the
+    /// project has and the **verb** is about how many are small. Tying both to
+    /// the count produced *"1 of 6 still is smaller"*, which reached this
+    /// operator's activity log thirteen times.
+    ///
+    /// `1 of 1` is the row that keeps the fix honest — it is the one case
+    /// where the old code was right, so a fix that simply pluralised the noun
+    /// unconditionally would break it.
+    #[test]
+    fn the_undersized_warning_agrees_with_both_of_its_numbers() {
+        let said = |scenes: usize, total: usize| {
+            ProblemKind::UndersizedSources {
+                scenes,
+                total,
+                smallest: "004".to_owned(),
+                width: 1376,
+                height: 768,
+                out_width: 1920,
+                out_height: 1080,
+                native_short_edge: Some(756),
+            }
+            .to_string()
+        };
+
+        assert!(
+            said(1, 1).starts_with("1 of 1 still is smaller"),
+            "{}",
+            said(1, 1)
+        );
+        assert!(
+            said(1, 6).starts_with("1 of 6 stills is smaller"),
+            "{}",
+            said(1, 6)
+        );
+        assert!(
+            said(2, 3).starts_with("2 of 3 stills are smaller"),
+            "{}",
+            said(2, 3)
+        );
+        assert!(
+            said(50, 50).starts_with("50 of 50 stills are smaller"),
+            "{}",
+            said(50, 50)
+        );
     }
 
     fn validate(draft: &SceneDraft) -> Result<SceneSpec, Vec<Problem>> {
