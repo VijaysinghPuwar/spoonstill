@@ -842,7 +842,7 @@ before it is called a test**.
 |---|---|
 | Rust | **~43,200 lines** across 6 crates + a Tauri app · edition 2024, pinned to 1.94 |
 | UI | ~3,900 lines of hand-written HTML/CSS/JS — no framework, no build step |
-| Tests | **701 `#[test]` functions** — 47 unit-test modules, 16 integration suites |
+| Tests | **702 `#[test]` functions** — 47 unit-test modules, 16 integration suites |
 | Exit gates | **39** shell gates that render real media and assert real properties |
 | Decisions | **154 numbered decisions** in `decisions.md`, each Accepted / Open / Superseded |
 | Direct dependencies | **12 third-party crates** at runtime (plus one build-time, one dev-only) — and `spoonstill-core` has **none** |

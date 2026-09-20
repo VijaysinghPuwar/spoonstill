@@ -342,6 +342,47 @@ were found rather than fixed on the way past:
 - Nothing in this repo syntax-checks `app.js`. A broken edit there is silent
   in a webview. `node --check` was run by hand on every change here.
 
+**Both platforms, and the answer is not symmetric.** *"Optimise for Windows"*
+is still not the task — the table further down this file settles that, and it
+was measured **on** Windows. What was checked here is that every one of the
+eight changes is portable, and three of them are worth **more** there than
+here: D-182 removes 1,000 process spawns per narration save, D-184 removes 499
+per warm render, and D-187 removes 1,000 renames per no-op move. Process
+creation and file writes are the two things Windows charges more for, and a
+virus scanner watches every one of the renames. Directional only — nothing in
+this session was *executed* on Windows, which is this file's standing rule.
+
+Nothing regresses there, and two holes were found and closed by looking:
+
+- `arrange.rs`'s `ctime` test is `#[cfg(unix)]` and had **no** counterpart, so
+  Windows lost it silently — D-179's rule. It now says what it does not check
+  and names the two portable tests that cover the same rule. **Proven rather
+  than assumed:** a deliberate syntax error inside that `cfg(not(unix))` block
+  fails the Windows cross-check and is invisible on macOS.
+- `edge_retry.rs` is gated `#![cfg(unix)]` whole, so D-186's cancellation
+  wiring into `edge.rs` is checked on unix only. The header now says so, and
+  names what does run on Windows: `command.rs` drives
+  `wait_until_cancellable` and `Cancel::sleep` through a real child using the
+  test binary as its own stand-in (D-155), precisely so they are not
+  unix-only. What is unproven there is the one-line wiring.
+
+Two things left alone on purpose. D-184's `counting_ffprobe` gate helper has
+the same `.cmd` trampoline as `stub_voice_service` and the same unproven
+`%*` forwarding — fine for the paths the gates pass, all under `mktemp -d`
+with no spaces, and the first thing to suspect if that gate ever misbehaves
+there. And D-180 nests test output one directory deeper, which is the only
+thing this session makes *longer* on a platform with a path limit; Rust's std
+uses verbatim paths for this and the CI checkout leaves ~150 characters spare,
+so it is noted rather than shortened.
+
+**Not taken, and it is the one genuinely Windows-specific improvement in the
+work order:** `::-webkit-scrollbar` styling, which `AI Model/claude/plan.md`
+wanted because WebView2 draws heavy native scrollbars. It is a visible change
+to both platforms that cannot be verified on either from a terminal, and
+making one on the strength of *"it is probably better there"* is the thing
+this file warns against. It is two lines whenever somebody is at a Windows
+machine to look at it.
+
 **`make gates` 39/39, `cargo test --workspace` 682 passed / 11 ignored,
 `make lint` green, `cargo audit --deny warnings` clean, and the D-132 Windows
 cross-check clean** — run after every one of the eight steps, not only at the

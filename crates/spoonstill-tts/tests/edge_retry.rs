@@ -11,8 +11,27 @@
 //! scope for the code, not for every test of it; the classifier and the loop
 //! themselves are covered by unit tests that run everywhere.
 //!
-//! Nothing here touches a network, and the backoff is set to a millisecond, so
-//! these run in `make test` like any other test.
+//! Nothing here touches a network, and the retry tests set the backoff to a
+//! millisecond, so these run in `make test` like any other test. D-186's two
+//! cancellation tests are the exception and say why in place: one needs a
+//! five-second backoff because the run count alone cannot tell an
+//! interruptible pause from an uninterruptible one, and one needs a stand-in
+//! that never answers. The suite still finishes in under three seconds,
+//! because both are *cancelled* rather than waited out — which is the thing
+//! they are checking.
+//!
+//! ## What Windows does not get from this file, and what covers it there
+//!
+//! All of it, because the whole file is gated — so D-186's cancellation
+//! wiring into `edge.rs` is checked on unix only. What runs everywhere is the
+//! machinery underneath it: `command.rs`'s
+//! `a_wait_that_watches_the_flag_stops_when_it_is_set` and
+//! `a_pause_between_attempts_can_be_interrupted` drive
+//! `FfmpegChild::wait_until_cancellable` and `Cancel::sleep` through a real
+//! child, using the test binary itself as the stand-in (D-155) precisely so
+//! they are not unix-only. What is unproven on Windows is that `say_one`
+//! passes the flag to them — a one-line wiring, and it is named here rather
+//! than left to be discovered (D-179).
 
 #![cfg(unix)]
 

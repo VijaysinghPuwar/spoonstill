@@ -1484,6 +1484,25 @@ mod tests {
         );
     }
 
+    /// What this module does **not** check on Windows, said out loud.
+    ///
+    /// D-179's rule: a test that simply compiles to nothing on a platform is
+    /// a silent hole, and this project has been bitten by exactly that. No
+    /// platform exposes a portable "this file was renamed" signal — a rename
+    /// changes neither mtime nor size — so the end-to-end assertion needs
+    /// `ctime` and `ctime` is unix's. The rule itself runs everywhere.
+    #[cfg(not(unix))]
+    #[test]
+    fn the_untouched_file_check_is_unix_only_and_says_so() {
+        eprintln!(
+            "D-187's `a_move_that_changes_nothing_touches_no_file` needs ctime, which \
+             Windows does not expose. The rule it is wired to is covered here by \
+             already_in_place_is_about_the_names and \
+             a_move_that_changes_nothing_still_repairs_the_numbering, which run on \
+             every platform."
+        );
+    }
+
     /// A removal still renumbers, which is the other caller of the rule.
     ///
     /// Taking a scene out makes every scene after it non-canonical, so the
