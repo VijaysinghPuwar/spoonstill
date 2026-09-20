@@ -12,8 +12,9 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use spoonstill_media::command::FfmpegCommand;
 use spoonstill_media::tools::Tools;
@@ -44,16 +45,121 @@ pub fn media_dir() -> PathBuf {
     dir
 }
 
-/// A directory for one test's outputs, emptied on entry so a rerun cannot pass
-/// on a file the previous run left behind.
+/// How many earlier runs' output to keep under one test's directory.
+pub const KEEP_RUNS: usize = 3;
+
+/// How recently a run directory must have been touched to be left alone
+/// whatever its age rank. A directory written to inside this window may belong
+/// to a session that is still going, and the cost of being wrong is that
+/// session's evidence.
+///
+/// Ten minutes rather than an hour, and the number comes from a measurement:
+/// the longest-running test process in this crate is
+/// `caption_hostile_text` at **34 s**, and the whole media suite is 66 s. A
+/// live run's directory is touched as it writes, so ten minutes is more than
+/// an order of magnitude clear of anything real. An hour was tried first and
+/// is too generous to be a bound — a single afternoon of mutation testing left
+/// **58** `motion-matrix` runs and 188 MB, none of them collectable.
+pub const SWEEP_GRACE: Duration = Duration::from_secs(10 * 60);
+
+/// A name for this test process, unique against every other one.
+///
+/// The pid alone is not enough: pids are recycled, and a recycled one would
+/// name a directory a previous run had already filled. The wall clock alone is
+/// not enough either — two processes can start inside the same millisecond.
+/// Together they are unique in practice, and they read as what they are.
+fn run_id() -> &'static str {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| {
+        let millis = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|since| since.as_millis())
+            .unwrap_or_default();
+        format!("run-{}-{millis}", std::process::id())
+    })
+}
+
+/// A directory for one test's outputs in **one invocation** of it (D-180).
+///
+/// This used to be `target/spoonstill-test-out/<test>`, a fixed path wiped on
+/// entry — so two concurrent copies of one test in one checkout deleted each
+/// other's output mid-flight. Measured before it was changed: a second copy of
+/// `the_production_recipe_at_1080p_is_frame_exact`, started the moment the
+/// first copy's `.partial-` file appeared, gave `[101, 0]` three times out of
+/// three, the first copy's `ffprobe` failing on a temporary the second copy's
+/// `remove_dir_all` had taken. That matters here because this author runs
+/// several models in parallel terminals against one tree: while it stood, any
+/// test result from any of those sessions could be wrong in either direction.
+///
+/// The run id goes **under** the test name rather than above it, so the
+/// directory a human looks in is still the one named after the test that
+/// failed. Artifacts survive the panic that produced them, which a `TempDir`
+/// would not — that is the whole reason to keep writing under `target/`.
+///
+/// Emptied on entry still, so a rerun cannot pass on a file left behind. The
+/// id makes that unconditional rather than merely likely.
 pub fn out_dir(test: &str) -> PathBuf {
-    let dir = workspace_root()
+    let per_test = workspace_root()
         .join("target")
         .join("spoonstill-test-out")
         .join(test);
+    sweep_old_runs(&per_test);
+
+    let dir = per_test.join(run_id());
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create the test output directory");
     dir
+}
+
+/// Keep the last [`KEEP_RUNS`] runs of one test and collect the rest.
+///
+/// Both guards are load-bearing and neither is sufficient alone. Without a
+/// count, `target/` grows without bound — the fixed path at least held one
+/// generation, and this must not trade a race for a disk. Without the grace
+/// window, a busy afternoon of four parallel sessions would let one session
+/// delete another's output the moment a fourth run started, which is the
+/// defect this function exists inside a fix for. A delayed collection is the
+/// right way round (D-178).
+///
+/// Anything here that is not a run directory is from the layout before D-180.
+/// It is collected on the same terms rather than left to sit forever.
+fn sweep_old_runs(per_test: &Path) {
+    sweep_old_runs_within(per_test, KEEP_RUNS, SWEEP_GRACE);
+}
+
+/// [`sweep_old_runs`] with its two bounds stated rather than read from a
+/// constant, so a test can exhibit a case this machine cannot: every run
+/// directory here is seconds old, so the shipped grace window means a test
+/// calling the real thing would assert the right property on an input that
+/// cannot exhibit the behaviour — D-116's trap, and D-144's answer to it.
+pub fn sweep_old_runs_within(per_test: &Path, keep: usize, grace: Duration) {
+    let Ok(entries) = std::fs::read_dir(per_test) else {
+        return;
+    };
+    let now = SystemTime::now();
+    let old_enough = |when: SystemTime| now.duration_since(when).is_ok_and(|age| age >= grace);
+
+    let mut runs: Vec<(SystemTime, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(when) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if entry.file_name().to_string_lossy().starts_with("run-") {
+            runs.push((when, entry.path()));
+        } else if old_enough(when) {
+            let path = entry.path();
+            let _ = std::fs::remove_dir_all(&path);
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    runs.sort_by_key(|(when, _)| *when);
+    let surplus = runs.len().saturating_sub(keep);
+    for (when, path) in runs.into_iter().take(surplus) {
+        if old_enough(when) {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
 }
 
 /// Run an FFmpeg command to completion, panicking with its stderr on failure.

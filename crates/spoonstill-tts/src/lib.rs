@@ -33,6 +33,8 @@ pub mod edge;
 
 use std::path::Path;
 
+pub use spoonstill_media::scene::Cancel;
+
 pub use spoonstill_core::Remedy;
 
 /// This crate's package name, resolved at compile time.
@@ -143,6 +145,16 @@ pub enum TtsError {
         /// What the provider said about it.
         detail: String,
     },
+    /// The operator stopped the run while this line was being spoken (D-186).
+    ///
+    /// Its own variant rather than a `Process` error, because the two mean
+    /// opposite things to whoever reads the report: a provider that failed is
+    /// something to fix, and a provider that was stopped is something that
+    /// was asked for.
+    Cancelled {
+        /// Which provider.
+        provider: String,
+    },
     /// Anything from the process boundary — spawn, timeout, non-zero exit.
     Process(Box<spoonstill_media::MediaError>),
     /// A file could not be written or read.
@@ -177,6 +189,11 @@ impl std::fmt::Display for TtsError {
                 // ever sees rendered their own sentence as `नमस\u{94d}त\u{947}`
                 // (D-158, and D-150's rule about a message nobody can act on).
             } => write!(f, "{provider} produced no audio for \"{text}\": {detail}"),
+            TtsError::Cancelled { provider } => write!(
+                f,
+                "{provider} was stopped part way through a line — nothing was \
+                 kept, and rendering again speaks it"
+            ),
             TtsError::Process(e) => write!(f, "{e}"),
             TtsError::Io { path, source } => {
                 write!(f, "{}: {source}", path.display())
@@ -268,10 +285,21 @@ pub trait Provider: Send + Sync {
     /// leaves no file behind — a partial artifact is worse than none, because
     /// the caller's cache would treat it as a hit forever (D-042's shape).
     ///
+    /// `cancel` is consulted before each request and across each pause
+    /// between retries (D-186). A provider that ignores it is not wrong, only
+    /// slow to stop; a provider that speaks a line **after** it is set has
+    /// spent the operator's money on work they cancelled, which under D-014's
+    /// bring-your-own-key is the cost this parameter exists for.
+    ///
     /// # Errors
     ///
-    /// Any [`TtsError`].
-    fn speak(&self, request: &Request<'_>, destination: &Path) -> Result<Spoken, TtsError>;
+    /// Any [`TtsError`], including [`TtsError::Cancelled`].
+    fn speak(
+        &self,
+        request: &Request<'_>,
+        destination: &Path,
+        cancel: &Cancel,
+    ) -> Result<Spoken, TtsError>;
 }
 
 /// The providers this build has.

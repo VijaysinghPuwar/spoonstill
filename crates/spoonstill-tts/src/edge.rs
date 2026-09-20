@@ -64,7 +64,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use spoonstill_media::atomic;
-use spoonstill_media::command::FfmpegCommand;
+use spoonstill_media::command::{Cancel, FfmpegCommand};
 use spoonstill_media::tools::locate;
 
 use crate::{Availability, Provider, Remedy, Request, Spoken, TtsError, Voice, opening};
@@ -981,6 +981,7 @@ impl Edge {
         knobs: &Knobs,
         script: &Path,
         audio: &Path,
+        cancel: &Cancel,
     ) -> Result<Spoken, Failure> {
         let mut command = FfmpegCommand::new(&self.program);
         command
@@ -1000,7 +1001,12 @@ impl Edge {
         let how = command.display();
         let outcome = command
             .spawn()
-            .and_then(|child| child.wait_until(speak_timeout(text.chars().count())))
+            .and_then(|child| {
+                // The same wait the join and the scene render use (D-186).
+                // A line can take a minute; before this, Stop meant waiting
+                // for it.
+                child.wait_until_cancellable(speak_timeout(text.chars().count()), cancel)
+            })
             .and_then(spoonstill_media::Finished::ok);
 
         // Whatever happened, a failed attempt leaves no half-file for the next
@@ -1051,6 +1057,7 @@ impl Edge {
         knobs: &Knobs,
         destination: &Path,
         audio: &Path,
+        cancel: &Cancel,
     ) -> Result<Spoken, TtsError> {
         let script = atomic::partial_path(&destination.with_extension("txt"));
         write_script(&script, text)?;
@@ -1058,10 +1065,26 @@ impl Edge {
         // Retries reuse the script — the words have not changed, and rewriting
         // them would be the one part of this loop that can fail for a reason
         // that has nothing to do with the service.
+        //
+        // **`persevere` itself is untouched by D-186**, and that is the point
+        // of it taking its two halves as closures: a cancellation is a
+        // `Permanent` failure — there is no version of "try again" that helps
+        // — so the retry rule already knew what to do with one. What changed
+        // is that the attempt asks before spending a request, and the pause
+        // between attempts can be interrupted. D-094's backoff reaches
+        // seconds, and a pause nothing can break into is a pause the operator
+        // waits out after pressing Stop.
         let outcome = persevere(
             self.retry,
-            |_attempt| self.attempt_speak(voice, text, knobs, &script, audio),
-            std::thread::sleep,
+            |_attempt| {
+                if cancel.is_requested() {
+                    return Err(Failure::Permanent(TtsError::Cancelled {
+                        provider: ID.to_owned(),
+                    }));
+                }
+                self.attempt_speak(voice, text, knobs, &script, audio, cancel)
+            },
+            |pause| cancel.sleep(pause),
         );
 
         // The script is the operator's words on our disk. It goes away whether
@@ -1235,7 +1258,12 @@ impl Provider for Edge {
         }
     }
 
-    fn speak(&self, request: &Request<'_>, destination: &Path) -> Result<Spoken, TtsError> {
+    fn speak(
+        &self,
+        request: &Request<'_>,
+        destination: &Path,
+        cancel: &Cancel,
+    ) -> Result<Spoken, TtsError> {
         if request.text.trim().is_empty() {
             return Err(TtsError::BadRequest {
                 provider: ID.to_owned(),
@@ -1310,7 +1338,7 @@ impl Provider for Edge {
             } else {
                 atomic::partial_path(&destination.with_extension(format!("part{index}.mp3")))
             };
-            match self.say_one(voice, piece, &knobs, destination, &part) {
+            match self.say_one(voice, piece, &knobs, destination, &part, cancel) {
                 Ok(said) => {
                     spoken.bytes += said.bytes;
                     // The command of the first piece, which is the one an
@@ -1730,6 +1758,7 @@ en-GB-RyanNeural                   Male      General                Friendly, Po
                     settings: &[],
                 },
                 Path::new("/nonexistent/out.mp3"),
+                &Cancel::new(),
             )
             .expect_err("an empty line");
         assert!(matches!(error, TtsError::BadRequest { .. }), "{error}");
@@ -1755,6 +1784,7 @@ en-GB-RyanNeural                   Male      General                Friendly, Po
                     settings: &settings,
                 },
                 &directory.join("out.mp3"),
+                &Cancel::new(),
             )
             .expect_err("a knob that is not a number");
 
@@ -1827,6 +1857,7 @@ en-GB-RyanNeural                   Male      General                Friendly, Po
                     settings: &[],
                 },
                 &directory.join("out.mp3"),
+                &Cancel::new(),
             )
             .expect_err("no binary");
 
@@ -2158,6 +2189,7 @@ aiohttp.client_exceptions.ClientConnectorDNSError: Cannot connect to host speech
                     settings: &[],
                 },
                 Path::new("/nonexistent/out.mp3"),
+                &Cancel::new(),
             )
             .expect_err("longer than a scene");
 

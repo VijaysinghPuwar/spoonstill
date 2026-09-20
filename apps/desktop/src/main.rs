@@ -81,6 +81,31 @@ struct SceneView {
     renderable: bool,
 }
 
+/// What writing one `.txt` can change about the row that holds it (D-182).
+///
+/// Deliberately **not** a whole [`SceneView`]. `index`, `image`, `image_path`
+/// and `audio` cannot move when a text file is written, and returning them
+/// from a probe-free read would be returning fields that can disagree with
+/// the grid: a scene whose photograph is broken is dropped by a probing read
+/// and kept by a probe-free one, so the two disagree about `index` — while
+/// agreeing about every field here, all of which come from the scene's own
+/// spec.
+///
+/// The fields that *can* move are all five of them. A `.txt` written beside a
+/// supplied recording is that scene's **caption**, not its narration (D-106),
+/// so the badge stays `file` and `caption` changes; a `.txt` written beside a
+/// photograph with neither makes a silent scene spoken, which moves `source`,
+/// `narration`, `voice` and takes away the declared `seconds`; and emptying
+/// one puts all of that back.
+#[derive(Debug, Clone, Serialize)]
+struct EditedScene {
+    source: String,
+    narration: String,
+    voice: String,
+    seconds: Option<f64>,
+    caption: String,
+}
+
 /// One problem, exactly as `still validate` would print it — plus, when the
 /// window can do something about it, the thing to press (D-105).
 #[derive(Debug, Clone, Serialize)]
@@ -724,26 +749,26 @@ async fn validate_project_inner(
 ) -> Result<ProjectView, String> {
     let view = tauri::async_runtime::spawn_blocking(move || -> Result<ProjectView, String> {
         let root = PathBuf::from(&path);
-        let project = spoonstill_app::import::load(&root, &spoonstill_app::ProbeCheck::from_env())
-            .map_err(|e| e.to_string())?;
+        // Opening a project is not a render and the window offers no way to
+        // stop one; it runs on a blocking thread, so the window stays live
+        // while it reads (D-186).
+        let project = spoonstill_app::import::load(
+            &root,
+            &spoonstill_app::ProbeCheck::from_env(),
+            &Cancel::new(),
+        )
+        .map_err(|e| e.to_string())?;
 
         let scenes: Vec<SceneView> = project
             .scenes
             .iter()
             .enumerate()
             .map(|(index, scene)| {
-                let source = scene.spec.source.kind().to_owned();
-                let (narration, voice, seconds) = match &scene.spec.source {
-                    spoonstill_core::AudioSource::Silent { seconds } => {
-                        (String::new(), String::new(), Some(*seconds))
-                    }
-                    spoonstill_core::AudioSource::File { .. } => {
-                        (String::new(), String::new(), None)
-                    }
-                    spoonstill_core::AudioSource::Tts { text, voice, .. } => {
-                        (text.clone(), voice.0.clone(), None)
-                    }
-                };
+                // The five spec-derived fields come from the same function a
+                // narration save answers with, so a row that was edited and a
+                // row that was reloaded cannot disagree about the badge, the
+                // voice or the caption (D-182).
+                let edited = edited_scene(scene);
                 SceneView {
                     index,
                     id: scene.spec.id.as_str().to_owned(),
@@ -751,7 +776,7 @@ async fn validate_project_inner(
                     // field stays because a provider that is not installed is
                     // still a row the window must be able to mark.
                     renderable: true,
-                    source,
+                    source: edited.source,
                     image: relative(&scene.image, &project.root),
                     image_path: scene.image.display().to_string(),
                     audio: scene
@@ -759,10 +784,10 @@ async fn validate_project_inner(
                         .as_ref()
                         .and_then(|p| p.file_name())
                         .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
-                    narration,
-                    voice,
-                    seconds,
-                    caption: scene.spec.caption.clone().unwrap_or_default(),
+                    narration: edited.narration,
+                    voice: edited.voice,
+                    seconds: edited.seconds,
+                    caption: edited.caption,
                 }
             })
             .collect();
@@ -886,25 +911,37 @@ async fn validate_project_inner(
 /// **Manifest mode is refused.** There the CSV is the source of truth, and a
 /// window that quietly wrote a `.txt` beside it would create exactly the
 /// two-sources-disagree conflict D-056 rejects.
+///
+/// **Nothing here probes a file** (D-182). Saving one line used to read the
+/// whole project twice over — once here, through a probing `import::load`
+/// whose entire result was thrown away after one `matches!`, and once more
+/// when the page reloaded afterwards. At 500 scenes that is 1.32 s each way,
+/// against **0.01 s** for the same read with the probes left out. The mode,
+/// the scene ids and the scene's own spec are all decided before a single
+/// `ffprobe` is spawned; the probes answer a different question, and this
+/// command does not ask it.
+///
+/// It returns **the row it changed**, so the page has no rule of its own to
+/// get wrong (D-010) and no reason to ask for the project again.
 #[tauri::command]
 async fn set_narration(
     session: State<'_, Session>,
     root: String,
     scene: String,
     text: String,
-) -> Result<(), String> {
+) -> Result<Option<EditedScene>, String> {
     let named = PathBuf::from(&root);
-    let outcome = set_narration_inner(session, root, scene, text).await;
+    let outcome = set_narration_inner(&session, root, scene, text).await;
     journalled("set_narration", Some(&named), outcome)
 }
 
 async fn set_narration_inner(
-    session: State<'_, Session>,
+    session: &Session,
     root: String,
     scene: String,
     text: String,
-) -> Result<(), String> {
-    let root = project_root(&session, &root)?;
+) -> Result<Option<EditedScene>, String> {
+    let root = project_root(session, &root)?;
     // The id came from a row we produced, but it reaches us as a string from a
     // webview, so it is checked like any other untrusted input (D-052, D-054).
     if scene.is_empty()
@@ -917,13 +954,27 @@ async fn set_narration_inner(
 
     tauri::async_runtime::spawn_blocking(move || {
         let root = PathBuf::from(&root);
-        let project = spoonstill_app::import::load(&root, &spoonstill_app::ProbeCheck::from_env())
-            .map_err(|e| e.to_string())?;
-        if !matches!(project.mode, spoonstill_app::Mode::Convention) {
+        // 0.01 s at n=500 (D-182). There is nothing here worth stopping.
+        let before =
+            spoonstill_app::import::load(&root, &spoonstill_app::SkipProbe, &Cancel::new())
+                .map_err(|e| e.to_string())?;
+        if !matches!(before.mode, spoonstill_app::Mode::Convention) {
             return Err(
                 "this project is driven by a manifest — edit the CSV rather than the folder"
                     .to_owned(),
             );
+        }
+        // A scene the folder does not have. The page can only send an id off a
+        // row it drew, so this is unreachable from the grid — but the command
+        // is reachable from a webview, and without it an unknown id writes a
+        // `NNN.txt` that pairs with nothing and turns up later as an unpaired
+        // narration with no explanation of where it came from.
+        if !before
+            .scenes
+            .iter()
+            .any(|s| s.spec.id.as_str() == scene.as_str())
+        {
+            return Err(format!("there is no scene {scene} in this project"));
         }
 
         let path = root.join(format!("{scene}.txt"));
@@ -939,10 +990,47 @@ async fn set_narration_inner(
             }
         } else {
             std::fs::write(&path, trimmed).map_err(|e| format!("{}: {e}", path.display()))
-        }
+        }?;
+
+        // Read the shape again — still without probing — and hand back the one
+        // row that moved. `None` means the scene is no longer one the importer
+        // can see, which the page answers by asking for the whole project: it
+        // is the state where something else has changed underneath, and this
+        // command's cheap answer would be a confident wrong one.
+        let after = spoonstill_app::import::load(&root, &spoonstill_app::SkipProbe, &Cancel::new())
+            .map_err(|e| e.to_string())?;
+        Ok(after
+            .scenes
+            .iter()
+            .find(|s| s.spec.id.as_str() == scene.as_str())
+            .map(edited_scene))
     })
     .await
     .map_err(|e| format!("the write failed: {e}"))?
+}
+
+/// The five fields a `.txt` can move, read off the scene's own spec.
+///
+/// The same `match` the grid is built from in `validate_project`, which is
+/// what makes a saved row and a reloaded row agree by construction rather
+/// than by two people remembering the same rule.
+fn edited_scene(scene: &spoonstill_app::ResolvedScene) -> EditedScene {
+    let (narration, voice, seconds) = match &scene.spec.source {
+        spoonstill_core::AudioSource::Silent { seconds } => {
+            (String::new(), String::new(), Some(*seconds))
+        }
+        spoonstill_core::AudioSource::File { .. } => (String::new(), String::new(), None),
+        spoonstill_core::AudioSource::Tts { text, voice, .. } => {
+            (text.clone(), voice.0.clone(), None)
+        }
+    };
+    EditedScene {
+        source: scene.spec.source.kind().to_owned(),
+        narration,
+        voice,
+        seconds,
+        caption: scene.spec.caption.clone().unwrap_or_default(),
+    }
 }
 
 /// Whether a voice service can be reached right now.
@@ -2137,5 +2225,170 @@ mod tests {
         assert!(project_root(&session, &elsewhere.display().to_string()).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A scratch project with one scene whose photograph is **not a
+    /// photograph**, and a `Session` open on it.
+    ///
+    /// The fake image is the instrument, not a shortcut: a probing read
+    /// refuses it, drops the scene and cannot find it by id, while a
+    /// probe-free read keeps it. That is what makes the test below
+    /// discriminating without counting processes or touching the environment.
+    fn open_project_with_a_fake_photograph(name: &str) -> (PathBuf, Session) {
+        let dir = std::env::temp_dir().join(format!(
+            "spoonstill-narration-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        std::fs::write(dir.join("001.jpg"), b"stands in for a photograph").expect("scratch");
+        std::fs::write(dir.join("002.jpg"), b"stands in for a photograph").expect("scratch");
+
+        let session = Session::default();
+        let root = std::fs::canonicalize(&dir).expect("the folder exists");
+        *session.root.lock().expect("a fresh lock") = Some(root.clone());
+        (root, session)
+    }
+
+    /// D-182. Saving one line reads the project's shape and nothing else.
+    ///
+    /// **The photographs here are text files**, so a probing read refuses
+    /// both and `project.scenes` comes back empty — the save would then fail
+    /// with *"there is no scene 001"*. It succeeds, which says no probe ran.
+    /// Swapping `SkipProbe` for `ProbeCheck` fails this test verbatim, and
+    /// has been seen to.
+    ///
+    /// That the scene is *editable at all* is a property worth keeping on its
+    /// own: an operator fixing a project whose photograph is broken must not
+    /// be blocked from writing what that scene should say.
+    ///
+    /// **On a machine with no `ffprobe` this test passes either way**, because
+    /// `probes` is then false and every extension is believed. Said out loud
+    /// rather than left to be discovered; every CI leg here renders real
+    /// media, so every CI leg has FFmpeg.
+    #[test]
+    fn saving_a_narration_reads_the_shape_and_probes_nothing() {
+        let (root, session) = open_project_with_a_fake_photograph("no-probe");
+        let path = root.display().to_string();
+
+        let edited = tauri::async_runtime::block_on(set_narration_inner(
+            &session,
+            path.clone(),
+            "001".to_owned(),
+            "  What this scene says.  ".to_owned(),
+        ))
+        .expect("a narration saved against an unreadable photograph")
+        .expect("the row that changed");
+
+        // Trimmed on the way to disk, and the row says what the file says.
+        assert_eq!(
+            std::fs::read_to_string(root.join("001.txt")).unwrap(),
+            "What this scene says."
+        );
+        assert_eq!(edited.source, "tts");
+        assert_eq!(edited.narration, "What this scene says.");
+        assert!(!edited.voice.is_empty(), "a spoken scene names its voice");
+        assert_eq!(
+            edited.seconds, None,
+            "a spoken scene's length is measured at render time (D-021), never declared"
+        );
+        assert_eq!(edited.caption, "What this scene says.");
+
+        // And the other scene is untouched — the save wrote one file.
+        assert!(!root.join("002.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Emptying it puts the scene back to silent, and removes the file rather
+    /// than writing a blank one (D-050).
+    #[test]
+    fn emptying_a_narration_makes_the_scene_silent_again() {
+        let (root, session) = open_project_with_a_fake_photograph("emptied");
+        let path = root.display().to_string();
+        std::fs::write(root.join("001.txt"), "something to remove").expect("scratch");
+
+        let edited = tauri::async_runtime::block_on(set_narration_inner(
+            &session,
+            path,
+            "001".to_owned(),
+            "   ".to_owned(),
+        ))
+        .expect("a narration emptied")
+        .expect("the row that changed");
+
+        assert!(
+            !root.join("001.txt").exists(),
+            "a blank narration must remove the file, not write an empty one"
+        );
+        assert_eq!(edited.source, "silent");
+        assert_eq!(edited.narration, "");
+        assert_eq!(edited.caption, "");
+        assert!(
+            edited.seconds.is_some(),
+            "a silent scene's length is declared, and the row has to show it"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An id the folder does not have is refused rather than written.
+    ///
+    /// Unreachable from the grid, which can only send an id off a row it drew
+    /// — and reachable from a webview, which is what the check is for. Without
+    /// it the write succeeds and leaves a `NNN.txt` that pairs with nothing,
+    /// surfacing later as an unpaired narration with no trace of where it came
+    /// from.
+    #[test]
+    fn a_scene_the_folder_does_not_have_is_refused() {
+        let (root, session) = open_project_with_a_fake_photograph("unknown-id");
+        let path = root.display().to_string();
+
+        let error = tauri::async_runtime::block_on(set_narration_inner(
+            &session,
+            path,
+            "409".to_owned(),
+            "words for a scene that is not there".to_owned(),
+        ))
+        .expect_err("an unknown scene");
+
+        assert!(error.contains("409"), "{error}");
+        assert!(
+            !root.join("409.txt").exists(),
+            "a refused save wrote the file anyway"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// And the five fields are read off the spec the same way the grid reads
+    /// them, which is the claim `validate_project` now depends on.
+    ///
+    /// A supplied recording is the case that catches a wrong rule: a `.txt`
+    /// beside it is that scene's **caption**, not its narration (D-106), so
+    /// the badge must stay `file` and the narration must stay empty.
+    #[test]
+    fn a_recording_with_words_beside_it_is_captioned_not_narrated() {
+        let (root, session) = open_project_with_a_fake_photograph("captioned");
+        std::fs::write(root.join("001.wav"), b"stands in for a recording").expect("scratch");
+        let path = root.display().to_string();
+
+        let edited = tauri::async_runtime::block_on(set_narration_inner(
+            &session,
+            path,
+            "001".to_owned(),
+            "what the recording says".to_owned(),
+        ))
+        .expect("saved")
+        .expect("the row that changed");
+
+        assert_eq!(edited.source, "file", "a scene with a recording is `file`");
+        assert_eq!(
+            edited.narration, "",
+            "the words belong to the caption, not to a provider"
+        );
+        assert_eq!(edited.caption, "what the recording says");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

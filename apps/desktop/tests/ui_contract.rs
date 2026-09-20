@@ -717,3 +717,414 @@ fn every_fallible_window_command_is_written_down() {
          wrap the outcome in `journalled`, or add the name to `exempt` with a reason"
     );
 }
+
+/// D-182. Saving one narration does not ask for the whole project back.
+///
+/// The save used to end `await load(project.root)`, which re-read all 500
+/// scenes and probed every file — 1.32 s at n=500, on top of the 1.32 s the
+/// command itself had just spent on a `load` whose entire result was one
+/// `matches!`. The command answers with the row it changed; the page assigns
+/// that row and redraws.
+///
+/// **Both halves are asserted**, because either alone passes against the
+/// defect: keeping the reload and *also* assigning the row would be slower
+/// than before, and assigning nothing while dropping the reload would leave
+/// the operator's own sentence off the screen they just typed it on.
+///
+/// The `load` that survives is the fallback for `null`, which is the state
+/// where Rust could not find the scene it had just written to. It is
+/// deliberately not forbidden — what is forbidden is reloading on the
+/// ordinary path.
+#[test]
+fn saving_one_narration_does_not_reload_the_whole_project() {
+    let js = code_only(&read("app.js"));
+
+    let at = js
+        .find("\"set_narration\"")
+        .expect("the page cannot save a narration at all");
+    // To the end of the `try`, which is where the old reload sat.
+    let after = &js[at..js.len().min(at + 700)];
+
+    assert!(
+        after.contains("Object.assign(scene,"),
+        "the saved row is not applied, so the grid still shows what was there \
+         before the operator typed: {after}"
+    );
+    assert!(
+        after.contains("drawRows()"),
+        "nothing redraws after the row changes: {after}"
+    );
+
+    // The one `load` allowed here is the `else` arm. Anything else is the
+    // reload this decision removed.
+    let reloads = after.match_indices("load(project.root)").count();
+    assert_eq!(
+        reloads, 1,
+        "the save path reloads the whole project {reloads} time(s); exactly one \
+         is allowed, and only as the fallback for a row Rust could not find: \
+         {after}"
+    );
+    let fallback = after
+        .split("Object.assign(scene,")
+        .nth(1)
+        .expect("checked above");
+    assert!(
+        fallback.contains("} else {"),
+        "the surviving reload is not the fallback arm: {after}"
+    );
+}
+
+// --- D-183: the palette is checked, not eyeballed --------------------------
+
+/// One `oklch(L C H)` token, as the stylesheet writes it.
+fn oklch(css: &str, token: &str) -> (f64, f64, f64) {
+    let at = css
+        .find(&format!("--{token}: oklch("))
+        .unwrap_or_else(|| panic!("--{token} is not defined in styles.css"));
+    let open = css[at..].find('(').expect("checked above") + at + 1;
+    let close = css[open..].find(')').expect("an unclosed oklch()") + open;
+    let parts: Vec<f64> = css[open..close]
+        .split_whitespace()
+        .map(|n| {
+            n.parse()
+                .unwrap_or_else(|_| panic!("--{token} has a non-numeric component: {n:?}"))
+        })
+        .collect();
+    assert_eq!(parts.len(), 3, "--{token} is not `oklch(L C H)`");
+    (parts[0], parts[1], parts[2])
+}
+
+/// Oklch to sRGB, then WCAG relative luminance, then the contrast ratio.
+///
+/// Spelled out here rather than taken from a crate: it is thirty lines, the
+/// window has no build step and no dependencies of its own, and a second
+/// implementation of a number the design was chosen against is the point
+/// (D-172's golden vector, same reasoning). Reproduced against the audit's
+/// independently-sampled figures and agreeing within 0.02.
+fn contrast(fg: (f64, f64, f64), bg: (f64, f64, f64)) -> f64 {
+    fn srgb((l, c, h): (f64, f64, f64)) -> [f64; 3] {
+        let (a, b) = (c * h.to_radians().cos(), c * h.to_radians().sin());
+        let (l_, m_, s_) = (
+            l + 0.3963377774 * a + 0.2158037573 * b,
+            l - 0.1055613458 * a - 0.0638541728 * b,
+            l - 0.0894841775 * a - 1.2914855480 * b,
+        );
+        let (l3, m3, s3) = (l_.powi(3), m_.powi(3), s_.powi(3));
+        let linear = [
+            4.0767416621 * l3 - 3.3077115913 * m3 + 0.2309699292 * s3,
+            -1.2684380046 * l3 + 2.6097574011 * m3 - 0.3413193965 * s3,
+            -0.0041960863 * l3 - 0.7034186147 * m3 + 1.7076147010 * s3,
+        ];
+        linear.map(|x| {
+            let x = x.clamp(0.0, 1.0);
+            if x <= 0.003_130_8 {
+                12.92 * x
+            } else {
+                1.055 * x.powf(1.0 / 2.4) - 0.055
+            }
+        })
+    }
+    fn luminance(rgb: [f64; 3]) -> f64 {
+        let lin = rgb.map(|c| {
+            if c <= 0.040_45 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        });
+        0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+    }
+    let (a, b) = (luminance(srgb(fg)), luminance(srgb(bg)));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// The two theme blocks, each as its own snippet, so `--3` in one is never
+/// read as `--3` in the other.
+fn themes(css: &str) -> [(&'static str, String); 2] {
+    let dark_at = css.find(":root {").expect("the dark block");
+    let light_at = css
+        .find("html[data-theme=\"light\"] {")
+        .expect("the light block");
+    let end = css[light_at..].find('}').expect("an unclosed block") + light_at;
+    [
+        ("dark", css[dark_at..light_at].to_owned()),
+        ("light", css[light_at..end].to_owned()),
+    ]
+}
+
+/// D-183. Every level of ink is readable on every surface it can land on.
+///
+/// `--ink-3` shipped at **3.46–3.99:1** — under the AA minimum on all four
+/// base surfaces, and worse on a hovered row, which is the state every row an
+/// operator is reading happens to be in. It is used 42 times.
+///
+/// The surfaces are listed rather than derived, because "which background can
+/// this text sit on" is a fact about the markup and not about the stylesheet.
+/// Each is here because a rule really does put `--ink-3` on it:
+/// `--hover` through `.grid tbody tr:hover td` and `.projects li:hover`,
+/// `--eb` through `.grid tr.problem td`, `--in` through the fields,
+/// `--c` through the cards.
+///
+/// **`--accent-soft` is deliberately absent**, and that is the interesting
+/// one. No value of `--3` clears 4.5:1 there without collapsing the gap to
+/// `--ink-2`, so a selected row steps its secondary text up a level instead —
+/// which `.chip.on .n` already did, on the same background, before any of
+/// this. That rule is asserted separately below.
+#[test]
+fn every_level_of_ink_is_readable_on_every_surface_it_lands_on() {
+    let css = read("styles.css");
+    // Text tokens, and the least this level of ink may ever be.
+    const INKS: [&str; 3] = ["1", "2", "3"];
+    const SURFACES: [&str; 8] = ["b", "p", "r", "g", "h", "eb", "in", "c"];
+
+    for (theme, block) in themes(&css) {
+        for ink in INKS {
+            let colour = oklch(&block, ink);
+            for surface in SURFACES {
+                let ratio = contrast(colour, oklch(&block, surface));
+                assert!(
+                    ratio >= 4.5,
+                    "{theme}: --ink-{ink} on --{surface} is {ratio:.2}:1, under the 4.5:1 \
+                     WCAG AA minimum for normal text. Move the token, or step this \
+                     surface's text up a level the way `.chip.on .n` does."
+                );
+            }
+        }
+
+        // And the levels stay three levels. Without this, the cheapest way to
+        // pass everything above is to make all three tokens the same, which
+        // would satisfy the letter of it and destroy what the palette is for.
+        let ground = oklch(&block, "b");
+        let (one, two, three) = (
+            contrast(oklch(&block, "1"), ground),
+            contrast(oklch(&block, "2"), ground),
+            contrast(oklch(&block, "3"), ground),
+        );
+        assert!(
+            one > two * 1.5 && two > three * 1.2,
+            "{theme}: the ink series is {one:.1} / {two:.1} / {three:.1} on the page \
+             background — these are no longer three distinguishable levels"
+        );
+    }
+}
+
+/// The one surface a level of ink cannot clear, handled where it happens.
+///
+/// Asserted because it is load-bearing for the test above: that test omits
+/// `--accent-soft` from its surface list, and the omission is only honest
+/// while these rules exist.
+#[test]
+fn a_selected_row_steps_its_secondary_text_up_a_level() {
+    let css = css_code_only(&read("styles.css"));
+    for rule in [
+        ".chip.on .n",
+        ".voices li.on .v-gender, .voices li.on .v-id",
+    ] {
+        let at = css.find(rule).unwrap_or_else(|| {
+            panic!(
+                "{rule} is gone, and with it the reason the contrast test may skip --accent-soft"
+            )
+        });
+        let body = &css[at..css.len().min(at + 120)];
+        assert!(
+            body.contains("var(--ink-2)") || body.contains("var(--ink)"),
+            "{rule} no longer steps up on --accent-soft: {body}"
+        );
+    }
+}
+
+/// D-183. Keyboard focus is visible, and nothing takes the ring away without
+/// giving one back.
+///
+/// The stylesheet had **zero** `:focus-visible` rules. Three selectors set
+/// `outline: none`, which for a keyboard user removes the only indication of
+/// where they are; each now has a `:focus-visible` companion that puts a real
+/// ring back, and the mouse still sees exactly what it saw.
+#[test]
+fn a_suppressed_focus_ring_is_always_given_back() {
+    let css = css_code_only(&read("styles.css"));
+
+    assert!(
+        css.contains(":focus-visible"),
+        "no rule in the stylesheet draws a keyboard focus ring"
+    );
+
+    for rule in css.split('}') {
+        let Some((selectors, body)) = rule.split_once('{') else {
+            continue;
+        };
+        if !body.contains("outline: none") {
+            continue;
+        }
+        // Every selector that gives up the ring must appear again with
+        // `:focus-visible` in place of `:focus`.
+        for selector in selectors.split(',') {
+            let selector = selector.trim();
+            if selector.is_empty() {
+                continue;
+            }
+            let restored = selector.replace(":focus", ":focus-visible");
+            assert!(
+                css.contains(&restored),
+                "`{selector}` sets `outline: none` and nothing puts a ring back for \
+                 the keyboard — add `{restored}`"
+            );
+        }
+    }
+}
+
+/// D-183. Reordering controls are quiet by colour, not by transparency.
+///
+/// `.arrange { opacity: 0.42 }` composited its label to **2.19:1** dark and
+/// **1.98:1** light: enabled controls that read as disabled, in the column an
+/// operator had already failed to find once (D-101). Transparency is the part
+/// that made the number meaningless, so transparency is what went — the
+/// quietness is `--ink-2`, a step below the row's own text, stepping up to
+/// full ink when the row is under the pointer.
+#[test]
+fn the_arrange_controls_are_not_faded_into_illegibility() {
+    let css = css_code_only(&read("styles.css"));
+    let at = css.find(".arrange {").expect("the arrange group is gone");
+    let body = &css[at..css.len().min(at + 200)];
+    assert!(
+        !body.contains("opacity"),
+        "the arrange group is transparent again, which is how its label reached \
+         2.19:1: {body}"
+    );
+    // The disabled buttons keep theirs, and must: that is the one thing in
+    // this column that is *meant* to be indistinct, and WCAG exempts it.
+    assert!(
+        css.contains(".arrange-button:disabled { opacity:"),
+        "a disabled reorder button is no longer distinguishable from an enabled one"
+    );
+}
+
+/// D-183. The narration cell is a control, and the keyboard can reach it.
+///
+/// It was a `<span>` with a click handler — no `tabindex`, no `role` — so the
+/// one thing this grid exists to let an operator do could not be done without
+/// a mouse, and a screen reader announced it as text. Focus is put back on it
+/// when the editor closes, or every edit drops the keyboard at the top of the
+/// document.
+#[test]
+fn the_narration_cell_is_reachable_from_the_keyboard() {
+    let js = code_only(&read("app.js"));
+    let at = js
+        .find("editNarration(scene, cell)")
+        .expect("the narration cell cannot be edited at all");
+    let around = &js[at.saturating_sub(400)..js.len().min(at + 600)];
+
+    for wanted in ["tabIndex", "\"role\"", "\"aria-label\"", "keydown"] {
+        assert!(
+            around.contains(wanted),
+            "the narration cell is not a control — {wanted} is missing: {around}"
+        );
+    }
+    assert!(
+        js.contains("function refocusNarration"),
+        "nothing puts the keyboard back on the row that was edited"
+    );
+}
+
+/// D-185. No keystroke does a list's worth of work, or crosses the process
+/// boundary, on its own.
+///
+/// Measured through the shipped `app.js` in node: twelve characters typed
+/// into the scene filter rebuilt the grid **twelve times** — about 8,500
+/// elements each at 500 scenes — and nine into the subtitle box made **nine**
+/// `subtitle_preview` calls. One each, now.
+///
+/// Derived rather than a list of five: the point is that the *next* one is
+/// caught too. Only the `el("id")` listeners are checked, which is exactly
+/// right — the narration textarea's autosize is bound to a local element, is
+/// O(1), and touches nothing outside itself.
+#[test]
+fn no_input_handler_redraws_or_calls_rust_per_keystroke() {
+    let js = code_only(&read("app.js"));
+
+    let mut checked = 0;
+    for (at, _) in js.match_indices(".addEventListener(\"input\"") {
+        // Back to the start of the statement, forward to the end of it.
+        let from = js[..at].rfind('\n').map_or(0, |n| n + 1);
+        let to = js[at..]
+            .find(");\n")
+            .map_or(js.len(), |n| (at + n + 2).min(js.len()));
+        let statement = &js[from..to];
+        if !statement.contains("el(\"") {
+            continue;
+        }
+        checked += 1;
+        assert!(
+            statement.contains("onFrame("),
+            "this input handler runs on every keystroke and is not coalesced to a \
+             frame:\n  {}\nWrap it in `onFrame(…)`, or if it really is O(1) and \
+             touches nothing outside itself, bind it to the element rather than \
+             through `el(\"id\")`.",
+            statement.trim()
+        );
+    }
+    assert!(
+        checked >= 5,
+        "only {checked} input handlers were found — the scan is matching nothing, \
+         so this passes by finding nothing to check"
+    );
+}
+
+/// And it really waits for a frame.
+///
+/// The one property worth pinning about `onFrame`, and the only one: a
+/// version that called `fn` straight through would satisfy every other test
+/// here — the handlers would still be *wrapped* — while doing exactly the
+/// per-keystroke work this decision removed.
+///
+/// **What is deliberately not asserted is throttle versus debounce.** That
+/// looked like the interesting choice and it is not: `cancelAnimationFrame`
+/// followed by `requestAnimationFrame` inside one frame still runs on the
+/// next, so both forms redraw once per frame. Measured both ways through the
+/// shipped file in node — twelve keystrokes over twelve frames gave twelve
+/// redraws either way, and twelve inside one frame gave one. A test that
+/// forbade one of them would be pinning a preference and calling it a
+/// property.
+#[test]
+fn the_frame_coalescer_actually_waits_for_a_frame() {
+    let js = code_only(&read("app.js"));
+    let at = js
+        .find("function onFrame(")
+        .expect("the frame coalescer is gone");
+    let body = &js[at..js.len().min(at + 400)];
+    assert!(
+        body.contains("requestAnimationFrame"),
+        "`onFrame` no longer waits for a frame, so every handler wrapped in it \
+         is doing per-keystroke work again: {body}"
+    );
+}
+
+/// D-185. Both answers that cross the process boundary carry a token.
+///
+/// `drawPreview` has had one since D-106. `refreshOutput` had none, and it
+/// paints the destination path — the one thing the Output screen exists to be
+/// right about. Coalescing makes two answers overlapping rarer, which makes a
+/// stale path on screen **harder to notice** rather than impossible, so the
+/// net went in with the coalescing rather than instead of it.
+#[test]
+fn an_answer_from_rust_cannot_paint_over_a_later_one() {
+    let js = code_only(&read("app.js"));
+    for (function, token) in [
+        ("async function drawPreview(", "previewToken"),
+        ("async function refreshOutput(", "outputToken"),
+    ] {
+        let at = js
+            .find(function)
+            .unwrap_or_else(|| panic!("{function} is gone"));
+        let body = &js[at..js.len().min(at + 1400)];
+        assert!(
+            body.contains(&format!("++{token}")),
+            "{function} does not claim a {token}: {body}"
+        );
+        assert!(
+            body.contains(&format!("!== {token}")),
+            "{function} never checks its {token}, so a slow earlier answer can \
+             paint over a fast later one: {body}"
+        );
+    }
+}

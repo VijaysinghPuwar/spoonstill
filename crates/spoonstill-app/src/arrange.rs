@@ -356,6 +356,24 @@ fn position_of(all: &[Scene], id: &str) -> Result<usize, ArrangeError> {
 /// a live file destroys it on Unix and fails on Windows (D-071 — the two
 /// platforms disagree, and neither is acceptable).
 fn renumber(root: &Path, order: &[Scene]) -> Result<(), ArrangeError> {
+    // Nothing to do, and doing it anyway is not free (D-187). `still move
+    // p 001 1` on a project already in that order parked and renamed all 500
+    // files — measured at 0.09 s, and every `ctime` moved, which is what a
+    // backup tool reads.
+    //
+    // **The condition is the names, not the position**, and that distinction
+    // is the whole of it: a project of twenty scenes stemmed `0001`..`0020`
+    // is in the right *order* and the wrong *width*, and the renumber is what
+    // repairs it. An early return on "the position did not change" would skip
+    // that repair in silence.
+    //
+    // `occupied_destination` is not reached from here, and provably need not
+    // be: every destination is one of `order`'s own files, so every one of
+    // them is in the `leaving` set that check skips. It cannot fire.
+    if already_in_place(order) {
+        return Ok(());
+    }
+
     // Before anything moves (D-170). Pass one vacates every name a scene owns
     // and nothing else, so a file belonging to no scene sitting at a
     // destination would be replaced in pass two without a word. Refusing here
@@ -403,6 +421,22 @@ fn renumber(root: &Path, order: &[Scene]) -> Result<(), ArrangeError> {
         rename(&parked, &destination)?;
     }
     Ok(())
+}
+
+/// Whether every file already has the name [`renumber`] would give it.
+///
+/// Compared by **file name** rather than by whole path: `scenes` builds these
+/// from the root it was handed, and a comparison that also had to agree about
+/// how that root was spelled would be answering a second question.
+fn already_in_place(order: &[Scene]) -> bool {
+    let width = MIN_WIDTH.max(order.len().to_string().len());
+    order.iter().enumerate().all(|(index, scene)| {
+        let wanted = format!("{:0width$}", index + 1, width = width);
+        scene.files.iter().all(|file| {
+            let extension = file.extension().and_then(OsStr::to_str).unwrap_or_default();
+            file.file_name().and_then(OsStr::to_str) == Some(&format!("{wanted}.{extension}"))
+        })
+    })
 }
 
 /// The first file that is sitting where a renumbered scene must go, if there is
@@ -1322,5 +1356,157 @@ mod tests {
             .filter_map(|e| e.file_name().to_str().map(str::to_owned))
             .filter(|n| n.starts_with(".arranging-"))
             .collect()
+    }
+
+    // --- D-187: a renumber that would change nothing does nothing ---------
+
+    /// The rule itself, which is about **names** and not about positions.
+    ///
+    /// Every row here is in the right order; only the third is in the right
+    /// order *and* already named correctly. An early return keyed on the
+    /// position would answer `true` to all three.
+    #[test]
+    fn already_in_place_is_about_the_names() {
+        let project = Project::new("in-place", &[("001", &["jpeg"]), ("002", &["jpeg"])]);
+        let order = scenes(project.path()).expect("scenes");
+        assert!(
+            already_in_place(&order),
+            "a project that is already numbered 001, 002 needs no renumber"
+        );
+
+        // The same scenes in the same order, stemmed four wide. `MIN_WIDTH`
+        // is three, so these are *wrong* and the renumber is the repair.
+        let wide = Project::new("in-place-wide", &[("0001", &["jpeg"]), ("0002", &["jpeg"])]);
+        let order = scenes(wide.path()).expect("scenes");
+        assert!(
+            !already_in_place(&order),
+            "four-digit stems in a two-scene project are not in place"
+        );
+
+        // And a gap: 001, 003 is the right order and the wrong numbering.
+        let gap = Project::new("in-place-gap", &[("001", &["jpeg"]), ("003", &["jpeg"])]);
+        let order = scenes(gap.path()).expect("scenes");
+        assert!(!already_in_place(&order), "001, 003 is not 001, 002");
+    }
+
+    /// D-187. A move that changes nothing renames nothing.
+    ///
+    /// The whole scene travels together, so a renumber of a 500-scene project
+    /// is a thousand renames — measured at **0.06 s**, with every `ctime`
+    /// moved, which is what a backup tool reads. Asserting that requires
+    /// `ctime`, which only unix exposes; the rule itself is tested above on
+    /// every platform, and what is checked here is that `renumber` is wired
+    /// to it.
+    ///
+    /// **The instrument matters more than the assertion.** `stat -f %c` is
+    /// whole seconds and the effect is about ten milliseconds wide, so the
+    /// audit's own first attempt at this reported no change and read as a
+    /// clean refutation. `st_ctime_nsec` has the resolution the effect needs.
+    #[cfg(unix)]
+    #[test]
+    fn a_move_that_changes_nothing_touches_no_file() {
+        use std::os::unix::fs::MetadataExt;
+
+        let project = Project::new(
+            "noop-move",
+            &[
+                ("001", &["jpeg", "txt"]),
+                ("002", &["jpeg", "txt"]),
+                ("003", &["jpeg", "txt"]),
+            ],
+        );
+
+        let stamps = |root: &Path| -> Vec<(PathBuf, i64, i64)> {
+            let mut all: Vec<_> = fs::read_dir(root)
+                .expect("read")
+                .flatten()
+                .map(|entry| {
+                    let meta = entry.metadata().expect("metadata");
+                    (entry.path(), meta.ctime(), meta.ctime_nsec())
+                })
+                .collect();
+            all.sort();
+            all
+        };
+
+        let before = stamps(project.path());
+        let moved =
+            super::move_to(project.path(), "001", 1).expect("a move to where it already is");
+        let after = stamps(project.path());
+
+        assert_eq!(
+            before, after,
+            "a move that changes nothing renamed every file in the project"
+        );
+        // And it still answers the question it was asked.
+        assert_eq!(moved.was, "001");
+        assert_eq!(moved.now, "001");
+        assert_eq!((moved.from, moved.to), (1, 1));
+        assert_eq!(moved.scenes.len(), 3);
+    }
+
+    /// And the repair an early return must not skip.
+    ///
+    /// Codex's own run of `still move` on a fresh fixture normalised
+    /// four-digit stems to three, which is the reason this decision is keyed
+    /// on the names: *"the position did not change"* is true here, and doing
+    /// nothing would leave the folder wrong. Run against an early return on
+    /// position alone and seen to fail.
+    #[test]
+    fn a_move_that_changes_nothing_still_repairs_the_numbering() {
+        let project = Project::new(
+            "noop-repairs",
+            &[
+                ("0001", &["jpeg", "txt"]),
+                ("0002", &["jpeg", "txt"]),
+                ("0003", &["jpeg"]),
+            ],
+        );
+
+        super::move_to(project.path(), "0001", 1).expect("a move to where it already is");
+
+        assert_eq!(
+            project.listing(),
+            vec!["001.jpeg", "001.txt", "002.jpeg", "002.txt", "003.jpeg"],
+            "the stems were left four wide"
+        );
+        // `contents` is provenance, not names: each file still says what it
+        // was created as, which is how this proves photographs moved rather
+        // than names being rewritten over other photographs.
+        assert_eq!(
+            project.contents(),
+            vec!["0001.jpeg", "0002.jpeg", "0003.jpeg"]
+        );
+        // The whole scene travelled together, so the pairing survived.
+        assert_eq!(
+            fs::read_to_string(project.path().join("002.txt")).unwrap(),
+            "0002.txt"
+        );
+    }
+
+    /// A removal still renumbers, which is the other caller of the rule.
+    ///
+    /// Taking a scene out makes every scene after it non-canonical, so the
+    /// early return must never fire there — and if it did, the folder would
+    /// be left with a gap.
+    #[test]
+    fn taking_a_scene_out_still_closes_the_gap() {
+        let project = Project::new(
+            "noop-remove",
+            &[("001", &["jpeg"]), ("002", &["jpeg"]), ("003", &["jpeg"])],
+        );
+
+        super::remove(project.path(), "002").expect("removed");
+
+        assert_eq!(
+            project.listing(),
+            vec!["001.jpeg", "002.jpeg"],
+            "the gap was left open"
+        );
+        assert_eq!(
+            fs::read_to_string(project.path().join("002.jpeg")).unwrap(),
+            "003.jpeg",
+            "the scene after the gap did not move up"
+        );
     }
 }

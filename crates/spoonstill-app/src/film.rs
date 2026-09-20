@@ -546,8 +546,16 @@ pub fn render_project(
     cancel: &Cancel,
     on_event: &(dyn Fn(FilmEvent) + Sync),
 ) -> Result<RenderedFilm, FilmError> {
-    let mut project =
-        crate::import::load(&options.root, &ProbeCheck::from_env()).map_err(FilmError::Import)?;
+    // The importer can be stopped now (D-186). At n=500 a SIGINT during this
+    // phase used to take **1.06 s** to be obeyed against 0.08 s during the
+    // pool, and the gap was exactly the validation still to do — which grows
+    // with the project and with the storage.
+    let mut project = crate::import::load(&options.root, &ProbeCheck::from_env(), cancel).map_err(
+        |e| match e {
+            ImportError::Cancelled => FilmError::Cancelled,
+            other => FilmError::Import(other),
+        },
+    )?;
     apply_voice_override(&mut project, options);
     apply_geometry_override(&mut project, options)?;
     apply_subtitle_override(&mut project, options);
@@ -721,8 +729,19 @@ pub fn render_project(
             duration: expected_total,
             fps: output.fps(),
         },
+        cancel,
         sink,
-    )?;
+    )
+    // D-181. A join the operator stopped is a cancellation, not a media
+    // failure, and `FilmError::Cancelled` is the sentence that says finished
+    // segments are kept — which is what the next run will do with them. The
+    // variant already existed and nothing constructed it: the pool's own
+    // cancellation collapses to one line inside `collect`, so the only path
+    // that could ever have reached it was this one, and this one exited 0.
+    .map_err(|e| match e {
+        MediaError::Cancelled { .. } => FilmError::Cancelled,
+        other => FilmError::from(other),
+    })?;
 
     // The film is made and asserted. Only now is a superseded segment safe to
     // sweep — a failed or cancelled render leaves the whole cache alone, so
@@ -1261,6 +1280,7 @@ fn resolve_and_render(
                 &scene.spec.source,
                 scene.audio.as_deref(),
                 policy,
+                cancel,
                 log,
             );
             match &resolved {
@@ -1315,15 +1335,20 @@ fn resolve_and_render(
     // The narrations first, and the order matters: a scene whose narration
     // failed has no segment, so reporting the segment list would name the
     // consequence rather than the cause.
-    let audio = collect(project, audio_outcomes, cancel).map_err(|failed| FilmError::Audio {
-        failures: failed.failures,
-        not_started: failed.not_started,
-    })?;
-    let rendered =
-        collect(project, segment_outcomes, cancel).map_err(|failed| FilmError::Render {
+    let audio = collect(project, audio_outcomes, cancel).map_err(|stopped| match stopped {
+        Stopped::Cancelled => FilmError::Cancelled,
+        Stopped::Failed(failed) => FilmError::Audio {
             failures: failed.failures,
             not_started: failed.not_started,
-        })?;
+        },
+    })?;
+    let rendered = collect(project, segment_outcomes, cancel).map_err(|stopped| match stopped {
+        Stopped::Cancelled => FilmError::Cancelled,
+        Stopped::Failed(failed) => FilmError::Render {
+            failures: failed.failures,
+            not_started: failed.not_started,
+        },
+    })?;
 
     Ok((audio, rendered))
 }
@@ -1605,12 +1630,27 @@ struct Failed {
     not_started: usize,
 }
 
+/// Why a pool did not produce every value.
+#[derive(Debug)]
+enum Stopped {
+    /// Scenes went wrong, and these are the ones with a file to look at.
+    Failed(Failed),
+    /// The operator stopped the run (D-186).
+    ///
+    /// Its own answer rather than one `Failed` holding a row that says
+    /// *"cancelled"*. That row produced **"1 scene failed to render"** over a
+    /// run nobody said had failed — the same sentence a real broken scene
+    /// gets, which is the thing D-181 removed from the join and D-186 removes
+    /// from the importer. All three phases say one thing now.
+    Cancelled,
+}
+
 /// Turn a pool's outcomes into either every value or every failure.
 fn collect<T>(
     project: &Project,
     outcomes: Vec<Outcome<Result<T, impl std::fmt::Display>>>,
     cancel: &Cancel,
-) -> Result<Vec<T>, Failed> {
+) -> Result<Vec<T>, Stopped> {
     let mut values = Vec::with_capacity(outcomes.len());
     let mut failures = Vec::new();
     let mut not_started = 0;
@@ -1637,20 +1677,14 @@ fn collect<T>(
         Ok(values)
     } else if cancel.is_requested() {
         // A cancelled run's failures are mostly "we stopped", which is not a
-        // list an operator needs to read.
-        Err(Failed {
-            failures: vec![SceneFailure {
-                index: 0,
-                id: "*".to_owned(),
-                detail: "cancelled".to_owned(),
-            }],
-            not_started: 0,
-        })
+        // list an operator needs to read — and calling any of it a *failure*
+        // is not true (D-186).
+        Err(Stopped::Cancelled)
     } else {
-        Err(Failed {
+        Err(Stopped::Failed(Failed {
             failures,
             not_started,
-        })
+        }))
     }
 }
 
@@ -2182,7 +2216,11 @@ mod tests {
             Outcome::NotAdmitted(crate::pool::NotStarted::EarlierFailure),
         ];
 
-        let failed = collect(&project, outcomes, &Cancel::new()).expect_err("one scene failed");
+        let Stopped::Failed(failed) =
+            collect(&project, outcomes, &Cancel::new()).expect_err("one scene failed")
+        else {
+            panic!("nobody cancelled anything, so this is a failure and not a stop");
+        };
         assert_eq!(
             failed.failures.len(),
             1,
@@ -2211,10 +2249,16 @@ mod tests {
         assert!(said.contains("cannot speak its line"), "{said}");
     }
 
-    /// And a run that *was* cancelled still collapses to the one line it always
-    /// did — the branch above must not have been bought by breaking this one.
+    /// And a run that *was* cancelled is a cancellation, not a failure.
+    ///
+    /// It used to collapse to one `Failed` row reading `cancelled`, which the
+    /// caller then printed as **"1 scene failed to render"** — the same
+    /// sentence a genuinely broken scene gets, over a run the operator
+    /// stopped on purpose. Measured before D-186 by sending SIGINT during the
+    /// segment pool of a 500-scene render. The branch above must not have
+    /// been bought by breaking this one, which is why both are asserted.
     #[test]
-    fn a_cancelled_run_still_collapses_to_one_line() {
+    fn a_cancelled_run_is_not_reported_as_a_failure() {
         let root = scratch("still-cancelled");
         let scenes: Vec<ResolvedScene> = (1..=4)
             .map(|n| spoken_scene(&format!("{n:03}"), "A line.", "edge"))
@@ -2230,10 +2274,23 @@ mod tests {
             Outcome::NotAdmitted(crate::pool::NotStarted::Cancelled),
         ];
 
-        let failed = collect(&project, outcomes, &cancel).expect_err("cancelled");
-        assert_eq!(failed.failures.len(), 1);
-        assert_eq!(failed.failures[0].detail, "cancelled");
-        assert_eq!(failed.not_started, 0, "not listed twice");
+        let stopped = collect(&project, outcomes, &cancel).expect_err("cancelled");
+        assert!(
+            matches!(stopped, Stopped::Cancelled),
+            "a cancelled run came back as {stopped:?}"
+        );
+
+        // And what the operator reads says so, without the word `failed`.
+        let said = FilmError::Cancelled.to_string();
+        assert!(said.starts_with("cancelled"), "{said}");
+        assert!(
+            !said.contains("failed"),
+            "a run nobody said had failed is reported as a failure: {said}"
+        );
+        assert!(
+            said.contains("resumes"),
+            "and it says what happens next: {said}"
+        );
     }
 
     /// The window and the command line reach the same voices (D-168).

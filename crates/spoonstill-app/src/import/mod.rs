@@ -197,6 +197,30 @@ impl MediaCheck for ProbeCheck {
     }
 }
 
+/// The other check: believe every extension and look at nothing.
+///
+/// Behind `still validate --no-probe`, and behind the window's narration save
+/// (D-182), which needs a project's *shape* and nothing about its media.
+/// Measured at 500 scenes: **0.01 s against 1.32 s**, because the probe pool
+/// is essentially the whole cost of reading a project and everything before it
+/// is free.
+///
+/// It lives here rather than in the CLI because it now has two callers, and
+/// this codebase has already paid for one convention implemented twice
+/// (D-111). **What it gives up is stated where it is defined**: nothing is
+/// measured, so a truncated photograph is believed and no D-145 undersized
+/// warning can be produced. A caller that reports problems to an operator
+/// wants [`ProbeCheck`]; a caller that wants to know which scenes exist wants
+/// this.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SkipProbe;
+
+impl MediaCheck for SkipProbe {
+    fn check(&self, _path: &Path, _role: Role) -> Result<Option<SourceGeometry>, String> {
+        Ok(None)
+    }
+}
+
 /// A file size an operator can read (D-150).
 ///
 /// Integer megabytes truncate, and every size between D-126's 256 KiB ceiling
@@ -314,6 +338,16 @@ pub enum ImportError {
     Settings(SettingsError),
     /// The rows will not load.
     Rows(RowsError),
+    /// The operator stopped the run while the project was being read (D-186).
+    ///
+    /// An error rather than a partly-filled [`Project`], and that is the
+    /// whole reason this variant exists. A cancelled probe pool hands back
+    /// `NotAdmitted` for every row it never started, and the resolution loop
+    /// below turns a row with no resolved image into **no scene at all** —
+    /// so without this, stopping a render at n=500 would have returned a
+    /// project of however many scenes happened to finish, and every caller
+    /// would have believed it.
+    Cancelled,
 }
 
 impl std::fmt::Display for ImportError {
@@ -324,6 +358,7 @@ impl std::fmt::Display for ImportError {
             }
             ImportError::Settings(e) => write!(f, "{e}"),
             ImportError::Rows(e) => write!(f, "{e}"),
+            ImportError::Cancelled => f.write_str("cancelled — the project was still being read"),
         }
     }
 }
@@ -334,6 +369,7 @@ impl std::error::Error for ImportError {
             ImportError::NoProject { .. } => None,
             ImportError::Settings(e) => Some(e),
             ImportError::Rows(e) => Some(e),
+            ImportError::Cancelled => None,
         }
     }
 }
@@ -368,12 +404,17 @@ fn probe_jobs() -> usize {
 
 /// Read a project folder and say everything that is true about it.
 ///
+/// `cancel` stops the probe pool, which is the only expensive stage here
+/// (D-186). Everything before it — the folder scan, the YAML, the pairing,
+/// every pure rule — is measured at **0.01 s** against the probes' 1.32 s at
+/// n=500, so there is nothing else worth interrupting.
+///
 /// # Errors
 ///
-/// [`ImportError`] only for the three cases where there is nothing left to
-/// check: no folder, an unparseable `project.yaml`, an unparseable manifest.
-/// Everything else is a [`Problem`] in the returned project.
-pub fn load(root: &Path, media: &dyn MediaCheck) -> Result<Project, ImportError> {
+/// [`ImportError`] only for the cases where there is nothing left to check:
+/// no folder, an unparseable `project.yaml`, an unparseable manifest, or a
+/// cancellation. Everything else is a [`Problem`] in the returned project.
+pub fn load(root: &Path, media: &dyn MediaCheck, cancel: &Cancel) -> Result<Project, ImportError> {
     let root = std::fs::canonicalize(root)
         .map(without_verbatim_prefix)
         .map_err(|_| ImportError::NoProject {
@@ -417,7 +458,7 @@ pub fn load(root: &Path, media: &dyn MediaCheck) -> Result<Project, ImportError>
     // list and they are merged in input order afterwards, because "print every
     // problem at once" (plan.md §M2) is worth nothing if the order changes
     // between two runs over one folder.
-    let resolved_rows = pool::run(&rows.drafts, probe_jobs(), &Cancel::new(), |_, draft| {
+    let resolved_rows = pool::run(&rows.drafts, probe_jobs(), cancel, |_, draft| {
         let mut mine = Vec::new();
         let files = resolve_files(&root, draft, media, probes, &mut mine);
         (files, mine)
@@ -425,12 +466,29 @@ pub fn load(root: &Path, media: &dyn MediaCheck) -> Result<Project, ImportError>
 
     let mut files: Vec<ResolvedFiles> = Vec::with_capacity(rows.drafts.len());
     for outcome in resolved_rows {
-        // `Cancel` is never requested here, so nothing is ever skipped; the
-        // default keeps the vectors the same length as the drafts rather than
-        // silently dropping a row if that ever changes.
-        let (row, mine) = outcome.done().unwrap_or_default();
+        // A row the pool never started means the run was stopped — `pool::run`
+        // produces `NotAdmitted` for no other reason. It used to fall through
+        // to `unwrap_or_default()`, which is right when nothing can cancel and
+        // silently wrong the moment something can: a default has no image, a
+        // row with no image becomes no scene, and the caller would have been
+        // handed a project missing however many scenes were still in flight
+        // (D-186).
+        let Some((row, mine)) = outcome.done() else {
+            return Err(ImportError::Cancelled);
+        };
         files.push(row);
         problems.extend(mine);
+    }
+
+    // And a cancellation that arrived after the last row was admitted stopped
+    // this run just as much. Without this, a signal landing in the final
+    // moments of validation leaves every row `Done` and reports **the probes
+    // the signal itself killed** as unreadable photographs — measured before
+    // the fix at *"7 problems stop this render"*, then 7, then 6, then 6,
+    // because the count is however many `ffprobe` children were in flight.
+    // A false problem list is worse than a slow one (D-186).
+    if cancel.is_requested() {
+        return Err(ImportError::Cancelled);
     }
 
     let mut resolved = Vec::with_capacity(scenes.len());
@@ -890,7 +948,7 @@ mod tests {
         }
 
         fn load(&self) -> Project {
-            super::load(&self.0, &Accepting).expect("loads")
+            super::load(&self.0, &Accepting, &Cancel::new()).expect("loads")
         }
     }
 
@@ -966,7 +1024,7 @@ mod tests {
     #[test]
     fn a_file_that_is_not_what_it_claims_is_refused_by_the_probe() {
         let scratch = Scratch::new(&[("001.png", "this is not a png"), ("001.txt", "hello")]);
-        let project = super::load(&scratch.0, &Refusing("001.png")).expect("loads");
+        let project = super::load(&scratch.0, &Refusing("001.png"), &Cancel::new()).expect("loads");
 
         assert!(project.scenes.is_empty());
         let found = messages(project.errors());
@@ -1080,7 +1138,8 @@ mod tests {
     #[test]
     fn a_machine_with_no_ffmpeg_says_so_once_and_still_shows_the_scenes() {
         let scratch = Scratch::new(&[("001.jpeg", ""), ("002.jpeg", ""), ("003.jpeg", "")]);
-        let project = super::load(&scratch.0, &Uninstalled).expect("the folder still loads");
+        let project =
+            super::load(&scratch.0, &Uninstalled, &Cancel::new()).expect("the folder still loads");
 
         assert_eq!(
             project.scenes.len(),
@@ -1121,7 +1180,8 @@ mod tests {
 
     #[test]
     fn a_folder_that_is_not_there_is_an_error_not_an_empty_project() {
-        let error = super::load(Path::new("/no/such/project"), &Accepting).expect_err("no folder");
+        let error = super::load(Path::new("/no/such/project"), &Accepting, &Cancel::new())
+            .expect_err("no folder");
         assert!(matches!(error, ImportError::NoProject { .. }), "{error}");
     }
 
@@ -1141,7 +1201,7 @@ mod tests {
     #[test]
     fn an_unparseable_settings_file_aborts_rather_than_defaulting() {
         let scratch = Scratch::new(&[("project.yaml", "apsect: 9:16\n"), ("001.png", "")]);
-        let error = super::load(&scratch.0, &Accepting).expect_err("unknown key");
+        let error = super::load(&scratch.0, &Accepting, &Cancel::new()).expect_err("unknown key");
         assert!(matches!(error, ImportError::Settings(_)), "{error}");
     }
 
@@ -1297,7 +1357,7 @@ mod tests {
             gave_up: std::sync::atomic::AtomicBool::new(false),
         };
 
-        let project = super::load(&scratch.0, &media).expect("loads");
+        let project = super::load(&scratch.0, &media, &Cancel::new()).expect("loads");
         assert_eq!(project.scenes.len(), 4);
         assert!(
             !media.gave_up.load(Ordering::SeqCst),
@@ -1336,7 +1396,7 @@ mod tests {
         let scratch = Scratch::new(&borrowed);
 
         for run in 0..10 {
-            let project = super::load(&scratch.0, &Accepting).expect("loads");
+            let project = super::load(&scratch.0, &Accepting, &Cancel::new()).expect("loads");
             assert!(project.problems.is_empty(), "{:?}", project.problems);
             assert_eq!(project.scenes.len(), 40);
             for (index, scene) in project.scenes.iter().enumerate() {
@@ -1387,6 +1447,7 @@ mod tests {
                 ("002.png", 1376, 768),
                 ("003.png", 4000, 3000),
             ]),
+            &Cancel::new(),
         )
         .expect("loads");
 
@@ -1413,6 +1474,7 @@ mod tests {
         let project = super::load(
             &scratch.0,
             &Measuring(&[("001.png", 1600, 900), ("002.png", 1376, 768)]),
+            &Cancel::new(),
         )
         .expect("loads");
 
@@ -1430,6 +1492,7 @@ mod tests {
         let project = super::load(
             &scratch.0,
             &Measuring(&[("001.png", 1920, 1080), ("002.png", 4000, 3000)]),
+            &Cancel::new(),
         )
         .expect("loads");
 
@@ -1457,10 +1520,105 @@ mod tests {
     #[test]
     fn a_still_no_legal_frame_fits_offers_no_size() {
         let scratch = Scratch::new(&[("001.png", "")]);
-        let project = super::load(&scratch.0, &Measuring(&[("001.png", 16, 9)])).expect("loads");
+        let project = super::load(
+            &scratch.0,
+            &Measuring(&[("001.png", 16, 9)]),
+            &Cancel::new(),
+        )
+        .expect("loads");
 
         let line = messages(project.warnings()).remove(0);
         assert!(line.contains("no output size"), "{line}");
         assert!(!line.contains("--short-edge"), "{line}");
+    }
+
+    /// A check that asks the run to stop the first time it is used.
+    ///
+    /// The flag is set from *inside* the pool rather than before it, which is
+    /// the case that matters: a cancellation that arrives before `load` is
+    /// called never reaches the probe pool at all.
+    struct StopsOnFirstLook(Cancel, std::sync::atomic::AtomicUsize);
+
+    impl MediaCheck for StopsOnFirstLook {
+        fn check(&self, _path: &Path, _role: Role) -> Result<Option<SourceGeometry>, String> {
+            self.1.fetch_add(1, Ordering::Relaxed);
+            self.0.request();
+            Ok(None)
+        }
+    }
+
+    /// D-186. A project that was still being read is an error, not a short
+    /// project.
+    ///
+    /// This is the half that would have been silent. A cancelled probe pool
+    /// hands back `NotAdmitted` for every row it never started, the old code
+    /// turned each of those into a default with no resolved image, and the
+    /// resolution loop drops a row with no image — so `load` returned
+    /// `Ok(project)` holding however many scenes happened to finish, and
+    /// every caller believed it. Against that code this test fails by getting
+    /// an `Ok` with fewer than 200 scenes.
+    #[test]
+    fn a_project_that_was_still_being_read_is_not_returned_half_done() {
+        let files: Vec<(String, String)> = (1..=200)
+            .map(|n| (format!("{n:03}.jpg"), "a photograph".to_owned()))
+            .collect();
+        let borrowed: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let scratch = Scratch::new(&borrowed);
+
+        let cancel = Cancel::new();
+        let check = StopsOnFirstLook(cancel.clone(), std::sync::atomic::AtomicUsize::new(0));
+        let error = super::load(&scratch.0, &check, &cancel)
+            .expect_err("a run stopped while the project was being read");
+
+        assert!(
+            matches!(error, ImportError::Cancelled),
+            "expected a cancellation, got: {error}"
+        );
+        // Non-vacuous: the pool really ran, so the refusal is not coming from
+        // some earlier stage finding nothing to do.
+        let looked = check.1.load(Ordering::Relaxed);
+        assert!(looked > 0, "the probe pool never looked at anything");
+        assert!(
+            looked < 200,
+            "every one of the 200 rows was probed, so nothing was actually \
+             stopped and this proves nothing"
+        );
+    }
+
+    /// And a cancellation that lands after the last row was admitted still
+    /// stops the run.
+    ///
+    /// Measured before this: a SIGINT in the final moments of validating 500
+    /// scenes left every row `Done` and reported **the probes the signal
+    /// itself had killed** as unreadable photographs — *"7 problems stop this
+    /// render"*, then 7, then 6, then 6, the count being however many
+    /// `ffprobe` children were in flight. A false problem list is worse than
+    /// a slow one.
+    #[test]
+    fn a_cancellation_after_the_last_row_still_stops_the_run() {
+        let scratch = Scratch::new(&[("001.jpg", "a photograph")]);
+        let cancel = Cancel::new();
+        // One row, so it is admitted and finished before the flag is set:
+        // nothing comes back `NotAdmitted` and only the second check can
+        // catch this.
+        let check = StopsOnFirstLook(cancel.clone(), std::sync::atomic::AtomicUsize::new(0));
+        let error = super::load(&scratch.0, &check, &cancel).expect_err("stopped");
+        assert!(matches!(error, ImportError::Cancelled), "{error}");
+    }
+
+    /// The ordinary path is untouched: nobody stopped anything, so the
+    /// project comes back whole.
+    #[test]
+    fn a_run_nobody_stopped_reads_the_whole_project() {
+        let scratch = Scratch::new(&[
+            ("001.jpg", "a photograph"),
+            ("002.jpg", "a photograph"),
+            ("003.jpg", "a photograph"),
+        ]);
+        let project = super::load(&scratch.0, &Accepting, &Cancel::new()).expect("loads");
+        assert_eq!(project.scenes.len(), 3);
     }
 }

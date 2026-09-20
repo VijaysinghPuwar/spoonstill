@@ -274,6 +274,138 @@ be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
 
+### State as of 2026-09-19 — the audit's work order, executed end to end
+
+**All eight steps of `AI Model/claude/plan.md` are done: D-180 through D-187.**
+Nothing in the work order was skipped, and the two items it rejected (row
+windowing, a thumbnail cache) are still rejected — D-185 records the
+measurement that keeps the first one rejected.
+
+| | what it was | measured |
+|---|---|---|
+| **D-180** | two sessions' media tests deleted each other's output | `[101, 0]` three of three → `[0, 0]` three of three |
+| **D-181** | Ctrl-C during the join published the film and exited **0** | exit 1, no film, and the destination's previous film untouched |
+| **D-182** | saving one narration read the project twice | **1,000 `ffprobe` spawns → 0**; 1.58 s → **0.054 s** |
+| **D-183** | `--ink-3` at 3.46–3.99:1, 42 sites; zero `:focus-visible` | every ink ≥ **4.59:1** on every surface it lands on |
+| **D-184** | a warm 500-scene render probed one silence file 500 times | **1,501 → 1,002** spawns; 4.80 s → **4.14 s** |
+| **D-185** | twelve keystrokes rebuilt the grid twelve times | **12 → 1**, and nine IPC previews → **1** |
+| **D-186** | Ctrl-C during validation took 1.09 s and blamed the photographs | **0.01 s**, and all three phases say *cancelled* |
+| **D-187** | a no-op move renamed all 500 files | **0.06 s → 0.01 s**, and no `ctime` moves |
+
+**The two worst defects were not the slow ones, they were the lying ones.**
+D-181's join reported success for a film the operator stopped. D-186's
+validation reported *"**7 problems** stop this render"* — then 7, then 6, then
+6, the count being however many `ffprobe` children the signal had killed, each
+surfacing as an unreadable photograph. And a cancelled pool said *"1 scene
+failed to render"*. Three surfaces, one sentence now.
+
+**Six times a test passed against the defect it was written for**, which is
+this file's recurring lesson arriving six more times. Each one is written up in
+its own decision; the shapes worth carrying:
+
+- **D-181** — deleting the pre-spawn cancellation check passed everything,
+  because the wait loop catches an already-set flag on its first pass and
+  answers identically. Fixed in the *input*, not the assertion: the `Tools`
+  names a binary that does not exist, so reading the flag before the process
+  boundary gives `Cancelled` and reading it after gives `BinaryMissing`.
+- **D-186** — making the retry pause uninterruptible passed (only a clock
+  distinguishes it), and making the child wait ignore the flag passed (the
+  stand-in answered instantly, so a wait that never blocks looks identical).
+- **D-186 again** — the blocking stand-in then failed against *working* code:
+  written as `sleep 30` the shell forks a grandchild that inherits the pipes,
+  so collecting the killed child's output blocks for the full thirty seconds.
+  `exec sleep 30`. **A stand-in whose process tree differs from the real
+  tool's is testing the stand-in.**
+- **D-185** — I wrote a false justification into a decision and a test to
+  enforce it: *"a debounce would postpone the redraw while somebody keeps
+  typing"* is true of `setTimeout` and **false of `requestAnimationFrame`**.
+  Measured both ways, identical. The test now pins the one property that can
+  silently undo the change (that it waits for a frame at all) and says why it
+  deliberately does not pin the other.
+- **D-187** — the first measurement of the fix said it was three times
+  *slower*, 0.35 s against 0.09 s. That was the release binary's own cold page
+  cache, one run after rebuilding it.
+
+**Two findings the audits did not have.** D-183: the contrast proposal solved
+for four backgrounds and there are ten — at the proposed values a hovered row
+in light mode is still 4.20:1, and hover is the state every row you are reading
+is in. D-186: the false problem count above.
+
+**Two things found and deliberately not acted on**, both recorded where they
+were found rather than fixed on the way past:
+
+- A cache entry truncated to 200 bytes is still a *structurally valid* WAV, so
+  `measure` accepts 0.001 s and 500 scenes render one frame each — a 16.7 s
+  film instead of 100 s. **Both binaries behave identically, so it predates
+  D-184.** It is checkable: a silent artifact's key *is* its sample count.
+  D-184 records it; it is a behaviour change and the author's call.
+- Nothing in this repo syntax-checks `app.js`. A broken edit there is silent
+  in a webview. `node --check` was run by hand on every change here.
+
+**`make gates` 39/39, `cargo test --workspace` 682 passed / 11 ignored,
+`make lint` green, `cargo audit --deny warnings` clean, and the D-132 Windows
+cross-check clean** — run after every one of the eight steps, not only at the
+end. `make lint` earned its keep at step 5 by catching a `type_complexity`
+error that `cargo check` had not.
+
+### State as of 2026-09-19 — two outside audits, checked claim by claim before any of it was believed
+
+**No code changed.** `AI Model/codex/` and `AI Model/gemini/` are audits written
+by other models against this exact commit; `AI Model/claude/` is the
+verification pass over both and the work order that came out of it. **Read
+`AI Model/claude/README.md` first** — it says which findings survived and which
+did not, and `AI Model/claude/plan.md` is where the next session starts.
+
+**Codex's audit is trustworthy; Gemini's architecture section is not.** Every
+Codex claim re-tested here reproduced, several to the digit: **1,501** ffprobe
+spawns on a cached 500-scene render (500 images + 500 audio + 500 segments + 1
+film, with all 500 audio probes naming *one* silence file), validation at 0.09 s
+and 1.32 s against their 0.096 and 1.297, contrast ratios within **0.02**
+computed by a different method, a no-op move at 0.06 s against their 0.0626.
+Codex also caught itself benchmarking worker counts in folders with different
+basenames — the motion-seed trap this file warns about twice — noticed the film
+hashes differed, and re-ran it. Gemini's three architectural findings are all
+dead: two propose code **already in the file** (D-174's `first_failed` check at
+`pool.rs:264`, D-173's image-hash memo — and Gemini's plain `HashMap` is the
+racy design D-173 rejects by name), and the third is answered by the comment
+sitting directly above the line it wants to change (`scene.rs:222`). Its four UI
+observations are accurate; only `:focus-visible` is worth taking.
+
+**The two defects worth acting on first, both measured here.**
+
+- **Ctrl-C during the join publishes the film and exits 0**, with nothing saying
+  a cancellation was asked for. Reproduced on a real 500-scene project with **no
+  injected delay** — Codex needed a 3-second one. `concat::concat` takes no
+  `Cancel` at all, so it cannot consult one; `scene.rs:569` already has the
+  right pattern one crate over. The window's Stop button reaches the same flag,
+  so the report will arrive as *"I pressed Stop and it made the video anyway."*
+  Import is the same gap more dully: SIGINT during validation takes **1.26 s**
+  to be obeyed at n=500 against **0.11 s** during the pool.
+- **Saving one narration validates the whole project twice**, and the cheap half
+  already exists: `still validate` on 500 scenes is **1.32 s**, `still validate
+  --no-probe` is **0.01 s**. `set_narration_inner` runs a full probing
+  `import::load` to read one field (`Mode::Convention`) and throws the rest
+  away; the page then calls `load(root)`, which validates again.
+
+**And the harness can still lie about the product.** Codex's first `make gates`
+scored M1 **7/8** and 8/8 on an isolated re-run —
+`crates/spoonstill-media/tests/common/mod.rs:49` builds a fixed
+`target/spoonstill-test-out/<test>` and wipes it on entry, so two sessions in
+one checkout destroy each other's output. This author runs several models in
+parallel terminals against this tree, which is why `AI Model/claude/plan.md`
+moves that fix from Codex's seventh position to its first: while it stands, any
+measurement any session takes can be wrong in either direction.
+
+**`make gates` 39/39 on this tree, one invocation, nothing re-run in
+isolation** — M0 8/8, M1 8/8, M2 23/23.
+
+**One trap from this session, and it was mine.** My first no-op-move test
+reported no change to any ctime and looked like a clean refutation of Codex. It
+was a false negative: `stat -f %c` is whole seconds and the effect is ~10 ms
+wide. With `%Fc` it is obvious. **A measurement whose resolution is coarser than
+the effect reports no effect** — the same shape as D-125 and D-154's checks that
+passed by finding nothing to check.
+
 ### State as of 2026-09-16 — the export was failing, and the evidence was invisible
 
 **D-178 and D-179, both read out of the operator's own `runs.csv` rather than
@@ -2148,7 +2280,7 @@ exact thing the top of this file warns about.
 
 Run `make gates` first: **M0 8/8, M1 8/8, M2 23/23**, plus `cargo fmt --check`,
 `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test
---workspace` (642 tests, 10 ignored — `make lint` also runs `shellcheck`
+--workspace` (682 tests, 11 ignored — `make lint` also runs `shellcheck`
 since D-175). Then `cargo audit --deny warnings` (D-129), which is
 new and is the one check that can fail without the code changing.
 
@@ -3108,7 +3240,23 @@ M3, writing `state.db`, or assuming resume needs one**, **D-162 before touching
 `atomic::Partial`, `sweep_partials`, `is_partial_of`, `concat::stopped_at`,
 `MediaError::JoinStopped`, or anything that writes beside a destination and
 renames**, **D-179 before giving a probe a constant timeout or removing the
-retry in `probe_inner`**, **D-155 before writing
+retry in `probe_inner`**, **D-187 before touching `renumber`,
+`already_in_place`, or `move_to`'s early return**, **D-186 before touching `Cancel`,
+`CANCEL_GRACE`, `wait_until_cancellable`, `Cancel::sleep`,
+`ImportError::Cancelled`, `AudioError::Cancelled`, `TtsError::Cancelled`,
+`film::Stopped`, or `Provider::speak`'s signature**, **D-185 before touching `onFrame`, an `input`
+handler, `previewToken` or `outputToken`**, **D-184 before touching `Measured`, `AudioCache`'s
+memo, `cached`, or anything that decides how often an artifact is probed**,
+**D-183 before touching `--1`/`--2`/`--3`, a
+`:focus-visible` rule, `.arrange`'s quietness, or the narration cell's role —
+and run `every_level_of_ink_is_readable_on_every_surface_it_lands_on` before
+believing any colour change**, **D-182 before touching `set_narration`,
+`EditedScene`, `edited_scene`, `SkipProbe`, or anything that decides how much
+of a project a window command reads**, **D-181 before touching `concat::concat`,
+`wait_for_join`, `publish`, `CANCEL_POLL`, or anything that decides whether a
+stopped run publishes a film**, **D-180 before touching `common::out_dir`,
+`sweep_old_runs`, `KEEP_RUNS`, `SWEEP_GRACE`, or anywhere a test names a fixed
+path under `target/`**, **D-155 before writing
 a test that spawns a program, or naming a binary a `/bin/` path**, **D-156
 before touching `create_project`, `newProject`, `Session`'s root, or anything
 that decides which project the window has open**, **D-157 before touching

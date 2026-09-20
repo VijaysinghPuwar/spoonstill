@@ -16,8 +16,6 @@
 //! trust and skip.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use spoonstill_core::captions::SubtitleSpec;
@@ -33,12 +31,9 @@ use crate::probe::{self, DEFAULT_PROBE_TIMEOUT, ProbeResult};
 use crate::profile::{self, SegmentProfile};
 use crate::tools::Tools;
 
-/// How long a cancelled render may take to finalize before it is killed.
-///
-/// FFmpeg needs a moment to flush and close the MP4 after `q`. Two seconds is
-/// generous for that and short enough that a user pressing Ctrl-C does not
-/// wonder whether it worked.
-pub const CANCEL_GRACE: Duration = Duration::from_secs(2);
+/// Re-exported for the same reason as [`Cancel`]: it belongs with the ladder
+/// it bounds, and every `scene::CANCEL_GRACE` in the tree still resolves.
+pub use crate::command::CANCEL_GRACE;
 
 /// Encoder settings that affect the output, and therefore the cache key (D-043).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,30 +138,12 @@ pub struct RenderedScene {
     pub probe: ProbeResult,
 }
 
-/// A cancellation flag shared with whoever handles Ctrl-C (D-045).
-///
-/// Deliberately trivial: the interesting part of cancellation is the ladder in
-/// [`crate::command::FfmpegChild::cancel`] and the cleanup below, not the
-/// signalling.
-#[derive(Debug, Clone, Default)]
-pub struct Cancel(Arc<AtomicBool>);
-
-impl Cancel {
-    /// A fresh, unset flag.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-    /// Request cancellation. Safe to call from a signal handler.
-    pub fn request(&self) {
-        self.0.store(true, Ordering::SeqCst);
-    }
-    /// Whether cancellation has been requested.
-    #[must_use]
-    pub fn is_requested(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
-    }
-}
+/// Re-exported so every `spoonstill_media::scene::Cancel` in the tree still
+/// resolves. It lives in [`crate::command`] now, beside the waiting it
+/// interrupts (D-186) — by the time speech and the join both needed it, a
+/// cancellation flag defined in the scene renderer was the wrong home for a
+/// type three other modules depend on.
+pub use crate::command::Cancel;
 
 /// The caption bands for one scene, written to disk for the length of the run.
 ///

@@ -69,6 +69,11 @@ let themesLoaded = false;
 // The last preview asked for, so a burst of clicks paints the last one rather
 // than whichever request happens to come back last.
 let previewToken = 0;
+// The same net for the destination, which crosses the same boundary and had
+// none (D-185). Coalescing makes two answers overlapping rarer, which makes a
+// stale path on screen harder to notice rather than impossible — and the path
+// on screen is the one thing the Output screen exists to be right about.
+let outputToken = 0;
 // Why a render cannot start for a reason that is about this machine rather
 // than about this project — a missing FFmpeg. Empty when there is none
 // (D-105). Asked once per project open, not once per photograph (D-103).
@@ -584,7 +589,22 @@ function drawRows() {
       cell.classList.add("blank");
     }
     if (scene.source !== "file" && project.convention) {
+      // A real control, not a `<span>` with a click handler (D-183). It had
+      // no `tabindex` and no `role`, so writing a narration — the one thing
+      // this grid exists to let you do — could not be reached from the
+      // keyboard at all, and a screen reader announced it as text.
+      cell.tabIndex = 0;
+      cell.setAttribute("role", "button");
+      cell.setAttribute("aria-label", `Narration for scene ${scene.id}`);
       cell.addEventListener("click", () => editNarration(scene, cell));
+      cell.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          // Space scrolls the grid otherwise, which moves the row out from
+          // under the editor that is about to open.
+          event.preventDefault();
+          editNarration(scene, cell);
+        }
+      });
     }
 
     tr.querySelector(".c-resolved").innerHTML = resolved(scene);
@@ -607,6 +627,16 @@ function resolved(scene) {
     return `${scene.seconds.toFixed(3)}<span class="frames">declared</span>`;
   }
   return `<span class="frames">—</span>`;
+}
+
+// Put the keyboard back on the row that was being edited.
+//
+// The cell the editor replaced is detached by the redraw that follows a save,
+// so this finds the new one rather than holding the old. A filter that now
+// hides the row leaves nothing to focus, which is correct and is why this is
+// optional chaining rather than an assertion.
+function refocusNarration(scene) {
+  document.getElementById("scene-" + scene.index)?.querySelector(".narration")?.focus();
 }
 
 // One row, edited in place. Enter or blur saves; Escape puts it back.
@@ -649,13 +679,37 @@ function editNarration(scene, cell) {
     settled = true;
     const text = input.value;
     input.replaceWith(cell);
-    if (!save || text === scene.narration) return;
+    // Escape, or nothing typed: the row is unchanged and the keyboard stays
+    // on it. Without this an operator is dropped at the top of the document
+    // after every edit (D-183).
+    if (!save || text === scene.narration) {
+      cell.focus();
+      return;
+    }
     try {
       setStatus("Saving…");
-      await invoke("set_narration", { root: project.root, scene: scene.id, text });
-      await load(project.root);
+      // The command answers with the row it changed, and that row replaces
+      // this one (D-182). Reloading the whole project here read all 500
+      // scenes and probed every file twice over — 2.6 s at n=500 — to show
+      // one line of text the operator had just typed themselves.
+      //
+      // Nothing here decides what the row should say: every field comes from
+      // Rust, off the same function that builds the grid (D-010).
+      const edited = await invoke("set_narration", { root: project.root, scene: scene.id, text });
+      if (edited) {
+        Object.assign(scene, edited);
+        drawRows();
+        drawStatus();
+      } else {
+        // Rust could not find the scene it had just written to, which means
+        // something changed underneath us. Its cheap answer would be a
+        // confident wrong one, so ask for the whole project.
+        await load(project.root);
+      }
+      refocusNarration(scene);
       setStatus(text.trim() ? `Scene ${scene.id} will be spoken.` : `Scene ${scene.id} is silent again.`);
     } catch (error) {
+      cell.focus();
       setStatus(String(error));
     }
   };
@@ -1442,15 +1496,21 @@ function chooseFormat() {
 // and refuses to render while the answer is a complaint.
 async function refreshOutput() {
   if (!project) return;
+  const token = ++outputToken;
   outDir = el("out-dir").value;
   outName = el("out-name").value;
+  let full = "";
+  let problem = "";
   try {
-    outFull = await invoke("resolve_output", { dir: outDir, name: outName });
-    outError = "";
+    full = await invoke("resolve_output", { dir: outDir, name: outName });
   } catch (error) {
-    outFull = "";
-    outError = String(error);
+    problem = String(error);
   }
+  // A slower earlier answer must not paint over a faster later one — the same
+  // rule `drawPreview` has carried since D-106.
+  if (token !== outputToken) return;
+  outFull = full;
+  outError = problem;
   el("out-full").textContent = outFull || "—";
   el("out-problem").textContent = outError;
   el("out-problem").hidden = !outError;
@@ -1766,6 +1826,46 @@ async function watchDrops() {
 
 const guard = (promise) => Promise.resolve(promise).catch((error) => setStatus(String(error)));
 
+// Run `fn` at most once per animation frame, however often this is called
+// (D-185).
+//
+// Every `input` handler below fires on each keystroke, and each one either
+// rebuilds a list or crosses the process boundary: `drawRows` empties the
+// scenes table and builds it again — about 8,500 elements at 500 scenes —
+// `drawVoices` does the same to the provider's whole catalogue, and
+// `drawPreview` and `refreshOutput` each ask Rust. A fast typist outruns all
+// four.
+//
+// The first call in a frame schedules the work and the rest are dropped.
+//
+// **Cancel-and-reschedule is the same thing here, and that was measured
+// rather than argued.** The obvious worry about a debounce — that it
+// postpones the redraw for as long as somebody keeps typing — is true of a
+// `setTimeout` debounce and **not** of this one: `cancelAnimationFrame`
+// followed by `requestAnimationFrame` inside one frame still runs on the
+// next, so both forms redraw exactly once per frame while the keys are going
+// down. Driven through this file in node, twelve keystrokes over twelve
+// frames gave twelve redraws either way, and twelve inside one frame gave
+// one. This form is kept because it holds no handle and cannot cancel a
+// callback that has already begun, not because it behaves differently.
+//
+// Nothing stale can be drawn, and that is why no token is needed here: every
+// `fn` reads the field's **current** value when it runs, not a value captured
+// when it was scheduled. What is dropped is intermediate states nobody sees.
+// The two handlers that cross the process boundary carry a token as well,
+// because an answer can arrive after a later question.
+function onFrame(fn) {
+  let queued = false;
+  return () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      fn();
+    });
+  };
+}
+
 el("home").addEventListener("click", goHome);
 el("rail-home").addEventListener("click", goHome);
 el("fill-back").addEventListener("click", goHome);
@@ -1782,7 +1882,7 @@ el("add").addEventListener("click", chooseMedia);
 el("render").addEventListener("click", render);
 el("cancel").addEventListener("click", cancel);
 el("recheck").addEventListener("click", () => project && load(project.root));
-el("search").addEventListener("input", () => { drawRows(); drawStatus(); });
+el("search").addEventListener("input", onFrame(() => { drawRows(); drawStatus(); }));
 el("play").addEventListener("click", () => guard(invoke("open_film")));
 el("reveal").addEventListener("click", () => guard(invoke("reveal_project")));
 el("reveal-2").addEventListener("click", () => guard(invoke("reveal_project")));
@@ -1790,15 +1890,15 @@ el("reveal-2").addEventListener("click", () => guard(invoke("reveal_project")));
 el("preview").addEventListener("click", () => preview(null));
 el("pin-voice").addEventListener("click", () => guard(pinVoice()));
 el("voice-default").addEventListener("click", () => chooseVoice(null));
-el("voice-search").addEventListener("input", drawVoices);
+el("voice-search").addEventListener("input", onFrame(drawVoices));
 el("subs-default").addEventListener("click", resetSubtitles);
 el("subs-position").addEventListener("change", () => { drawPreview(); rememberChoices(); });
-el("subs-text").addEventListener("input", drawPreview);
+el("subs-text").addEventListener("input", onFrame(drawPreview));
 el("locale").addEventListener("change", drawVoices);
 el("gender").addEventListener("change", drawVoices);
 
-el("out-name").addEventListener("input", () => guard(refreshOutput()));
-el("out-dir").addEventListener("input", () => guard(refreshOutput()));
+el("out-name").addEventListener("input", onFrame(() => guard(refreshOutput())));
+el("out-dir").addEventListener("input", onFrame(() => guard(refreshOutput())));
 el("out-browse").addEventListener("click", () => guard(browseOutput()));
 el("out-default").addEventListener("click", () => guard(resetOutput()));
 el("out-aspect").addEventListener("change", chooseFormat);

@@ -8020,3 +8020,742 @@ damaged. Compared against a control project of the **same folder name**, because
 `project_id` is the basename and it seeds the move (D-035) — the first attempt at
 that comparison used a differently-named folder and reported a difference that
 was correct and meaningless, which is D-146's own trap repeated.
+
+### D-180 — A test invocation owns its output, so two sessions cannot delete each other's · Accepted
+
+**Found in two outside audits of 2026-09-19 and put first in the work order,
+ahead of six findings about the product, because while it stands every one of
+those findings is measured on an instrument that can lie.**
+
+`crates/spoonstill-media/tests/common/mod.rs` built
+`target/spoonstill-test-out/<test>` — a fixed path keyed on nothing but the test
+name — and `remove_dir_all`'d it on entry so a rerun could not pass on a file
+the previous run left. Two concurrent copies of one test in one checkout
+therefore delete each other's output mid-flight.
+
+**Reproduced here before it was believed, three times out of three.** A second
+copy of `the_production_recipe_at_1080p_is_frame_exact`, started the moment the
+first copy's `.partial-` file appeared (observed at 0.08–0.11 s, not guessed at
+with a sleep), gives `[101, 0]`:
+
+```
+the production recipe renders: Exit { program: "ffprobe", …
+  /…/spoonstill-test-out/production-1080p/.segment.mp4.partial-7253-0.mp4",
+  code: Some(1), stderr: "… No such file or directory" }
+```
+
+The first copy's `ffprobe` is looking for a temporary the second copy's
+`remove_dir_all` has just taken. Nothing about the product is wrong; the harness
+reports it broken.
+
+**Why this is not a tidiness finding.** This author runs several models in
+parallel terminals against this one tree — three audit directories written
+against one commit is the evidence. One audit's own `make gates` scored M1
+**7/8** and 8/8 on an isolated re-run of the failing test, which is this defect
+exactly. **A gate suite that can fail for a reason outside the product is a gate
+suite whose failures get explained away**, and this project has already written
+that lesson down twice (D-153's gate that passed while running no command,
+D-154's resume gate that measured nothing).
+
+`CARGO_TARGET_DIR` is not a workaround: `workspace_root()` is derived from the
+manifest path, not from the target directory.
+
+**The run id goes under the test name, not above it.** The directory a human
+looks in is still the one named after the test that failed —
+`spoonstill-test-out/production-1080p/run-<pid>-<millis>/`. It is `pid` **and**
+wall clock because neither alone is enough: pids are recycled, and two processes
+can start inside one millisecond.
+
+**A `TempDir` is the obvious fix and is wrong.** These artifacts exist to be
+looked at *after* a panic, and a temporary that vanishes on unwind removes the
+evidence precisely when it is wanted. That is the whole reason this writes under
+`target/`, and it is why the acceptance test asserts the two markers are still
+on disk after both copies have exited rather than only that both exited 0.
+
+**Per-invocation directories trade a race for a disk unless something collects
+them**, and the fixed path at least held exactly one generation. So the sweep:
+the newest **three** runs of a test survive and the rest go — but **only once
+they have gone ten minutes untouched**. Both guards are load-bearing and
+neither is sufficient alone. Without the count, `target/` grows without end,
+and this tree is already 37 GB. Without the grace window, a busy afternoon of
+four parallel sessions has one session deleting another's output the moment a
+fourth run starts — which is the defect being fixed, wearing the fix's clothes.
+**A delayed collection is the right way round** (D-178's sweep, same
+judgement). Anything under a test's directory that is not a run directory is
+from the layout before this decision and is collected on the same terms, rather
+than sitting there forever.
+
+**Ten minutes is measured, not picked.** The grace was an hour first, and an
+hour is not a bound: this session's own mutation testing left **58**
+`motion-matrix` runs and **188 MB**, not one of them collectable. The longest
+test process in this crate is `caption_hostile_text` at **34 s** and the whole
+media suite is **66 s**, and a live run's directory is touched as it writes — so
+ten minutes clears anything real by more than an order of magnitude. The honest
+bound is therefore *three generations, plus whatever an active ten minutes
+produces*, and it is stated that way rather than as a flat three.
+
+That number is pinned by a test, because the assertion that recent runs survive
+passes for **any** non-zero window: a grace of one second would satisfy it while
+being useless. Mutating the constant to `1s` fails
+`the_sweep_leaves_a_recent_run_alone_however_many_there_are` on its floor
+assertion, and mutating it to zero fails it on the behaviour. The tests drive
+the shipped constant rather than a literal of their own, so tightening it
+cannot pass silently.
+
+**The acceptance test spawns two copies of itself**, which is D-155's pattern
+for D-155's reason: no shell, no installed tool, arguments still a vector, and
+the one program guaranteed to exist wherever these tests run. The overlap is a
+**fact rather than a sleep** — neither copy proceeds until both have announced
+themselves in a rendezvous directory that is deliberately **outside** the
+directories under test, because a rendezvous living inside them would be wiped
+by the very defect being measured and the test would fail for the wrong reason.
+The twenty-second bound is D-149's bargain: a concurrency claim with no clock in
+it fails as a deadline. And the exit status is worth nothing on its own — a
+filter that matches nothing runs no tests and exits 0 (D-155) — so `1 passed` is
+asserted too.
+
+**Run against the unfixed code and seen to fail**, naming the defect rather than
+a symptom: *"…/concurrent-namespace/marker holds another copy's pid: two
+concurrent runs of one test shared one output directory"*.
+
+**The sweep's two bounds are parameters, not constants, at the point a test
+drives them.** Every run directory on this machine is seconds old, so a test
+calling the shipped function would assert the right property on an input that
+cannot exhibit the behaviour — D-116's trap, and D-144's answer to it.
+**Four mutations, each caught by exactly one test**: dropping the grace guard
+fails only `the_sweep_leaves_a_recent_run_alone_however_many_there_are`; never
+collecting the surplus, never collecting a pre-D-180 leftover, and keeping the
+oldest instead of the newest each fail only
+`the_sweep_keeps_the_newest_runs_and_collects_the_rest`. Its two batches are
+separated by more than a second because the rule is *by modification time* and a
+filesystem coarser than the gap would order them arbitrarily — a test that ties
+is a test people re-run (D-121).
+
+**`media_dir()` is deliberately unchanged.** It is a content-named cache shared
+on purpose, written through `build_cached`'s temporary-then-rename, and its own
+comment already records the Windows sharing violation that taught it that. Two
+sessions sharing a built fixture is the design; two sessions sharing an output
+directory is the defect.
+
+### D-181 — The join is stoppable, and a run the operator stopped publishes nothing · Accepted
+
+**The one defect in either 2026-09-19 audit that reports success for work the
+operator cancelled.** `concat::concat` took no [`Cancel`] and so could not
+consult one: it waited with `child.wait_until(CONCAT_TIMEOUT)`, which reads a
+clock and nothing else, and then renamed the film into place. `grep -rn Cancel`
+over the three crates reached `scene.rs`, `film.rs`, `render.rs` and `pool.rs`
+and **nothing else** — not `concat.rs`, not either `audio.rs`, not `import/`,
+not the whole of `spoonstill-tts`.
+
+**Reproduced end to end on a real 500-scene project, cache warm, no injected
+delay.** A `SIGINT` sent the moment `joining 500 segments` appears:
+
+```
+joining marker seen: True
+exit=0   reacted in 0.49s
+film published: True  10,985,610 bytes
+  500 scenes, 3000 frames, 100.021s (expected 100.000s)
+```
+
+Exit **0**, a film on disk, and nothing anywhere in the output saying a
+cancellation was ever asked for. Afterwards:
+
+```
+exit=1   reacted in 0.46s
+film published: False
+still: cancelled — finished segments are kept, so the next run resumes from them
+```
+
+**The signal goes to the parent only, and that is not a detail.** The first
+attempt used `killpg`, which signals FFmpeg too — FFmpeg then dies of the
+signal, the join fails for an unrelated reason, and the run exits 1 looking
+correct. **That reproduction would have refuted the finding.** The case that
+matters is the flag being set with nothing else touched, which is exactly what
+the window's Stop button does (`cancel_render` → `cancel.request()`, no signal
+anywhere), and this author tests through the installed window. So the report
+would have arrived as *"I pressed Stop and it made the video anyway."*
+
+**Three checks, at three different points, and each is load-bearing.**
+
+1. **Before the process starts.** A Ctrl-C landing between the pool returning
+   and the join beginning used to start an FFmpeg it would immediately have to
+   kill.
+2. **While it runs**, at `scene.rs`'s cadence. That loop has polled `Cancel`
+   since D-045; this is it arriving at the one process boundary that never got
+   it. The `CONCAT_TIMEOUT` ceiling is kept and still reported exactly as
+   `wait_until` would.
+3. **Immediately before the rename**, which is the window the defect actually
+   lives in. Everything above it writes to a temporary the `Partial` guard
+   removes; the rename is the only thing an operator ever sees. At 500 scenes
+   `validate` spends seconds probing the finished film, and a cancellation
+   landing in there used to publish it.
+
+`publish` is its own function for the third check rather than two statements
+inline, because **a test can hold a function open and cannot hold open a gap
+between two lines**. It is the one irreversible step in the join and it now
+says so.
+
+**A cancelled join is `FilmError::Cancelled`, not a media failure.** That
+variant already existed, carried the right sentence — *"finished segments are
+kept, so the next run resumes from them"* — and **nothing had ever constructed
+it**: the pool's own cancellation collapses to one line inside `collect`, so
+the only path that could have reached it was this one, and this one exited 0.
+
+**Verified against the other three things a stopped export must not do:** a
+film already at that destination is byte-identical afterwards (yesterday's
+export survives), no `.partial-` litter is left, and the next render reuses all
+500 segments and publishes normally.
+
+**Each of the three checks is caught by exactly one test, and the third one
+took two attempts.** Deleting the mid-join check makes
+`a_running_join_notices_a_cancellation` fail on its deadline; deleting the
+publish check fails the two tests that assert its two consequences; deleting
+the pre-spawn check **passed everything** at first, because the wait loop
+catches an already-set flag on its first pass and answers identically. That is
+D-116 in its purest form — a test written for one guard, satisfied by another.
+The fix is the input, not the assertion: the `Tools` in that test names a
+binary **that does not exist**, so reading the flag before the process boundary
+returns `Cancelled` and reading it after returns `BinaryMissing`. One input,
+two distinguishable answers.
+
+**The mid-join test stalls a real join on a FIFO**, the instrument D-179 used
+on `ffprobe`, and its rendezvous is exact rather than a sleep: opening a FIFO
+for writing blocks until a reader opens it, so *our `open` returning is FFmpeg
+having started to read*. A sleep there would sometimes set the flag before the
+process existed and the pre-spawn check would answer instead — passing while
+proving nothing. Against the unfixed loop the test does not fail, it **hangs**
+for `CONCAT_TIMEOUT`'s hour, so it carries its own 30-second deadline and that
+deadline is the failure message (D-149). Unix only, and said out loud on
+Windows rather than compiling to nothing (D-179's rule); the other two checks
+are unit-tested on every platform.
+
+**Deliberately not done here:** import, audio and speech still take no
+`Cancel`. That is the larger patch — it changes public signatures in three
+crates — and it is a *delay*, not a lie: SIGINT during validation is obeyed in
+1.26 s at n=500 against 0.11 s during the pool. The join was split out because
+it is the only one of the three that reports success for work that was stopped.
+
+### D-182 — Saving one line reads the project's shape, not its media · Accepted
+
+**Measured before and after, by counting processes rather than seconds**, on a
+500-scene project:
+
+| one narration saved | `ffprobe` spawns | the command |
+| --- | ---: | ---: |
+| as it shipped | **500**, and another 500 when the page reloaded | 1.58 s |
+| now | **0** | **0.054 s** |
+
+A thousand processes per keystroke-save, gone. `set_narration_inner` ran a full
+probing `import::load` and used the entire result for one thing —
+`if !matches!(project.mode, Mode::Convention)` — then threw it away and wrote a
+text file. The page then called `load(project.root)`, which validated the whole
+project again. Two full reads of five hundred scenes to record a sentence the
+operator had just typed themselves.
+
+**The cheap stage already existed; what was missing was a caller that stopped
+there.** The folder scan, the YAML, the mode decision, the pairing and every
+pure validation rule all run before the probe pool at `import/mod.rs:420`.
+`still validate` on 500 scenes is **1.32 s** and `still validate --no-probe` is
+**0.01 s**, so the probes are essentially the entire cost of reading a project
+and everything before them is free.
+
+**`SkipProbe` moved out of the CLI into `spoonstill_app::import`.** It was
+behind `--no-probe` and nothing else; it now has two callers, and this codebase
+has already paid once for one convention implemented twice (D-111). What it
+gives up is stated where it is defined rather than where it is used: nothing is
+measured, so a truncated photograph is believed and no D-145 undersized warning
+can be produced. **A caller that reports problems to an operator wants
+`ProbeCheck`; a caller that wants to know which scenes exist wants this one.**
+
+**The command answers with the row it changed.** That is what lets the page
+stop asking for the project back, and it is what keeps the rule in Rust
+(D-010). `EditedScene` is deliberately **not** a whole `SceneView`: `index`,
+`image`, `image_path` and `audio` cannot move when a text file is written, and
+returning them from a probe-free read would be returning fields that can
+disagree with the grid — a scene whose photograph is broken is dropped by a
+probing read and kept by a probe-free one, so the two disagree about `index`
+while agreeing about every field that comes from the scene's own spec.
+
+Those five fields are read by one function, which `validate_project` now calls
+too. A row that was edited and a row that was reloaded agree **by
+construction** rather than by two people remembering the same rule — and the
+rule is not obvious: a `.txt` beside a supplied recording is that scene's
+**caption**, not its narration (D-106), so the badge stays `file` and the words
+go somewhere else entirely.
+
+**A scene the folder does not have is now refused.** Unreachable from the grid,
+which can only send an id off a row it drew — and reachable from a webview,
+which is what the check is for. Without it an unknown id wrote a `NNN.txt` that
+paired with nothing and surfaced later as an unpaired narration with no trace
+of where it came from. It is checked against the **scenes the importer can
+see**, which is deliberately the permissive set: a scene whose photograph is
+broken must still be editable, because writing what it should say is part of
+fixing it.
+
+**`None` means ask for everything.** If Rust cannot find the scene it has just
+written to, something changed underneath; its cheap answer would be a confident
+wrong one, so the page falls back to a full reload.
+
+**The trade, stated rather than discovered.** Between a save and the next
+Re-check, the page's *problem list* is as of the last full read — a narration
+in a script nothing can draw (D-157) will not appear there until then. It
+cannot reach a film: `render_project` does its own probing `import::load` and
+refuses on errors, and warnings arrive through `FilmEvent::Warned` before the
+pool starts (D-145). The Re-check button and the export both still do the whole
+job.
+
+**The tests do not count processes, and that is on purpose.** Counting them
+needs an environment variable, which is process-global and races every other
+test in the binary. **The photographs in these tests are text files instead**:
+a probing read refuses them, drops both scenes, and the save fails with *"there
+is no scene 001"*; a probe-free read keeps them and the save works. One input,
+two answers, no environment and no process table. Swapping `SkipProbe` back for
+`ProbeCheck` fails three tests verbatim, and has been seen to. Said out loud in
+the test: on a machine with **no** `ffprobe` it would pass either way, because
+`probes` is then false and every extension is believed — every CI leg here
+renders real media, so every CI leg has FFmpeg.
+
+**The page half was driven through the shipped `app.js` in node behind a stub
+DOM**, the way D-166 and D-171 were checked, because a source assertion cannot
+say what the page *does*. The reported sequence — open the narration cell,
+type, press Enter — invokes exactly one command:
+
+```
+as it shipped:  set_narration, validate_project, voice_choice, …   (the reload cascade)
+now:            set_narration
+now, on null:   set_narration, validate_project, voice_choice, …   (the fallback, correctly)
+```
+
+and the row on screen afterwards is the row Rust returned, badge, voice,
+caption and all.
+
+**Six mutations, each caught.** Restoring the probe (3 tests), deleting the
+scene-exists check (1), never returning the row (3), a recording's words
+becoming its narration (1), and on the page: putting the reload back (1) and
+never applying the returned row (1). The page's two halves are asserted
+together because **either alone passes against the defect** — keeping the
+reload *and* applying the row is slower than before, and applying nothing while
+dropping the reload leaves the operator's own sentence off the screen they just
+typed it on.
+
+### D-183 — Every level of ink is readable, and the keyboard can see where it is · Accepted
+
+**Four accessibility defects in the window, each measured rather than
+eyeballed, and now each held by a test that computes the number instead of
+restating it.**
+
+**`--ink-3` was below the AA minimum everywhere, and it is used 42 times.**
+Recomputed here from the `oklch()` tokens rather than sampled off a rendered
+canvas — an independent method from the audit's, agreeing **within 0.02**:
+
+| `--ink-3` on | dark | light |
+| --- | ---: | ---: |
+| page | 3.99 | 3.46 |
+| panel | 3.81 | 3.81 |
+| raised | 3.61 | 3.63 |
+| grid | 3.93 | 3.87 |
+
+`--ink-2` is already 6.52–7.41:1 in both themes, so there is no palette
+problem — only the one token is short, which is what makes this two numbers
+rather than a triage of 42 sites.
+
+**The audit's proposed values are not enough, and finding that out is the
+substance of this decision.** It solved for four backgrounds. There are
+**ten**, and `--ink-3` really lands on eight of them: `--hover` through
+`.grid tbody tr:hover td` and `.projects li:hover`, `--eb` through
+`.grid tr.problem td`, `--in` through the fields, `--c` through the cards. At
+the proposed `0.598` / `0.541` a hovered row in light mode is **4.20:1** and a
+problem row is **4.34 / 4.35** — still under. **Hover is not an edge case in a
+grid: it is the state every row an operator is reading happens to be in.**
+
+So the values are solved against every surface the ink can actually land on:
+**dark `0.545 → 0.612`, light `0.605 → 0.520`**, worst case **4.59:1** in both
+themes with about 2% of headroom. The hierarchy survives — 16.9 / 7.4 / 5.3
+dark, 15.3 / 6.5 / 4.9 light — and a test asserts that too, because the
+cheapest way to satisfy a contrast rule is to make all three tokens the same.
+
+**`--accent-soft` is the one surface no value clears**, and it is fixed where
+it happens rather than by moving the token further and flattening the series:
+a selected voice row steps its secondary text up to `--ink-2`. That is not an
+invention — **`.chip.on .n` already did exactly this, on exactly that
+background**, before any of this. A selected row is the row being read, so its
+metadata being *more* legible is right anyway. The rule is asserted by a test
+of its own, because the contrast test's omission of that surface is only
+honest while it exists.
+
+**`.arrange { opacity: 0.42 }` composited its label to 2.19:1 dark and 1.98:1
+light** — enabled controls that read as disabled, in the column an operator had
+already failed to find once (D-101). The comment above it argues correctly that
+they must be visible at rest; 0.42 is simply the wrong instrument. **The
+transparency is what made the number meaningless, so the transparency is what
+went**: `--ink-2` at rest (7.06 / 7.18) is still a step below the row's own
+text, and the whole group steps up to full ink under the pointer or focus. The
+genuinely disabled buttons keep their own `opacity: .3` and stay plainly
+distinct — WCAG exempts them, and that is the one thing in this column meant to
+be indistinct.
+
+**The stylesheet had zero `:focus-visible` rules.** Three selectors set
+`outline: none` and tinted a border instead, which for somebody who cannot see
+where the caret is removes the only indication of where they are. Each now has
+a `:focus-visible` companion that puts a real ring back, and **nothing changes
+for the mouse**. The test does not look for the rules: it finds every selector
+that gives up the ring and requires the same selector back with
+`:focus-visible`, so a fourth one added tomorrow is caught.
+
+**The narration cell was a `<span>` with a click handler** — no `tabindex`, no
+`role` — so the one thing the scenes grid exists to let an operator do could not
+be done without a mouse, and a screen reader announced it as text. It is a
+`role="button"` with `tabindex="0"`, Enter and Space open the editor (Space
+with `preventDefault`, or the grid scrolls out from under the editor about to
+open), and **focus goes back to the row when editing ends** — including the
+Escape and error paths, or every edit drops the keyboard at the top of the
+document. The redraw detaches the cell, so the focus is restored by finding the
+new one.
+
+**Driven through the shipped `app.js` in node behind a stub DOM**, the whole
+keyboard path:
+
+```
+cell tabIndex: 0   role: button   label: Narration for scene 001
+Enter opened an editor: true   default prevented: true
+commands invoked: [ 'set_narration' ]
+focused after the save: .narration
+```
+
+**Six mutations, each caught by exactly one test:** the palette as it shipped
+(names the surface and the ratio), the series flattened to pass by cheating,
+the focus ring taken away again (names the selector to add), the arrange
+opacity restored, the cell returned to a plain span, and the accent-soft
+step-up removed.
+
+**The contrast arithmetic is a second implementation, in the test, on
+purpose.** Thirty lines of oklch-to-sRGB and WCAG luminance rather than a
+crate: the window has no build step and no dependencies of its own, and a
+number the design was chosen against is worth exactly what an independent
+computation of it says — D-172's golden vector, same reasoning. The surfaces
+are **listed** rather than derived, because which background a piece of text
+can sit on is a fact about the markup, and each entry says which rule puts it
+there.
+
+**Deliberately not taken:** Gemini's `::-webkit-scrollbar` styling and
+`transform: scale(0.98)` on `:active` are cosmetic and cannot be verified on
+this machine (the scrollbar argument is specifically about WebView2). Its
+`tabular-nums` on `.l-detail` is refused outright: that element is already
+`var(--mono)`, and a monospace face has fixed-width digits by definition, so it
+prevents jitter that cannot occur.
+
+### D-184 — An artifact is measured once a run, not once a scene · Accepted
+
+**Measured on a 500-scene project, warm cache, one binary against the other,
+same fixture state:**
+
+| | `ffprobe` spawns | of which the shared silence | warm render |
+| --- | ---: | ---: | ---: |
+| before | **1,501** | **500** | 4.80 s |
+| after | **1,002** | **1** | **4.14 s** |
+
+The 1,501 is the audit's count reproduced to the digit: 500 images, 500
+segments, the film, and **five hundred probes of one silence file**. Many
+scenes resolving to one artifact is the *ordinary* case here — one recording
+used throughout, one line repeated, a folder of silent stills — which is D-108's
+own observation arriving one layer along. D-108 stopped the artifact being
+*made* sixteen times; every scene then measured it anyway.
+
+**The wall clock is 0.66 s, and the estimate said 1.2–1.6 s.** Eight
+interleaved runs, medians 4.80 → 4.14, and the two ranges do not overlap
+(before 4.68–5.46, after 3.96–4.25). Interleaved rather than batched because
+this machine has an ordinary desktop load on it and a benchmark that measures
+one column before the other measures the drift (D-162). **The estimate assumed
+the saved probes were on the critical path in proportion, and they were not:**
+the 1,002 that remain are the image and segment probes in the segment stage,
+and D-146 overlaps the audio stage with it, so a third of the probes were
+already hidden behind work that had to happen anyway. That explanation is a
+hypothesis; the 0.66 s is the fact, and it is what is reported.
+
+**It is not a trust cache, and the distinction is the whole of the safety
+argument.** The memo lives on one `AudioCache`, which is built once per render,
+so it remembers nothing across runs and nothing across projects. Every artifact
+is still measured — once — by the same `audio::measure` that re-asserts the
+normalization profile. What is reused is the evidence of a check made seconds
+ago, **in this process, by this process, on a file only this process may
+write**: two renders of one project are refused by `render.lock` (D-113).
+D-110 records what reusing something on weaker evidence than a fresh check
+costs, and this is not that.
+
+**Keyed on the kind as well as the key.** `key_lock` keys on the `u64` alone
+and is right to — a collision there costs two unrelated artifacts a needless
+queue. A collision **here** would hand one scene another scene's path and
+duration, which is a film of the wrong length reported as correct. The pair is
+the same one that names the file on disk.
+
+**Single-flight, in the shape this codebase already uses twice** (D-108,
+D-173): the map lock is held only long enough to claim a cell, and the cell
+lock is held across the probe. Two workers wanting one artifact queue behind
+each other and share one answer; two wanting different artifacts never meet,
+which is what keeps D-108's promise that the fast path does not serialize the
+run.
+
+**The producer's own measurement counts.** `spoonstill_media::audio`'s `finish`
+probes the temporary before renaming it, so the number a cache *miss* hands
+back is a measurement of the same bytes a reader would probe — not a computed
+length, which would break D-021. Without remembering it, the scene that made
+the artifact would leave the next one to probe it anyway.
+
+**Four mutations, each caught by exactly one test**, and the measurement is a
+parameter so the tests can *count* it (D-144's shape, D-173's precedent) —
+what this exists for is how many processes a render spawns, and nothing
+observable from outside can show that. Removing the memo counts 500 instead of
+1; remembering a failure hands the second scene the first one's failure;
+keying on the `u64` alone hands one kind the other's duration; and holding the
+map lock across the measurement **fails on a ten-second deadline** with
+*"only 1 of 2 measurements were ever in flight at once"*. That last one was a
+`Barrier` first, which **hung the whole test run** instead of saying why —
+D-149's rule, and it took a second pass to get right.
+
+**Gate 4c grew rather than a twenty-fourth being added** (D-177's shape): it
+already rendered sixteen scenes sharing one narration with no voice service,
+which is the exact input. It now runs that render a second time, warm, with
+`SPOONSTILL_FFPROBE` pointed at a counting stand-in, and asserts the shared
+artifact was probed **once**. Against the unfixed code: *"the one shared
+narration was probed 16 times, not once"*. The stand-in is one bash file with
+a two-line `.cmd` trampoline into it on Windows, built exactly like
+`stub_voice_service` for exactly its reasons (D-155, D-176), and the borrow is
+returned on every path through a wrapper. The gate also asserts **at least 16
+probes in total**, because a counter wired to nothing reports zero and would
+pass the real check by finding nothing to count (D-125, D-154).
+
+**Verified end to end, three ways.** A cold 500-scene render is **byte-identical**
+before and after. A cache entry whose header is destroyed is still evicted,
+rebuilt, and produces a film byte-identical to one from a cache that was never
+damaged. And `make gates` is 39 of 39.
+
+**Noticed and deliberately not acted on, because it is neither caused nor
+worsened by this.** A cache entry truncated to 200 bytes is still a
+*structurally valid* WAV — 48 kHz, stereo, s16, duration 0.001 s — so
+`measure` accepts it and every scene renders one frame: 500 scenes came out as
+a 16.7-second film instead of a 100-second one. Checked against both binaries
+and they behave identically, so this predates the memo. The interesting part
+is that it is **checkable**: a silent artifact's key *is* its sample count, so
+a file claiming 0.001 s under a key that says 2.0 s is provably wrong without
+probing anything else. That is D-110's judgement one layer along and it is a
+change of behaviour, so it is the author's call rather than this commit's.
+
+### D-185 — No keystroke rebuilds a list or crosses the process boundary on its own · Accepted
+
+**Measured through the shipped `app.js` in node behind a stub DOM, by counting
+the work rather than timing it:**
+
+| typed | before | after |
+| --- | ---: | ---: |
+| 12 characters into the scene filter | **12** grid rebuilds | **1** |
+| 9 characters into the subtitle box | **9** `subtitle_preview` calls | **1** |
+
+A grid rebuild is `rows.innerHTML = ""` and every `<tr>` built again —
+**about 8,500 elements at 500 scenes**, including each row's `img.src` and its
+three buttons.
+
+**Five handlers, not the two the audit named**, because the rule is what
+matters and there were three more of it one line apart: `search` and
+`voice-search` each empty a list and refill it (the second one over the
+provider's entire voice catalogue), and `subs-text`, `out-name` and `out-dir`
+each ask Rust. One helper covers all five, and a test derives the set rather
+than listing it, so the sixth is caught too.
+
+**Nothing stale can be drawn, and that is why the coalescing needs no token of
+its own**: every coalesced function reads its field's **current** value when it
+runs, not a value captured when it was scheduled. Proven rather than asserted —
+typing `001` into a 500-scene filter inside one frame gives one rebuild showing
+**one row**, not the 500-odd that `0` matches.
+
+**The interesting choice turned out not to be one, and finding that out is
+worth more than the choice.** The first version of this decision said the
+helper must throttle rather than debounce, *"because a debounce would postpone
+the redraw for as long as somebody kept typing"* — and there was a test
+forbidding `cancelAnimationFrame` to enforce it. **That is true of a
+`setTimeout` debounce and false of this one.** `cancelAnimationFrame` followed
+by `requestAnimationFrame` inside one frame still runs on the next, so both
+forms redraw exactly once per frame. Measured both ways: twelve keystrokes over
+twelve frames gave **twelve** redraws either way, and twelve inside one frame
+gave **one** either way. The comment and the test are corrected; the form
+shipped is kept because it holds no handle and cannot cancel a callback that
+has already begun, **not** because it behaves differently. A test that forbade
+the other would have been pinning a preference and calling it a property.
+
+What the test asserts instead is the one thing that can silently undo this: a
+version of the helper that calls straight through would leave every handler
+*wrapped* and every keystroke doing the work again. Mutating it to `return ()
+=> fn()` fails with that sentence.
+
+**`refreshOutput` gained the net `drawPreview` has had since D-106.** It
+crosses the same boundary and had none, and it paints the destination path —
+the one thing the Output screen exists to be right about. Coalescing makes two
+answers overlapping rarer, which makes a stale path **harder to notice** rather
+than impossible, so the token went in with the coalescing rather than instead
+of it. Its variables are held until the token is checked, so a discarded answer
+also leaves `outFull` and `outError` alone.
+
+**Three mutations, each caught by exactly one test:** one handler losing its
+wrapper (the derived scan names the statement), the helper calling straight
+through, and `refreshOutput` losing its token check. The derived scan also
+asserts it found at least five handlers, because a scan that matches nothing
+passes by finding nothing to check (D-125, D-154).
+
+**Deliberately not done: row windowing.** `AI Model/claude/plan.md` rejects it
+and this measurement is the reason to keep rejecting it — one redraw per frame
+instead of twelve removes most of the cost, and virtualizing the table would
+cost browser find-in-page over the whole list, screen-reader row counts and
+scroll restoration, on the strength of a 31.5 ms figure its own authors said
+"is not evidence of a multi-second freeze". If it is ever reconsidered, measure
+in the real WKWebView and WebView2 first.
+
+### D-186 — Stop reaches every phase, and a run that was stopped is not a run that failed · Accepted
+
+**D-181 gave the join a `Cancel`. This gives one to the other three phases, and
+the timing turned out to be the smaller half.**
+
+| SIGINT at n=500 | before | after |
+| --- | ---: | ---: |
+| during import/validation | **1.09 s** to be obeyed | **0.01 s** |
+| during the segment pool | 0.09 s | 0.10 s |
+
+**What the operator was told is the part worth fixing.** Ctrl-C during
+validation did not report a cancellation — it reported *"**7 problems** stop
+this render — fix them, or run `still validate` to see them again"*, and on
+the next four runs 7, 6, 6. **The count varies because it is however many
+`ffprobe` children the signal killed**, each one surfacing as an unreadable
+photograph. So pressing Ctrl-C told the operator that six or seven of their
+photographs were broken, differently each time.
+
+And cancelling during the pool said *"**1 scene failed to render**: scene *:
+cancelled"* — the same sentence a genuinely broken scene gets, over a run
+nobody said had failed. All three phases say one thing now:
+
+```
+still: cancelled — finished segments are kept, so the next run resumes from them
+```
+
+**`ImportError::Cancelled` exists because the alternative was silent.** A
+cancelled probe pool hands back `NotAdmitted` for every row it never started;
+the old code turned each into a default with no resolved image, and the
+resolution loop drops a row with no image. So `load` would have returned
+**`Ok(project)` holding however many scenes happened to finish**, and every
+caller would have believed it. There are **two** checks, not one: any
+`NotAdmitted` row, and the flag itself after the loop — because a signal
+landing in the final moments leaves every row `Done` and is exactly the case
+that produced the false problem count.
+
+**`Stopped` splits a cancellation from a failure** at the point where the two
+used to be one `Failed` row reading `cancelled`. The distinction is not
+cosmetic: the old row went through the same formatter as a real defect and
+came out as *"1 scene failed to render"*.
+
+**`Cancel` and `CANCEL_GRACE` moved into `command.rs`**, beside the waiting
+they interrupt, and are re-exported so every `scene::Cancel` in the tree still
+resolves. Four things consult the flag now and three are nowhere near a scene.
+With them went **one** cancellation-aware wait: D-181's `wait_for_join` was a
+copy of `scene.rs`'s loop, speech needed a third, and `scene.rs` keeps its own
+only because that loop also drains progress and cannot be expressed as a
+shared call.
+
+**The speech half is money, not time** (D-014). `persevere` is **untouched**,
+and that is the payoff of it taking its two halves as closures: a cancellation
+is a `Permanent` failure — no version of "try again" helps — so the retry rule
+already knew what to do with one. What changed is that the attempt asks before
+spending a request, the pause between attempts is interruptible, and the child
+is waited on with the flag in hand.
+
+**Eight mutations. Two of them passed at first, and both gaps were in the
+tests rather than the code.**
+
+- Making the backoff pause uninterruptible **passed**: the attempt closure
+  catches the flag either way and the run count is 1 regardless. Only the
+  clock distinguishes them, so the test now uses a **five-second** backoff and
+  asserts the stop takes under two. Against the mutation: *"the run took
+  5.22s to stop against a five-second backoff"*.
+- Making the child wait ignore the flag **passed**: the stand-in answers
+  immediately, so a wait that never blocks looks identical. A second stand-in
+  blocks and never answers; against the mutation the stop takes **30.36 s**.
+
+**And that blocking stand-in failed against working code first**, which is the
+lesson to carry: written as `sleep 30`, the shell forks a grandchild that
+inherits the pipes, so killing the shell leaves them open and collecting the
+dead child's output blocks for the full thirty seconds. `edge-tts` is one
+process and has no such shape. It is `exec sleep 30` now — **a stand-in whose
+process tree differs from the real tool's is testing the stand-in**, which is
+the thing this file's own opening note warns about.
+
+**Where the flag is deliberately not threaded, and why each one is a decision
+rather than an omission.** `still validate` installs no `ctrlc` handler, so
+SIGINT keeps its default disposition and ends the process at once — a flag
+there would be *slower* than what already happens. The window's
+`validate_project`, `set_narration` (0.01 s, D-182) and `ingest` offer no way
+to stop them and run off the UI thread. Each passes an unset flag rather than
+the parameter being made an `Option`, because an optional cancel is a second
+thing every provider then has to remember to check.
+
+### D-187 — A renumber that would change nothing does nothing · Accepted
+
+**Measured on 500 scenes, five runs each:** `still move p 001 1` on a project
+already in that order took **0.06 s** and now takes **0.01 s**, and every
+file's `ctime` moved before and moves no longer. `move_to` computed the same
+order it already had and handed it to `renumber`, which parks every file and
+renames every file back, unconditionally — a thousand renames to change
+nothing. The 0.06 s reproduces Codex's 0.0626 and 0.0624.
+
+The wall clock is the small part. A `ctime` is what a backup tool, a sync
+client and `find -newer` read, so a no-op move told every one of them that all
+500 photographs had changed.
+
+**The condition is the names, and that is the whole decision.** The obvious
+early return is *"the position did not change, so there is nothing to do"*,
+and it is wrong: a project of twenty scenes stemmed `0001`..`0020` is in the
+right order and the wrong width, and the renumber is what repairs it — Codex's
+own run of `still move` on a fresh fixture normalised four-digit stems to
+three. An early return on the position would skip that repair **in silence**.
+So the rule is `already_in_place`: every file is already at the name
+`renumber` would give it.
+
+It sits in `renumber` rather than in `move_to`, which gets it right for both
+callers at once — and `remove` can never trigger it, because taking a scene
+out leaves every scene after it non-canonical by construction.
+
+**`occupied_destination` is not skipped so much as unreachable.** When every
+file is already at its destination, every destination is one of `order`'s own
+files, so each is in the `leaving` set that check ignores and it cannot fire.
+D-121's recovery journal is untouched: `recover()` runs inside `scenes()`,
+before any of this.
+
+**Four mutations, each caught.**
+
+| mutation | caught by |
+| --- | --- |
+| an early return in `move_to` keyed on the position | *"the stems were left four wide"* — and, separately, the D-170 overwrite guard |
+| no early return at all | the `ctime` test |
+| the rule ignores the stem width | the rule's own test, and the repair test |
+| the rule always answers "in place" | five existing tests, including every real move |
+
+The first of those is the trap, written the way somebody would actually write
+it, and it takes the D-170 test with it — a position-only early return skips
+the occupied-destination check in exactly the case it was added for.
+
+**Two of these tests failed first for a reason worth keeping.** They compared
+`Project::contents()` against filenames, and `contents()` is **provenance** —
+each file holds the name it was *created* as, which is how the existing tests
+prove a photograph moved rather than a name being rewritten over a different
+photograph. `listing()` is the names. Both are asserted now, which is
+stronger than either: the folder reads `001.jpeg`, and that file still says it
+began life as `0001.jpeg`.
+
+**The `ctime` test is unix-only and says so.** No platform exposes a portable
+"this file was renamed" signal — a rename changes neither mtime nor size —
+and the rule itself is tested on every platform as a pure function. The
+instrument matters more than the assertion here: `stat -f %c` is whole
+seconds and the effect is about ten milliseconds wide, so the audit's own
+first attempt at this reported no change and read as a clean refutation.
+`ctime_nsec` has the resolution the effect needs.
+
+**And the first measurement of the fix said it was three times *slower*** —
+0.35 s against 0.09 s. That was the release binary's own cold page cache, one
+run after rebuilding it. Five runs each says 0.06 → 0.01. A benchmark whose
+first sample is the first execution of a freshly linked binary is measuring
+the loader.

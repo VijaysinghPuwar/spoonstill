@@ -56,6 +56,7 @@ use spoonstill_core::hash::{Fnv1a, fnv1a_fields};
 use spoonstill_core::project::MAX_SCENE_SECONDS;
 use spoonstill_core::{AudioSource, SAMPLE_RATE, STATE_DIR};
 use spoonstill_media::audio::{self, NORMALIZED_EXT, NORMALIZED_PROFILE, Shape, Trim};
+use spoonstill_media::scene::Cancel;
 use spoonstill_media::{MediaError, Tools};
 use spoonstill_tts::TtsError;
 
@@ -139,6 +140,9 @@ pub enum AudioError {
     /// A `File` scene reached this layer without a resolved path. A bug, not
     /// operator error — import returns one for every `File` scene it keeps.
     NoResolvedPath,
+    /// The operator stopped the run before this narration was resolved
+    /// (D-186).
+    Cancelled,
     /// The measured duration is not one we will render (D-021).
     DurationOutOfRange {
         /// What was measured, or declared.
@@ -159,6 +163,9 @@ impl std::fmt::Display for AudioError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AudioError::Tts(e) => write!(f, "cannot speak its line — {e}"),
+            AudioError::Cancelled => {
+                f.write_str("was not resolved — the run was stopped before it got there")
+            }
             AudioError::NoResolvedPath => {
                 f.write_str("has a supplied narration whose path was never resolved")
             }
@@ -199,9 +206,14 @@ impl From<MediaError> for AudioError {
 }
 
 /// The project's normalized-audio cache.
+///
+/// `Clone` shares the memo rather than copying it, because a clone of this is
+/// the same cache: two handles on one directory that have both already asked
+/// `ffprobe` the same question must not ask it twice.
 #[derive(Debug, Clone)]
 pub struct AudioCache {
     directory: PathBuf,
+    measured: Arc<Measured>,
 }
 
 impl AudioCache {
@@ -210,6 +222,7 @@ impl AudioCache {
     pub fn in_project(root: &Path) -> Self {
         AudioCache {
             directory: root.join(STATE_DIR).join(AUDIO_CACHE_DIR),
+            measured: Arc::default(),
         }
     }
 
@@ -336,6 +349,11 @@ pub fn preview(
         &source,
         None,
         &policy,
+        // An audition is one line and the window offers no way to stop one,
+        // so there is nothing to interrupt — the flag is passed unset rather
+        // than the parameter being made optional, because an `Option<&Cancel>`
+        // is a second thing every provider then has to remember to check.
+        &Cancel::new(),
         sink,
     )
 }
@@ -404,6 +422,7 @@ pub fn resolve(
     source: &AudioSource,
     file: Option<&Path>,
     policy: &AudioPolicy,
+    cancel: &Cancel,
     log: &dyn Diagnostics,
 ) -> Result<ResolvedAudio, AudioError> {
     let kind = source.kind();
@@ -459,7 +478,7 @@ pub fn resolve(
 
     // The common case, and it takes no lock: the artifact is already there.
     // A project re-rendered after one edit answers here for every other scene.
-    if let Some(hit) = cached(tools, kind, key, &path, false) {
+    if let Some(hit) = cached(cache, tools, kind, key, &path, false) {
         return hit;
     }
 
@@ -474,8 +493,18 @@ pub fn resolve(
     // Asked again, now that this thread is the only writer. Whoever held the
     // lock before us has finished, so this is the hit their work produced —
     // and it is reported as `reused`, which is true: this run did not make it.
-    if let Some(hit) = cached(tools, kind, key, &path, true) {
+    if let Some(hit) = cached(cache, tools, kind, key, &path, true) {
         return hit;
+    }
+
+    // Asked once the lock is held and the cache has been looked at twice:
+    // everything above this line is a read, and everything below it is a
+    // process, a file, or — for speech — a network call the operator pays for
+    // (D-014). Checking here rather than at the top of `resolve` is
+    // deliberate: a scene whose artifact is already there costs nothing and
+    // may as well be counted.
+    if cancel.is_requested() {
+        return Err(AudioError::Cancelled);
     }
 
     let made = match work {
@@ -509,7 +538,7 @@ pub fn resolve(
                     voice,
                     settings: &settings.values,
                 };
-                let said = engine.speak(&request, &spoken)?;
+                let said = engine.speak(&request, &spoken, cancel)?;
                 log.record(
                     &spoonstill_core::diagnostics::Event::info("tts", "spoke one line")
                         .with("provider", provider)
@@ -526,6 +555,12 @@ pub fn resolve(
             audio::normalize(tools, &spoken, &path, &Shape::spoken(policy.trim), log)?
         }
     };
+    // The artifact this run just made, measured on the way out of
+    // `spoonstill_media::audio`'s own `finish` — so the next scene that wants
+    // it reads that measurement instead of taking one of its own (D-184).
+    cache
+        .measured
+        .remember(kind, key, &made.path, made.duration);
     finish(kind, key, made.path, made.duration, false)
 }
 
@@ -589,6 +624,105 @@ fn key_lock(key: u64) -> Arc<Mutex<()>> {
     Arc::clone(map.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
 }
 
+/// What this run has already measured, so it measures each artifact once
+/// (D-184).
+///
+/// **A fully cached 500-scene render spawned 1,501 `ffprobe` processes** — 500
+/// images, 500 segments, the film, and **500 probes of one silence file**,
+/// because many scenes resolving to one artifact is the ordinary case here
+/// (D-108's own observation, one layer along). At ~15 ms each that is ~22 s of
+/// `ffprobe` CPU behind a 4.7 s wall clock: a warm re-render is, to within
+/// noise, nothing but process spawns.
+///
+/// ## What it is not
+///
+/// **Not a trust cache.** It lives on one [`AudioCache`], which is built once
+/// per render, so it remembers nothing across runs and nothing across
+/// projects. Every artifact is still measured — once — by the same
+/// [`audio::measure`] that re-asserts the normalization profile, so a
+/// truncated or hand-corrupted entry is still caught. D-110 records exactly
+/// what reusing something on weaker evidence than a fresh check costs, and
+/// this reuses the evidence of a check made seconds ago in this process, by
+/// this process, on a file only this process may write: two renders of one
+/// project are refused by `render.lock` (D-113).
+///
+/// ## Keyed on the kind as well as the key
+///
+/// [`key_lock`] keys on the `u64` alone and is right to: a collision there
+/// costs two unrelated artifacts a needless queue and nothing else. A
+/// collision **here** would hand one scene another's path and duration, so
+/// the kind goes in the key — the same pair that names the file on disk.
+///
+/// ## Single-flight, the shape D-108 and D-173 already use
+///
+/// Two locks, and the order between them is the design: the **map** lock is
+/// held only long enough to claim a cell, and the **cell** lock is held across
+/// the probe. Two workers wanting one artifact queue behind each other and
+/// share the one answer; two wanting different artifacts never meet, which is
+/// what keeps D-108's promise that the fast path does not serialize the run.
+/// One artifact's measurement: where it is, and how long it turned out to be.
+type Measurement = (PathBuf, f64);
+
+/// The cell one artifact's answer lives in — empty until somebody measures it.
+type Cell = Arc<Mutex<Option<Measurement>>>;
+
+#[derive(Debug, Default)]
+struct Measured {
+    entries: Mutex<HashMap<(&'static str, u64), Cell>>,
+}
+
+impl Measured {
+    /// The cell one artifact's answer lives in, making it if nobody has.
+    fn cell_for(&self, kind: &'static str, key: u64) -> Cell {
+        let mut map = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(map.entry((kind, key)).or_default())
+    }
+
+    /// This artifact's measurement, taking one if nobody has yet.
+    ///
+    /// `measure` is a parameter rather than a call so a test can **count**
+    /// them (D-144's shape, D-173's precedent): what this type exists for is
+    /// how many times `ffprobe` is spawned, and nothing observable from
+    /// outside can show that.
+    ///
+    /// A measurement that came back `None` is not remembered. That covers two
+    /// cases and both want the same answer — the artifact is not there yet,
+    /// and the artifact is there and unusable. Neither is a fact about this
+    /// run that will still be true in a second; the same judgement `evict`
+    /// makes at the call site.
+    fn once(
+        &self,
+        kind: &'static str,
+        key: u64,
+        measure: impl FnOnce() -> Option<Measurement>,
+    ) -> Option<Measurement> {
+        let cell = self.cell_for(kind, key);
+        let mut answer = cell
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(known) = answer.as_ref() {
+            return Some(known.clone());
+        }
+        let taken = measure()?;
+        *answer = Some(taken.clone());
+        Some(taken)
+    }
+
+    /// Remember what an artifact measured, wherever the measurement came from.
+    ///
+    /// The producer's own measurement counts: `spoonstill_media::audio`'s
+    /// `finish` probes the temporary before renaming it, so the number a miss
+    /// hands back is a measurement of the same bytes a reader would probe —
+    /// not a computed length. Without this the scene that *made* the artifact
+    /// would leave the next one to probe it anyway.
+    fn remember(&self, kind: &'static str, key: u64, path: &Path, duration: f64) {
+        self.once(kind, key, || Some((path.to_path_buf(), duration)));
+    }
+}
+
 /// The cache entry for `key`, if there is a usable one.
 ///
 /// A hit is measured, not assumed. `measure` re-asserts the normalization
@@ -600,27 +734,38 @@ fn key_lock(key: u64) -> Arc<Mutex<()>> {
 /// worker is in the middle of writing, and deleting it there would be this
 /// function causing the corruption it exists to detect. Under the lock nobody
 /// else is writing, so a bad entry is genuinely bad and is removed.
+///
+/// Measured **once per artifact per run** (D-184), under that artifact's own
+/// cell lock, so the five hundredth scene sharing one narration reads the
+/// answer the first one got instead of spawning the five hundredth `ffprobe`.
+/// A measurement that *fails* is deliberately not remembered: the file may be
+/// one another worker is mid-write, which is the same judgement `evict` is
+/// making one line below.
 fn cached(
+    cache: &AudioCache,
     tools: &Tools,
     kind: &'static str,
     key: u64,
     path: &Path,
     evict: bool,
 ) -> Option<Result<ResolvedAudio, AudioError>> {
-    if !path.exists() {
-        return None;
-    }
-    match audio::measure(tools, path) {
-        Ok(measured) => Some(finish(kind, key, measured.path, measured.duration, true)),
-        Err(_) => {
-            if evict {
-                // The operator does not need to know that a cache entry was
-                // bad, only that their scene rendered.
-                let _ = std::fs::remove_file(path);
-            }
-            None
+    let (found, duration) = cache.measured.once(kind, key, || {
+        if !path.exists() {
+            return None;
         }
-    }
+        match audio::measure(tools, path) {
+            Ok(measured) => Some((measured.path, measured.duration)),
+            Err(_) => {
+                if evict {
+                    // The operator does not need to know that a cache entry
+                    // was bad, only that their scene rendered.
+                    let _ = std::fs::remove_file(path);
+                }
+                None
+            }
+        }
+    })?;
+    Some(finish(kind, key, found, duration, true))
 }
 
 fn finish(
@@ -868,6 +1013,7 @@ mod tests {
             &spoken("A line over the opening still.", "elevenlabs", "default"),
             None,
             &AudioPolicy::default(),
+            &Cancel::new(),
             &spoonstill_core::diagnostics::Noop,
         )
         .expect_err("elevenlabs is not built yet");
@@ -891,6 +1037,7 @@ mod tests {
             &spoken("   \n  ", "edge", "en-US-AvaNeural"),
             None,
             &AudioPolicy::default(),
+            &Cancel::new(),
             &spoonstill_core::diagnostics::Noop,
         )
         .expect_err("an empty line");
@@ -963,6 +1110,7 @@ mod tests {
                 &AudioSource::Silent { seconds },
                 None,
                 &AudioPolicy::default(),
+                &Cancel::new(),
                 &spoonstill_core::diagnostics::Noop,
             )
             .expect_err("refused");
@@ -986,6 +1134,7 @@ mod tests {
             &source,
             None,
             &AudioPolicy::default(),
+            &Cancel::new(),
             &spoonstill_core::diagnostics::Noop,
         )
         .expect_err("no path");
@@ -1078,6 +1227,7 @@ mod tests {
             &spoken(&long, "nosuchprovider", "default"),
             None,
             &AudioPolicy::default(),
+            &Cancel::new(),
             &spoonstill_core::diagnostics::Noop,
         )
         .expect_err("no such provider");
@@ -1142,5 +1292,203 @@ mod tests {
             "sixteen workers did one job {} times",
             ran.load(Ordering::SeqCst)
         );
+    }
+
+    // --- D-184: one measurement per artifact per run ----------------------
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// D-184. Five hundred scenes sharing one narration measure it once.
+    ///
+    /// The number the memo exists for is **how many `ffprobe` processes a
+    /// warm render spawns**, and that is invisible from outside — which is
+    /// why the measurement is a parameter here (D-173's shape). Measured end
+    /// to end on the 500-scene fixture: **1,501 spawns before, 1,002 after**,
+    /// the five hundred probes of one silence file collapsing to one.
+    ///
+    /// Without the memo this counts 500.
+    #[test]
+    fn one_artifact_is_measured_once_however_many_scenes_want_it() {
+        let measured = Measured::default();
+        let taken = AtomicUsize::new(0);
+
+        let answers: Vec<_> = (0..500)
+            .map(|_| {
+                measured
+                    .once("silent", 0x51_1e_11_ce, || {
+                        taken.fetch_add(1, Ordering::SeqCst);
+                        Some((PathBuf::from("/cache/silent-511e11ce.wav"), 2.0))
+                    })
+                    .expect("the artifact measures")
+            })
+            .collect();
+
+        assert_eq!(
+            taken.load(Ordering::SeqCst),
+            1,
+            "five hundred scenes sharing one narration took that many measurements"
+        );
+        assert!(
+            answers
+                .iter()
+                .all(|a| *a == (PathBuf::from("/cache/silent-511e11ce.wav"), 2.0)),
+            "the scenes that read the memo did not all get the same answer"
+        );
+    }
+
+    /// A measurement that could not be taken is not a fact about the run.
+    ///
+    /// Two cases, one answer: the artifact is not written yet, and the
+    /// artifact is there and unusable. Remembering either would make the
+    /// first scene to look decide for every scene after it — and the second
+    /// case is the one `cached`'s `evict` exists to repair, which it cannot
+    /// do if the failure is cached.
+    #[test]
+    fn a_measurement_that_failed_is_not_remembered() {
+        let measured = Measured::default();
+        let attempts = AtomicUsize::new(0);
+        let take = || {
+            let n = attempts.fetch_add(1, Ordering::SeqCst);
+            (n > 0).then(|| (PathBuf::from("/cache/file-1.wav"), 1.5))
+        };
+
+        assert_eq!(measured.once("file", 1, take), None, "nothing there yet");
+        assert_eq!(
+            measured.once("file", 1, take),
+            Some((PathBuf::from("/cache/file-1.wav"), 1.5)),
+            "the second scene was given the first one's failure"
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    /// The kind is part of the key, and it has to be.
+    ///
+    /// `key_lock` keys on the `u64` alone and is right to: a collision there
+    /// costs two unrelated artifacts a needless queue. A collision **here**
+    /// would hand one scene another scene's path and duration, which is a
+    /// film of the wrong length reported as correct.
+    #[test]
+    fn two_kinds_sharing_a_key_are_two_artifacts() {
+        let measured = Measured::default();
+        let silent = measured
+            .once("silent", 7, || {
+                Some((PathBuf::from("/cache/silent-7.wav"), 2.0))
+            })
+            .unwrap();
+        let spoken = measured
+            .once("tts", 7, || Some((PathBuf::from("/cache/tts-7.wav"), 9.5)))
+            .unwrap();
+
+        assert_eq!(silent.1, 2.0);
+        assert_eq!(
+            spoken.1, 9.5,
+            "the second kind was given the first one's duration"
+        );
+    }
+
+    /// Two artifacts do not queue behind each other, and this fails as a
+    /// deadline rather than hanging (D-149).
+    ///
+    /// The map lock is held only long enough to claim a cell; the cell lock is
+    /// held across the measurement. Holding the **map** lock across the
+    /// measurement instead would serialize every artifact in the project
+    /// behind whichever one is being probed — which is D-108's own complaint,
+    /// and it is what this arrangement exists to avoid. With that mutation
+    /// the two measurements below can never both be in flight and this fails
+    /// on its deadline.
+    #[test]
+    fn two_artifacts_are_measured_at_the_same_time() {
+        use std::sync::Condvar;
+        use std::time::Duration;
+
+        let measured = Measured::default();
+        // Neither closure returns until both have started, so "at the same
+        // time" is a fact rather than a race — and it is a **deadline**, not
+        // a `Barrier`: under the mutation this is written against the two
+        // measurements can never both be in flight, and a bare barrier would
+        // hang the whole test run instead of saying why (D-149).
+        let gate = (Mutex::new(0_usize), Condvar::new());
+        let deadline = Duration::from_secs(10);
+
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = [("silent", 1_u64), ("file", 2_u64)]
+                .into_iter()
+                .map(|(kind, key)| {
+                    let (measured, gate) = (&measured, &gate);
+                    scope.spawn(move || {
+                        measured.once(kind, key, || {
+                            let (lock, arrived) = gate;
+                            let mut here = lock
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            *here += 1;
+                            arrived.notify_all();
+                            let (here, timed_out) = arrived
+                                .wait_timeout_while(here, deadline, |here| *here < 2)
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            assert!(
+                                !timed_out.timed_out(),
+                                "only {here} of 2 measurements were ever in flight at once — \
+                                 the map lock is being held across the measurement, so every \
+                                 artifact in the project queues behind whichever one is being \
+                                 probed"
+                            );
+                            Some((PathBuf::from(format!("/cache/{kind}-{key}.wav")), 1.0))
+                        })
+                    })
+                })
+                .collect();
+            for handle in handles {
+                assert!(handle.join().expect("the worker finished").is_some());
+            }
+        });
+    }
+
+    /// D-186. A narration is not resolved for a run that has been stopped.
+    ///
+    /// The check sits **after** the cache has been looked at twice and before
+    /// any process, file or network call — so a scene whose artifact is
+    /// already there still counts, and a scene that would have cost something
+    /// does not. Under D-014's bring-your-own-key that cost is the operator's
+    /// money.
+    ///
+    /// The `Tools` names a binary that does not exist, which is what makes
+    /// this discriminating rather than decorative: if the flag were read
+    /// after the work began, the error would be the missing FFmpeg instead.
+    #[test]
+    fn a_narration_is_not_resolved_for_a_run_that_was_stopped() {
+        let dir = std::env::temp_dir().join(format!("spoonstill-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let cache = AudioCache::in_project(&dir);
+
+        let cancel = Cancel::new();
+        cancel.request();
+        let error = resolve(
+            &cache,
+            &Tools::at(dir.join("no-such-ffmpeg"), dir.join("no-such-ffprobe")),
+            &AudioSource::Silent { seconds: 2.0 },
+            None,
+            &AudioPolicy::default(),
+            &cancel,
+            &spoonstill_core::diagnostics::Noop,
+        )
+        .expect_err("a stopped run resolves nothing");
+
+        assert!(
+            matches!(error, AudioError::Cancelled),
+            "expected a cancellation before anything was spawned, got: {error}"
+        );
+        assert!(
+            !cache.directory().exists(),
+            "a stopped run created the cache directory it was about to write into"
+        );
+
+        // And the sentence says what happened, not that something broke.
+        let said = AudioError::Cancelled.to_string();
+        assert!(said.contains("stopped"), "{said}");
+        assert!(!said.contains("cannot"), "{said}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

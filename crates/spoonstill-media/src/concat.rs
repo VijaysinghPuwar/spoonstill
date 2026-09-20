@@ -31,6 +31,7 @@ use crate::command::FfmpegCommand;
 use crate::error::MediaError;
 use crate::probe::{self, DEFAULT_PROBE_TIMEOUT, ProbeResult};
 use crate::profile::{self, SegmentProfile};
+use crate::scene::Cancel;
 use crate::tools::Tools;
 
 /// Ceiling for the join itself.
@@ -139,18 +140,20 @@ pub fn stopped_at(segment_frames: &[u64], actual: u64) -> Option<usize> {
 /// generated; [`MediaError::ProfileMismatch`] when the joined film does not
 /// match the profile or drifts by more than a frame from `expected_total`;
 /// [`MediaError::JoinStopped`] when it is short by whole segments, which names
-/// the scene it stopped at and discards that segment (D-178); and anything the
-/// process boundary reports.
+/// the scene it stopped at and discards that segment (D-178);
+/// [`MediaError::Cancelled`] when the operator stopped the run (D-181); and
+/// anything the process boundary reports.
 pub fn concat(
     tools: &Tools,
     segments: &[PathBuf],
     dest: &Path,
     expect: &Expectation<'_>,
+    cancel: &Cancel,
     log: &dyn Diagnostics,
 ) -> Result<Film, MediaError> {
     let list = write_list(segments, dest)?;
 
-    let result = run(tools, &list, segments, dest, expect, log);
+    let result = run(tools, &list, segments, dest, expect, cancel, log);
 
     // The list is scaffolding, not an artifact. It goes whether or not the
     // join worked — a leftover `.concat-*.txt` in a project folder is the kind
@@ -165,6 +168,7 @@ fn run(
     segments: &[PathBuf],
     dest: &Path,
     expect: &Expectation<'_>,
+    cancel: &Cancel,
     log: &dyn Diagnostics,
 ) -> Result<Film, MediaError> {
     ensure_parent(dest)?;
@@ -199,16 +203,37 @@ fn run(
         .args(["-c", "copy"])
         .arg(&temporary_path);
 
+    // Asked before a process is started, not only while one runs: a Ctrl-C
+    // that lands in the gap between the pool returning and the join beginning
+    // used to start an FFmpeg it would immediately have to kill.
+    if cancel.is_requested() {
+        return Err(MediaError::Cancelled {
+            command: command.display(),
+        });
+    }
+
     let child = command.spawn()?;
     let display = child.display().to_string();
     log.record(&Event::info("ffmpeg", "running").with("command", display.clone()));
 
-    let finished = child.wait_until(CONCAT_TIMEOUT)?;
+    // One implementation of "wait, but look at the flag", in `command.rs`
+    // (D-186). This was a copy of `scene.rs`'s loop when D-181 added it, and
+    // speech needed a third.
+    let finished = child
+        .wait_until_cancellable(CONCAT_TIMEOUT, cancel)
+        .inspect_err(|error| {
+            if matches!(error, MediaError::Cancelled { .. }) {
+                log.record(
+                    &Event::warn("ffmpeg", "the join was cancelled")
+                        .with("command", display.clone()),
+                );
+            }
+        })?;
 
     if !finished.status.success() {
         log.record(
             &Event::error("ffmpeg", "concat exited non-zero")
-                .with("command", display)
+                .with("command", display.clone())
                 .with("stderr", finished.stderr.clone()),
         );
         finished.ok()?;
@@ -216,7 +241,7 @@ fn run(
 
     let film = validate(tools, &temporary_path, segments, expect, log)?;
 
-    temporary.move_into_place(dest)?;
+    publish(temporary, dest, cancel, &display)?;
 
     Ok(Film {
         path: dest.to_path_buf(),
@@ -224,6 +249,33 @@ fn run(
         expected_duration: expect.duration,
         probe: film.probe,
     })
+}
+
+/// Rename the finished film into place, unless the run was stopped while it
+/// was being checked (D-181).
+///
+/// Its own function because this is the **one irreversible step** in the join,
+/// and the window it closes is invisible from outside: everything above it
+/// writes to a temporary the [`Partial`] guard removes on any error, and the
+/// rename is the only thing an operator ever sees. A cancellation that arrives
+/// between the successful wait and this line — which at 500 scenes is the
+/// several seconds `validate` spends probing the film — must still not
+/// publish.
+///
+/// A test can hold *this* open; it cannot hold open a gap between two
+/// statements, which is why the check is here and not inline.
+fn publish(
+    temporary: Partial,
+    dest: &Path,
+    cancel: &Cancel,
+    display: &str,
+) -> Result<(), MediaError> {
+    if cancel.is_requested() {
+        return Err(MediaError::Cancelled {
+            command: display.to_owned(),
+        });
+    }
+    temporary.move_into_place(dest)
 }
 
 /// The D-041 gate, applied to the film rather than to a segment.
@@ -545,6 +597,171 @@ mod tests {
         ] {
             assert!(text.contains(wanted), "{wanted:?} missing from:\n{text}");
         }
+    }
+
+    /// A scratch directory named after the test, so two tests cannot collide
+    /// and a failure leaves something to look at (D-180's rule, in the crate
+    /// that cannot see the test helper).
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("spoonstill-concat-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        dir
+    }
+
+    /// D-181, at the one irreversible step.
+    ///
+    /// This is the window the defect actually lives in: a 500-scene join
+    /// spends seconds in `validate` after FFmpeg has exited happily, and a
+    /// cancellation landing in there used to rename the film into place and
+    /// report success. The `Partial` guard is what removes the temporary, so
+    /// that is asserted too — refusing to publish and leaving a dot-file
+    /// behind would be D-178's defect in place of this one.
+    #[test]
+    fn a_cancelled_run_does_not_publish_the_film_it_just_finished() {
+        let dir = scratch("publish-cancelled");
+        let dest = dir.join("film.mp4");
+
+        let temporary = Partial::beside(&dest);
+        let path = temporary.path().to_path_buf();
+        std::fs::write(&path, b"a finished film").unwrap();
+
+        let cancel = Cancel::new();
+        cancel.request();
+        let error = publish(temporary, &dest, &cancel, "ffmpeg …")
+            .expect_err("a stopped run must not publish");
+
+        assert!(
+            matches!(error, MediaError::Cancelled { .. }),
+            "expected a cancellation, got: {error}"
+        );
+        assert!(
+            !dest.exists(),
+            "{} was published for a run the operator stopped",
+            dest.display()
+        );
+        assert!(
+            !path.exists(),
+            "the temporary survived at {} — refusing to publish must not \
+             leave an invisible part-film behind (D-178)",
+            path.display()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// And a film already at that destination is still there afterwards.
+    ///
+    /// Stated separately because it is the consequence an operator would
+    /// report: stopping a re-export must not take yesterday's export with it.
+    #[test]
+    fn a_cancelled_run_leaves_an_existing_film_where_it_was() {
+        let dir = scratch("publish-keeps-existing");
+        let dest = dir.join("film.mp4");
+        std::fs::write(&dest, b"yesterday's film").unwrap();
+
+        let temporary = Partial::beside(&dest);
+        std::fs::write(temporary.path(), b"today's film").unwrap();
+
+        let cancel = Cancel::new();
+        cancel.request();
+        publish(temporary, &dest, &cancel, "ffmpeg …").expect_err("stopped");
+
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            b"yesterday's film",
+            "a stopped run replaced a film that was already there"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other half, which the two above would pass without: a run nobody
+    /// stopped still publishes. A `publish` that always refused would satisfy
+    /// every assertion up to here (D-116).
+    #[test]
+    fn a_run_nobody_stopped_publishes() {
+        let dir = scratch("publish-ordinary");
+        let dest = dir.join("film.mp4");
+
+        let temporary = Partial::beside(&dest);
+        let path = temporary.path().to_path_buf();
+        std::fs::write(&path, b"a finished film").unwrap();
+
+        publish(temporary, &dest, &Cancel::new(), "ffmpeg …").expect("published");
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"a finished film");
+        assert!(
+            !path.exists(),
+            "the temporary should have been renamed away"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A run already stopped never starts an FFmpeg it would have to kill.
+    ///
+    /// **The `Tools` below names a binary that does not exist, and that is the
+    /// whole test.** Asserting only that a cancelled join returns `Cancelled`
+    /// and publishes nothing passes with this check deleted, because the wait
+    /// loop catches an already-set flag on its first pass and answers
+    /// identically — measured, by deleting it. That is D-116 exactly: a test
+    /// written for one guard, satisfied by another.
+    ///
+    /// With the check, the flag is read before the process boundary and the
+    /// missing binary is never reached. Without it, `spawn` fails first and
+    /// the error is `BinaryMissing`. One input, two distinguishable answers.
+    #[test]
+    fn a_join_asked_for_after_a_cancellation_never_runs() {
+        let dir = scratch("join-already-cancelled");
+        let segments = vec![
+            dir.join("seg-aaaaaaaaaaaaaaaa.mp4"),
+            dir.join("seg-bbbbbbbbbbbbbbbb.mp4"),
+        ];
+        for segment in &segments {
+            std::fs::write(segment, b"not really a segment").unwrap();
+        }
+        let dest = dir.join("film.mp4");
+
+        let cancel = Cancel::new();
+        cancel.request();
+        let profile = SegmentProfile::for_output(
+            spoonstill_core::OutputSpec::new(spoonstill_core::Aspect::Landscape16x9, 360, 30)
+                .unwrap(),
+        );
+        let error = concat(
+            &Tools::at(dir.join("no-such-ffmpeg"), dir.join("no-such-ffprobe")),
+            &segments,
+            &dest,
+            &Expectation {
+                profile: &profile,
+                frames: 12,
+                segment_frames: &[6, 6],
+                duration: 0.4,
+                fps: 30,
+            },
+            &cancel,
+            &spoonstill_core::diagnostics::Noop,
+        )
+        .expect_err("a stopped run must not join");
+
+        assert!(
+            matches!(error, MediaError::Cancelled { .. }),
+            "expected a cancellation before anything was spawned, got: {error}\n\
+             A `BinaryMissing` here means the flag is only read after the \
+             process boundary."
+        );
+        assert!(!dest.exists(), "a stopped run produced a film");
+        assert!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().contains(".partial-")),
+            "a stopped run left scaffolding behind"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

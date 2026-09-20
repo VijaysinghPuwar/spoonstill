@@ -28,7 +28,9 @@ pub mod voice;
 pub use audio::{AudioCache, AudioError, ResolvedAudio};
 pub use film::{FilmError, FilmEvent, RenderProjectOptions, RenderedFilm, render_project};
 pub use formats::{AspectChoice, SizeChoice};
-pub use import::{ImportError, MediaCheck, Mode, ProbeCheck, Project, ResolvedScene, Role};
+pub use import::{
+    ImportError, MediaCheck, Mode, ProbeCheck, Project, ResolvedScene, Role, SkipProbe,
+};
 pub use ingest::{IngestError, Ingested, add_media, create_project};
 pub use render::{RenderError, RenderSceneOptions, render_scene};
 /// Where this machine's activity CSV lives (D-093). Re-exported because the

@@ -31,6 +31,8 @@ use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -324,6 +326,63 @@ pub struct Finished {
     pub program: String,
 }
 
+/// A cancellation flag shared with whoever handles Ctrl-C (D-045).
+///
+/// Deliberately trivial: the interesting part of cancellation is the ladder in
+/// [`FfmpegChild::cancel`] and the cleanup each caller does, not the
+/// signalling.
+///
+/// It lives here rather than in `scene` because by D-186 four things consult
+/// it — the scene render, the join, the importer's probe pool and the speech
+/// provider — and three of them are nowhere near a scene. `scene::Cancel`
+/// still resolves, so nothing that names it had to move.
+#[derive(Debug, Clone, Default)]
+pub struct Cancel(Arc<AtomicBool>);
+
+impl Cancel {
+    /// A fresh, unset flag.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Request cancellation. Safe to call from a signal handler.
+    pub fn request(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+    /// Whether cancellation has been requested.
+    #[must_use]
+    pub fn is_requested(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    /// Sleep for `total`, or until cancellation is asked for.
+    ///
+    /// D-094's backoff between speech attempts grows to seconds, and a pause
+    /// that cannot be interrupted is a pause an operator waits out after
+    /// pressing Stop. Checked at [`CANCEL_POLL`], which is the cadence
+    /// everything else here looks at the flag.
+    pub fn sleep(&self, total: Duration) {
+        let deadline = Instant::now() + total;
+        while Instant::now() < deadline && !self.is_requested() {
+            std::thread::sleep(CANCEL_POLL.min(deadline.saturating_duration_since(Instant::now())));
+        }
+    }
+}
+
+/// How long a cancelled child may take to finalize before it is killed.
+///
+/// FFmpeg needs a moment to flush and close the MP4 after `q`. Two seconds is
+/// generous for that and short enough that a user pressing Ctrl-C does not
+/// wonder whether it worked.
+pub const CANCEL_GRACE: Duration = Duration::from_secs(2);
+
+/// How often a wait looks at the cancellation flag.
+///
+/// The cadence `scene.rs` has polled at since D-045, and the ceiling
+/// `Backoff` settles on: against work measured in seconds a 20 ms wait is not
+/// a cost, and nothing here busy-waits — the thread is asleep between looks.
+pub const CANCEL_POLL: Duration = Duration::from_millis(20);
+
 impl FfmpegChild {
     /// The paste-ready form of the command that started this child.
     #[must_use]
@@ -415,6 +474,59 @@ impl FfmpegChild {
                 });
             }
             backoff.sleep();
+        }
+    }
+
+    /// Wait up to `limit`, giving up early if cancellation is asked for.
+    ///
+    /// [`FfmpegChild::wait_until`] consults a clock and nothing else, which is
+    /// why the join could not be stopped (D-181) and why an in-flight
+    /// `edge-tts` call ran to completion after Stop (D-186). This is that wait
+    /// with the flag added, in **one** place: `scene.rs` has had its own loop
+    /// since D-045 and keeps it, because that loop also drains progress and
+    /// cannot be expressed here — but a third copy for speech and a fourth for
+    /// the join is exactly the drift this codebase keeps paying for (D-111).
+    ///
+    /// On cancellation the child goes through D-045's ladder — ask, wait,
+    /// force — before this returns, so nothing is left holding a temporary.
+    /// The killed child's stderr is dropped: on this path it is FFmpeg saying
+    /// it is exiting, and the error already names the command.
+    ///
+    /// # Errors
+    ///
+    /// [`MediaError::Cancelled`] if the flag was set, [`MediaError::Timeout`]
+    /// if `limit` expired first, and whatever the wait itself reports.
+    pub fn wait_until_cancellable(
+        mut self,
+        limit: Duration,
+        cancel: &Cancel,
+    ) -> Result<Finished, MediaError> {
+        let deadline = Instant::now() + limit;
+        loop {
+            if cancel.is_requested() {
+                let command = self.display.clone();
+                let _ = self.cancel(CANCEL_GRACE);
+                return Err(MediaError::Cancelled { command });
+            }
+            match self.child.try_wait() {
+                Ok(Some(status)) => return Ok(self.finish(status)),
+                Ok(None) => {}
+                Err(source) => {
+                    return Err(MediaError::Spawn {
+                        command: self.display.clone(),
+                        source,
+                    });
+                }
+            }
+            if Instant::now() >= deadline {
+                let _ = self.kill();
+                let _ = self.child.wait();
+                return Err(MediaError::Timeout {
+                    command: self.display.clone(),
+                    waited: limit,
+                });
+            }
+            std::thread::sleep(CANCEL_POLL);
         }
     }
 
@@ -974,5 +1086,96 @@ mod tests {
             .wait_until(Duration::from_millis(250))
             .expect_err("it must not be waited on forever");
         assert!(matches!(error, MediaError::Timeout { .. }), "{error:?}");
+    }
+
+    /// D-186. A wait that is looking at the flag stops when it is set.
+    ///
+    /// The stand-in child sleeps for thirty seconds; the flag is set before
+    /// the wait begins, so this returns on the first look. An **upper** bound
+    /// on the wall clock is normally the unsafe direction on a shared runner
+    /// (D-130) — five seconds of slack against an operation that should take
+    /// one poll is what makes it safe here, and against `wait_until` it fails
+    /// by running the full thirty.
+    #[test]
+    fn a_wait_that_watches_the_flag_stops_when_it_is_set() {
+        let cancel = Cancel::new();
+        cancel.request();
+
+        let started = Instant::now();
+        let error = stand_in("command::tests::stand_in_child_outlives_its_parents_patience")
+            .spawn()
+            .expect("the stand-in child starts")
+            .wait_until_cancellable(Duration::from_secs(30), &cancel)
+            .expect_err("a cancelled wait does not come back with a child's output");
+        let waited = started.elapsed();
+
+        assert!(
+            matches!(error, MediaError::Cancelled { .. }),
+            "expected a cancellation, got: {error}"
+        );
+        assert!(
+            waited < Duration::from_secs(5),
+            "the wait took {waited:?} — it is not looking at the flag"
+        );
+    }
+
+    /// And a child nobody stopped is still waited on exactly as before.
+    ///
+    /// Without this, a `wait_until_cancellable` that always returned
+    /// `Cancelled` would satisfy the test above perfectly (D-116).
+    #[test]
+    fn a_wait_that_watches_the_flag_still_waits() {
+        let finished = stand_in("command::tests::stand_in_child_prints_and_exits")
+            .spawn()
+            .expect("the stand-in child starts")
+            .wait_until_cancellable(Duration::from_secs(30), &Cancel::new())
+            .expect("it exits");
+        assert!(finished.status.success());
+        assert!(
+            String::from_utf8_lossy(&finished.stdout).contains(STAND_IN_MARK),
+            "a child that ran to completion was reported with no output"
+        );
+    }
+
+    /// The pause between retries can be interrupted (D-186).
+    ///
+    /// D-094's backoff grows to seconds, and a pause nothing can break into
+    /// is a pause an operator waits out after pressing Stop. Both directions,
+    /// because a `sleep` that returned immediately would pass the first
+    /// assertion and break every retry in the tree.
+    #[test]
+    fn a_pause_between_attempts_can_be_interrupted() {
+        let cancel = Cancel::new();
+        cancel.request();
+        let started = Instant::now();
+        cancel.sleep(Duration::from_secs(60));
+        let waited = started.elapsed();
+        assert!(
+            waited < Duration::from_secs(5),
+            "an already-cancelled pause took {waited:?}"
+        );
+
+        // Set while the pause is running, not before it.
+        let cancel = Cancel::new();
+        let other = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            other.request();
+        });
+        let started = Instant::now();
+        cancel.sleep(Duration::from_secs(60));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "a pause interrupted half way through ran to the end"
+        );
+
+        // And a pause nobody interrupts is a pause.
+        let started = Instant::now();
+        Cancel::new().sleep(Duration::from_millis(120));
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "the pause did not happen at all, so nothing ever waits between \
+             attempts and D-094's backoff is gone"
+        );
     }
 }

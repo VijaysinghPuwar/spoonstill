@@ -1025,10 +1025,17 @@ fn validate(args: ValidateArgs) -> Result<(), String> {
     // because a 500-file probe is not free, and it is named for what it gives
     // up rather than for what it saves.
     let probe = spoonstill_app::ProbeCheck::from_env();
-    let skip = SkipProbe;
+    // Nothing is measured, so nothing is known — including how big the
+    // stills are, which is why `--no-probe` produces no D-145 warning.
+    let skip = spoonstill_app::SkipProbe;
     let media: &dyn spoonstill_app::MediaCheck = if args.no_probe { &skip } else { &probe };
 
-    let project = spoonstill_app::import::load(&args.project, media).map_err(|e| e.to_string())?;
+    // No flag, and that is the right answer rather than an omission: this
+    // command installs no `ctrlc` handler, so SIGINT keeps its default
+    // disposition and ends the process at once. A flag here would be slower
+    // than what already happens (D-186).
+    let project = spoonstill_app::import::load(&args.project, media, &Cancel::new())
+        .map_err(|e| e.to_string())?;
 
     let source = match &project.mode {
         spoonstill_app::Mode::Manifest(path) => format!(
@@ -1101,21 +1108,6 @@ fn validate(args: ValidateArgs) -> Result<(), String> {
         args.project.display(),
         if warnings == 1 { "" } else { "s" }
     ))
-}
-
-/// `--no-probe`: believe every extension.
-struct SkipProbe;
-
-impl spoonstill_app::MediaCheck for SkipProbe {
-    fn check(
-        &self,
-        _path: &std::path::Path,
-        _role: spoonstill_app::Role,
-    ) -> Result<Option<spoonstill_core::SourceGeometry>, String> {
-        // Nothing is measured, so nothing is known — including how big the
-        // stills are, which is why `--no-probe` produces no F-13 warning.
-        Ok(None)
-    }
 }
 
 /// A path relative to the project root when it is inside it, for a report that

@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use spoonstill_tts::edge::{DEFAULT_VOICE, Edge};
-use spoonstill_tts::{Availability, Provider, Request, TtsError};
+use spoonstill_tts::{Availability, Cancel, Provider, Request, TtsError};
 
 /// A directory of this test's own.
 fn scratch(name: &str) -> PathBuf {
@@ -151,6 +151,7 @@ fn a_line_becomes_audio_that_ffprobe_can_measure() {
                 settings: &[],
             },
             &destination,
+            &Cancel::new(),
         )
         .expect("a line the service will say");
 
@@ -205,6 +206,7 @@ fn a_voice_that_does_not_exist_is_refused_immediately_and_in_english() {
                 settings: &[],
             },
             &directory.join("line.mp3"),
+            &Cancel::new(),
         )
         .expect_err("no such voice");
 
@@ -246,6 +248,7 @@ fn a_line_with_nothing_speakable_in_it_is_not_retried() {
                 settings: &[],
             },
             &directory.join("line.mp3"),
+            &Cancel::new(),
         )
         .expect_err("nothing to say");
 
@@ -302,6 +305,7 @@ fn a_narration_longer_than_one_request_comes_back_as_one_file() {
                 settings: &[],
             },
             &destination,
+            &Cancel::new(),
         )
         .expect("a long narration");
 
@@ -364,6 +368,7 @@ fn eight_lines_spoken_at_once_do_not_collide() {
                             settings: &[],
                         },
                         &destination,
+                        &Cancel::new(),
                     )
                     .map(|spoken| spoken.bytes)
                 })

@@ -135,6 +135,36 @@ machine_state_dir() { # HOME to ask under
   dirname "$csv"
 }
 
+# A stand-in `ffprobe` that records every call and then runs the real one.
+#
+# Built exactly like `stub_voice_service` below, for exactly its reasons: one
+# bash stand-in, and a two-line `.cmd` trampoline into that same file on
+# Windows, which cannot execute a shebang (D-155, D-176). Nothing here is a
+# second implementation of anything — the real `ffprobe` does the work.
+#
+# `SPOONSTILL_FFPROBE` is the documented override (`tools.rs`), the same one
+# the reproduction in `AI Model/claude/reproduce.md` uses.
+counting_ffprobe() { # log-path
+  export PROBE_LOG="$1"
+  : > "$PROBE_LOG" || return 1
+  cat > "$WORK/count-ffprobe" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$PROBE_LOG"
+exec "\$REAL_FFPROBE" "\$@"
+STUB
+  chmod +x "$WORK/count-ffprobe"
+  export REAL_FFPROBE="$FFPROBE" SPOONSTILL_FFPROBE="$WORK/count-ffprobe"
+
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*)
+      printf '@echo off\r\n"%s" "%s" %%*\r\n' \
+        "$(cygpath -w "$BASH")" "$(cygpath -w "$WORK/count-ffprobe")" \
+        > "$WORK/count-ffprobe.cmd" || return 1
+      export SPOONSTILL_FFPROBE="$WORK/count-ffprobe.cmd"
+      ;;
+  esac
+}
+
 check() { # description, then a command
   local what="$1"; shift
   # A gate with no command is a gate that passes by doing nothing. This
@@ -306,7 +336,23 @@ check "a narration replaced by a different one of the same length re-renders" \
 # Silent scenes are used deliberately: stills with no script and no recording
 # all resolve to the same silence, so this provokes the collision with no
 # network and no voice service at all.
+# It also measures it once (D-184), which is the same sentence one layer along
+# and is why this gate grew rather than a twenty-fourth being added (D-177's
+# shape). Generating once was D-108; every scene then *probed* the one
+# artifact it shared, so a fully cached 500-scene render spawned 1,501
+# `ffprobe` processes of which 500 named one silence file.
+#
+# A gate that borrows the counting stand-in gives it back, however it leaves
+# (D-176) — the body is a separate function and this wrapper is its only
+# caller, so no exit skips the `unset`.
 gate_single_flight() {
+  local rc=0
+  gate_single_flight_inner || rc=$?
+  unset SPOONSTILL_FFPROBE REAL_FFPROBE PROBE_LOG
+  return "$rc"
+}
+
+gate_single_flight_inner() {
   local proj="$WORK/oneflight"
   mkdir -p "$proj"
   local i
@@ -326,8 +372,31 @@ gate_single_flight() {
   local n
   n=$(ls "$proj/.spoonstill/cache/audio" | wc -l | tr -d ' ')
   [ "$n" = "1" ] || { echo "expected 1 cache entry, found $n"; return 1; }
+
+  # Now the warm run, with every `ffprobe` recorded. Warm on purpose: nothing
+  # is written, so the only calls naming the shared artifact are the ones
+  # scenes made to measure it. Before D-184 this is 16.
+  counting_ffprobe "$WORK/oneflight-probes.log" || return 1
+  "$STILL" render "$proj" --out "$WORK/oneflight.mp4" --audio-jobs 8 \
+    >/dev/null 2>&1 || return 1
+
+  local probes
+  probes=$(grep -c -- "silent-" "$WORK/oneflight-probes.log" || true)
+  [ "$probes" = "1" ] || {
+    echo "the one shared narration was probed $probes times, not once"
+    return 1; }
+
+  # Non-vacuous: the stand-in really is what ran. A counter wired to nothing
+  # reports zero probes and passes the check above by finding nothing to
+  # count (D-125, D-154).
+  local total
+  total=$(wc -l < "$WORK/oneflight-probes.log" | tr -d " ")
+  [ "$total" -ge 16 ] || {
+    echo "only $total probes were recorded in all — the counting stand-in was not used"
+    return 1; }
 }
-check "sixteen scenes sharing one narration generate it once" gate_single_flight
+check "sixteen scenes sharing one narration generate it once, and measure it once" \
+  gate_single_flight
 
 # --- gate 4d: the segment cache is bounded, and flipping back is free -------
 # D-109. Nothing swept superseded segments, so a project accumulated one dead

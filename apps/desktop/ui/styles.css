@@ -40,7 +40,7 @@
 :root {
   --b: oklch(0.145 0.002 60); --p: oklch(0.178 0.002 60); --r: oklch(0.205 0.002 60);
   --g: oklch(0.158 0.002 60); --l: oklch(0.285 0.003 70); --h: oklch(0.196 0.002 60);
-  --1: oklch(0.945 0.006 75); --2: oklch(0.70 0.005 75); --3: oklch(0.545 0.005 75);
+  --1: oklch(0.945 0.006 75); --2: oklch(0.70 0.005 75); --3: oklch(0.612 0.005 75);
   --a: oklch(0.945 0.006 75); --af: oklch(0.145 0.002 60); --ab: oklch(0.265 0.004 75); --al: oklch(0.46 0.006 75);
   --ok: oklch(0.74 0.09 155); --w: oklch(0.80 0.11 80); --e: oklch(0.72 0.14 28);
   --eb: oklch(0.225 0.035 28); --el: oklch(0.38 0.07 28); --s: oklch(0.255 0.004 75);
@@ -50,7 +50,7 @@
 html[data-theme="light"] {
   --b: oklch(0.962 0.005 75); --p: oklch(0.995 0.002 75); --r: oklch(0.978 0.004 75);
   --g: oklch(1 0 0); --l: oklch(0.882 0.006 75); --h: oklch(0.938 0.005 75);
-  --1: oklch(0.225 0.004 60); --2: oklch(0.455 0.005 75); --3: oklch(0.605 0.006 75);
+  --1: oklch(0.225 0.004 60); --2: oklch(0.455 0.005 75); --3: oklch(0.520 0.006 75);
   --a: oklch(0.265 0.004 60); --af: oklch(0.965 0.006 75); --ab: oklch(0.912 0.006 75); --al: oklch(0.70 0.008 75);
   --ok: oklch(0.52 0.11 155); --w: oklch(0.56 0.12 70); --e: oklch(0.52 0.17 28);
   --eb: oklch(0.952 0.022 28); --el: oklch(0.85 0.06 28); --s: oklch(0.922 0.007 75);
@@ -68,6 +68,16 @@ html[data-theme="light"] {
   --line-2:  var(--l);
   --input:   var(--in);
 
+  /* Three levels of ink, and every one of them clears 4.5:1 on every surface
+     it can land on — measured, not eyeballed, and checked by a test rather
+     than restated here (D-183). `--3` used to sit at 3.46-3.99:1, which is
+     under the AA minimum on all four base surfaces and worse on a hovered
+     row, which is the state every row you are reading is in.
+
+     The one surface it cannot clear is `--accent-soft`, and that is fixed
+     where it happens rather than by moving the token further and flattening
+     the series: a selected row steps its secondary text up to `--ink-2`, the
+     way `.chip.on .n` already did. */
   --ink:     var(--1);
   --ink-2:   var(--2);
   --ink-3:   var(--3);
@@ -603,6 +613,13 @@ button.big { padding: 10px 24px; font-size: 14px; min-width: 230px; }
 }
 
 .field input:focus, .search:focus, .select:focus { outline: none; border-color: var(--ink-3); }
+/* …but a tinted border is not a focus indicator for somebody who cannot see
+   where the caret is. The ring comes back for the keyboard; the border tint
+   stays, so the mouse sees exactly what it saw before (D-183). */
+.field input:focus-visible, .search:focus-visible, .select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .select { max-width: 260px; }
 #voice-count { flex: none; white-space: nowrap; }
 .field input.bad { border-color: var(--bad); }
@@ -802,12 +819,19 @@ button.small { padding: 3px 9px; font-size: 11px; }
    know is there. They are legible at rest and full ink under the pointer:
    discoverable, still quiet, still not shouting at the row you are reading
    (D-101, softening D-100). */
-.arrange { display: inline-flex; gap: 4px; opacity: 0.42; transition: opacity 90ms ease; }
+/* Quiet by **colour**, not by transparency (D-183). `opacity: 0.42` composited
+   the label to 2.19:1 dark and 1.98:1 light — enabled controls that read as
+   disabled, on the column an operator had already failed to find once. The
+   intent survives: `--ink-2` at rest is a step below the row's own text, and
+   the whole group steps up to full ink when the row is under the pointer or
+   holds focus. What is gone is the transparency, which is the part that made
+   the number meaningless. */
+.arrange { display: inline-flex; gap: 4px; }
 /* Reserved once, so arming Remove cannot make the row's controls jump — and so
    the column's width is a constant the media queries can be checked against. */
 .arrange-button.wordy { min-width: 62px; }
-.grid tr:hover .arrange,
-.grid tr:focus-within .arrange { opacity: 1; }
+.grid tr:hover .arrange-button:not(:disabled),
+.grid tr:focus-within .arrange-button:not(:disabled) { color: var(--ink); }
 
 .arrange-button {
   font: inherit;
@@ -828,6 +852,16 @@ button.small { padding: 3px 9px; font-size: 11px; }
 .arrange-button.armed {
   color: var(--warn);
   border-color: var(--warn);
+}
+
+/* Keyboard focus is visible, everywhere (D-183). The stylesheet had **zero**
+   `:focus-visible` rules, so the only indication a control held focus was
+   whatever that control happened to do on `:focus` — and the three controls
+   that did anything set `outline: none` and tinted a border instead.
+   `:focus-visible` and not `:focus`, so nothing changes for the mouse. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .sr-only {
@@ -906,6 +940,7 @@ button.small { padding: 3px 9px; font-size: 11px; }
 }
 
 .narration-input:focus { outline: none; }
+.narration-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .badge {
   display: inline-block;
@@ -1023,6 +1058,10 @@ button.small { padding: 3px 9px; font-size: 11px; }
    project.yaml already named. They used to be the same highlight, so clicking
    a row changed nothing visible. D-091. */
 .voices li.on { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+/* The one surface `--ink-3` cannot clear 4.5:1 on, stepped up a level exactly
+   as `.chip.on .n` steps up on the same background (D-183). A selected row is
+   the row being read, so its metadata being *more* legible is right anyway. */
+.voices li.on .v-gender, .voices li.on .v-id { color: var(--ink-2); }
 .voices li.is-default { box-shadow: inset 3px 0 0 var(--ink-3); }
 
 /* Only ever holds "✓ Selected" or "Project default", and only on one row —

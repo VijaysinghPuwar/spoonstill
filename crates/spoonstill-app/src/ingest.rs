@@ -1159,8 +1159,15 @@ mod tests {
         // An empty folder loads as a project with one `NoScenes` problem, not
         // as an error (D-156) — nothing here is probed, so the real checker is
         // the honest one to use.
-        let project = crate::import::load(&root, &crate::import::ProbeCheck::from_env())
-            .expect("a new project reads back as a project");
+        let project = crate::import::load(
+            &root,
+            &crate::import::ProbeCheck::from_env(),
+            // Nothing offers a way to stop this: it reads one folder that was
+            // just created or just added to. The flag is passed unset rather
+            // than made optional, for `preview`'s reason.
+            &spoonstill_media::scene::Cancel::new(),
+        )
+        .expect("a new project reads back as a project");
 
         assert_eq!(
             project.settings.voice.0, "en-GB-RyanNeural",
