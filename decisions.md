@@ -8940,3 +8940,69 @@ it. `* text=auto` remains untaken for the reason above, unchanged: the
 measurement covers shell scripts and a Makefile, and renormalising the
 fixtures is exactly the kind of change this project does not make on a
 guess.
+
+### D-190 — A cached WAV holds every byte its header declares, and the window's script is parsed before it ships · Accepted
+
+**The defect D-184 recorded and left for the author, now acted on at the
+author's request** (2026-09-24: *"make the software more stable … test
+everything which you change"*). A normalized narration in the audio cache,
+cut to 200 bytes, is still a *structurally valid* WAV to `ffprobe` — 48 kHz,
+stereo, s16, 0.0006 s — so `measure` accepted it and that scene rendered as
+**one frame**. Reproduced on `fixtures/projects/renderable`: the film went
+from **18.055 s to 12.788 s**, exit 0, `6 narrations from cache` — a scene's
+whole voice gone from a film reported as a success. The way a file gets cut
+short on this author's machine is already on record: D-178's segment damaged
+on the SMB volume, header intact and picture gone.
+
+**The check is the header against the length, not a second probe.** Every
+artifact the cache holds is written by FFmpeg to a seekable file, which
+rewrites the RIFF and `data` sizes once the last sample is out. Measured on
+all six artifacts of that fixture — `fmt `, a 26-byte `LIST`, then `data` —
+the RIFF size plus eight is the file's length **exactly**. A file cut
+anywhere keeps its header and loses its tail, so the two disagree. `whole_wav`
+reads a few dozen bytes, walks the chunks to `data` (honouring the pad byte,
+because FFmpeg's `LIST` chunk is the kind that can be odd), and refuses a
+`data` chunk that runs past the end even when the RIFF size was rewritten to
+match. It runs **before** the probe, so a damaged entry costs no `ffprobe`
+spawn. A scene is at most `MAX_SCENE_SECONDS`, 691 MB of normalized PCM, so a
+32-bit size never overflows here.
+
+**D-184's suggested check was narrower and is not what was built.** It noted
+that a *silent* artifact's key is its sample count. True, and it covers one
+kind of three: the cut that matters most is a spoken line, whose key is a hash
+of words and says nothing about length. The header covers all three and needs
+no knowledge of the key.
+
+**It lives in `measure`, which has exactly two callers**, and both are the
+right place: the cache hit in `spoonstill_app::audio::cached`, which already
+evicts an entry `measure` refuses when it holds the key's lock (D-108), and
+`finish`, which measures FFmpeg's temporary before the rename — so a normalize
+killed mid-write can never be renamed into the cache either.
+
+**Verified end to end:** the damaged project re-rendered with the fix rebuilt
+the entry (200 → 1 017 678 bytes), reported `5 narrations from cache`, and
+produced a film **byte-identical** to the one rendered before the damage.
+`cut_short_audio.rs` states the load-bearing claim about somebody else's
+program against real FFmpeg output for all three artifact kinds — silence, a
+supplied recording, a trimmed spoken line — and then cuts each to 200 bytes,
+half, and one byte short. Two mutations, each caught: switching the check off
+fails the integration test with *"silence cut to 200 of 384078 bytes was
+accepted as 0.0006 s"*, and dropping the pad byte fails the odd-`LIST` unit
+test.
+
+**Not covered, and stated:** a WAV whose samples are overwritten in place with
+zeros keeps its length and its header, so it passes and plays as silence of
+the right duration. That is D-178's picture damage in audio form, and
+detecting it would mean reading every sample of every cached narration on
+every render. The raw provider MP3 is not checked either — MP3 carries no
+total length to compare against — but it is written beside and renamed
+(`edge.rs`), so only damage after the fact can reach it.
+
+**And `make ui`, in `make lint`.** CLAUDE.md recorded that nothing in this
+repo syntax-checks `app.js` and that a broken edit there is silent in a
+webview — the window opens, draws its markup, and every control is dead.
+`node --check` over `apps/desktop/ui/*.js`, beside `make shell` and
+`make workflows` and failing the same way when the tool is missing. Verified
+both ways: a file holding `function (` fails the target, and with `node` off
+`PATH` it names the tool and exits non-zero rather than passing by checking
+nothing.

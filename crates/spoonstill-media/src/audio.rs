@@ -468,9 +468,19 @@ pub fn silence(
 ///
 /// # Errors
 ///
-/// [`MediaError::UnusableInput`] when the file is not 48 kHz stereo PCM, or
-/// when its duration is zero, negative, or not a number (D-021).
+/// [`MediaError::UnusableInput`] when the file is not 48 kHz stereo PCM, when
+/// it is shorter than its own header says (D-190), or when its duration is
+/// zero, negative, or not a number (D-021).
 pub fn measure(tools: &Tools, path: &Path) -> Result<Normalized, MediaError> {
+    // Before the probe, because `ffprobe` does not ask this: a WAV cut to 200
+    // bytes still probes as 48 kHz stereo s16 of 0.0006 s, and that scene
+    // then renders as one frame in a film reported as a success (D-190).
+    if let Err(detail) = whole_wav(path) {
+        return Err(MediaError::UnusableInput {
+            path: path.to_path_buf(),
+            detail,
+        });
+    }
     let probed = probe::probe(tools, path, DEFAULT_PROBE_TIMEOUT)?;
 
     let audio = probed.audio().ok_or_else(|| MediaError::UnusableInput {
@@ -527,6 +537,61 @@ pub fn measure(tools: &Tools, path: &Path) -> Result<Normalized, MediaError> {
         path: path.to_path_buf(),
         duration,
     })
+}
+
+/// Whether a WAV holds every byte its own header declares (D-190).
+///
+/// Every artifact this module keeps is written by FFmpeg to a seekable file,
+/// which rewrites the RIFF and `data` sizes once the last sample is out — so
+/// in a whole file the RIFF size is the file's length less eight, and the
+/// `data` chunk ends inside it. A file cut short anywhere, by a crash, a full
+/// disk or a network volume (D-178), keeps the header and loses the tail, and
+/// fails the first comparison. Reads a few dozen bytes, not the samples.
+///
+/// A scene is at most [`spoonstill_core::project::MAX_SCENE_SECONDS`], about
+/// 691 MB of normalized PCM, so a 32-bit size never overflows here.
+fn whole_wav(path: &Path) -> Result<(), String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let unreadable = |e: std::io::Error| format!("cannot be read: {e}");
+    let mut file = std::fs::File::open(path).map_err(unreadable)?;
+    let length = file.metadata().map_err(unreadable)?.len();
+
+    let mut head = [0u8; 12];
+    if file.read_exact(&mut head).is_err() || &head[0..4] != b"RIFF" || &head[8..12] != b"WAVE" {
+        return Err("is not a WAV file".into());
+    }
+    let declared = u64::from(u32::from_le_bytes([head[4], head[5], head[6], head[7]])) + 8;
+    if declared != length {
+        return Err(format!(
+            "is {length} bytes where its header declares {declared} — a cut-short \
+             artifact would drive a scene of the wrong length"
+        ));
+    }
+
+    // Walk the chunks to `data`: FFmpeg writes `LIST` before it, and nothing
+    // promises which chunks another build writes.
+    let mut at = 12u64;
+    let mut chunk = [0u8; 8];
+    while at + 8 <= length {
+        file.seek(SeekFrom::Start(at)).map_err(unreadable)?;
+        file.read_exact(&mut chunk).map_err(unreadable)?;
+        let size = u64::from(u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]));
+        let end = at + 8 + size;
+        if &chunk[0..4] == b"data" {
+            return if end <= length {
+                Ok(())
+            } else {
+                Err(format!(
+                    "holds {} bytes of samples where its header declares {size}",
+                    length - (at + 8)
+                ))
+            };
+        }
+        // Chunks are padded to an even length.
+        at = end + (size & 1);
+    }
+    Err("has no sample data".into())
 }
 
 /// Run one short FFmpeg invocation, cleaning up its temporary on failure.
@@ -764,6 +829,87 @@ mod tests {
             );
         }
         assert!(!dest.exists());
+    }
+
+    /// A WAV built by hand: `RIFF`, `WAVE`, the given chunks, and a RIFF size
+    /// that matches unless the test says otherwise.
+    fn wav(chunks: &[(&[u8; 4], Vec<u8>, u32)]) -> Vec<u8> {
+        let mut body = b"WAVE".to_vec();
+        for (id, bytes, declared) in chunks {
+            body.extend_from_slice(*id);
+            body.extend_from_slice(&declared.to_le_bytes());
+            body.extend_from_slice(bytes);
+            if bytes.len() % 2 == 1 {
+                body.push(0);
+            }
+        }
+        let mut out = b"RIFF".to_vec();
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend(body);
+        out
+    }
+
+    fn check(bytes: &[u8]) -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!(
+            "spoonstill-whole-wav-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("a.wav");
+        std::fs::write(&path, bytes).expect("write");
+        let answer = whole_wav(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+        answer
+    }
+
+    /// FFmpeg's own shape — `fmt `, an odd-length `LIST`, then `data` — is
+    /// whole, which proves the walk honours the pad byte.
+    #[test]
+    fn a_whole_wav_with_an_odd_chunk_before_its_samples_passes() {
+        let bytes = wav(&[
+            (b"fmt ", vec![0; 16], 16),
+            (b"LIST", vec![1; 25], 25),
+            (b"data", vec![0; 400], 400),
+        ]);
+        assert_eq!(check(&bytes), Ok(()));
+    }
+
+    /// Cut anywhere, the RIFF size no longer matches the length (D-190).
+    #[test]
+    fn a_wav_cut_short_anywhere_is_refused() {
+        let bytes = wav(&[(b"fmt ", vec![0; 16], 16), (b"data", vec![0; 400], 400)]);
+        for keep in [12, 40, 200, bytes.len() - 1] {
+            let answer = check(&bytes[..keep]);
+            assert!(
+                answer
+                    .as_ref()
+                    .is_err_and(|e| e.contains("header declares")),
+                "cut to {keep} bytes answered {answer:?}"
+            );
+        }
+    }
+
+    /// A RIFF size rewritten to match a cut file still leaves `data` claiming
+    /// samples that are not there.
+    #[test]
+    fn a_data_chunk_longer_than_the_file_is_refused() {
+        let bytes = wav(&[(b"fmt ", vec![0; 16], 16), (b"data", vec![0; 100], 400)]);
+        let answer = check(&bytes);
+        assert!(
+            answer
+                .as_ref()
+                .is_err_and(|e| e.contains("100 bytes of samples")),
+            "{answer:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_wav_or_has_no_samples_is_refused() {
+        assert_eq!(check(b"ID3\x04 an mp3"), Err("is not a WAV file".into()));
+        assert_eq!(check(b""), Err("is not a WAV file".into()));
+        let no_data = wav(&[(b"fmt ", vec![0; 16], 16)]);
+        assert_eq!(check(&no_data), Err("has no sample data".into()));
     }
 
     /// One hour, the domain's own ceiling, expressed in samples.

@@ -274,6 +274,35 @@ be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
 
+### State as of 2026-09-24 — a damaged narration no longer shortens a film in silence
+
+**D-190, and `v0.1.13`.** The author asked for a Clipchamp voice (`Rehaan`),
+then decided against it once it was established that it cannot be had for
+free: `hi-IN-RehaanNeural` is an **Azure** voice, the Edge service has 322
+voices and only five for India (`hi-IN-Madhur`/`Swara`, `en-IN-Prabhat`/
+`Neerja`/`NeerjaExpressive`), and asking `edge-tts` for it directly returns
+`NoAudioReceived`. A BYOK Azure provider would reach it; **not built, by the
+author's choice** — do not start it unasked.
+
+**What was built instead is D-184's recorded-and-deferred defect.** A cached
+normalized WAV cut to 200 bytes still probes as valid, so the scene rendered
+as one frame: `fixtures/projects/renderable` went **18.055 s → 12.788 s, exit
+0**. `measure` now checks the RIFF size against the file length before it
+probes — FFmpeg's seekable writer makes them equal exactly — and the damaged
+entry is evicted and rebuilt: the re-render was **byte-identical** to the film
+from before the damage. `cut_short_audio.rs` holds the claim against real
+FFmpeg for silence, a supplied recording and a spoken line. Plus `make ui`, so
+`app.js` is parsed by `make lint`.
+
+**Measured at the author's scale, against a binary built from the previous
+commit**, 100 distinct scenes, same folder basename: cold **34.45 / 32.83 s
+old, 33.57 / 32.49 s new**; warm 2.35–2.60 s old, 2.37–2.59 s new; films
+byte-identical. `make gates` 39/39, `cargo test --workspace` **692 passed / 11
+ignored** (686 before; no failure recurred, so the unnamed one-off of
+2026-09-20 is still unnamed), `make lint` green, `cargo audit` clean, D-132
+cross-check clean.
+
+
 ### State as of 2026-09-20 — the Windows session's work, checked on the Mac before it was believed
 
 **D-188 and D-189 are a Windows session's own findings, and they hold here.**
@@ -548,8 +577,11 @@ were found rather than fixed on the way past:
   film instead of 100 s. **Both binaries behave identically, so it predates
   D-184.** It is checkable: a silent artifact's key *is* its sample count.
   D-184 records it; it is a behaviour change and the author's call.
+  **Done in D-190 (2026-09-24), at the author's request** — by the header, not
+  the key, so it covers spoken lines too.
 - Nothing in this repo syntax-checks `app.js`. A broken edit there is silent
   in a webview. `node --check` was run by hand on every change here.
+  **Done in D-190: `make ui`, inside `make lint`.**
 
 **Both platforms, and the answer is not symmetric.** *"Optimise for Windows"*
 is still not the task — the table further down this file settles that, and it
@@ -3487,7 +3519,7 @@ before touching `MotionSeed`, `MotionSpec::seeded`, the segment filename,
 `occurrences_of`, or what `create_project` writes**, and **D-154 before starting
 M3, writing `state.db`, or assuming resume needs one**, **D-162 before touching
 `VideoEncoder`, `quality_args`, `resolve_encoder`, the `-c:v` arguments in
-`scene.rs`, or the software arm of `segment_key`**, **D-188 before touching
+`scene.rs`, or the software arm of `segment_key`**, **D-190 before touching `whole_wav` or `audio::measure`**, **D-188 before touching
 `AUDIO_CACHE_DIR`, `CopyStep`, `ingest::copy_in`, or the wording of
 `ProblemKind::UndersizedSources`**, **D-178 before touching
 `atomic::Partial`, `sweep_partials`, `is_partial_of`, `concat::stopped_at`,

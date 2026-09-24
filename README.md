@@ -842,9 +842,9 @@ before it is called a test**.
 |---|---|
 | Rust | **~44,800 lines** across 6 crates + a Tauri app · edition 2024, pinned to 1.94 |
 | UI | ~3,900 lines of hand-written HTML/CSS/JS — no framework, no build step |
-| Tests | **706 `#[test]` functions** — 47 unit-test modules, 16 integration suites |
+| Tests | **712 `#[test]` functions** — 47 unit-test modules, 17 integration suites |
 | Exit gates | **39** shell gates that render real media and assert real properties |
-| Decisions | **156 numbered decisions** in `decisions.md`, each Accepted / Open / Superseded |
+| Decisions | **157 numbered decisions** in `decisions.md`, each Accepted / Open / Superseded |
 | Direct dependencies | **12 third-party crates** at runtime (plus one build-time, one dev-only) — and `spoonstill-core` has **none** |
 | `unsafe` | forbidden at the workspace root |
 | CI jobs per push | 6 — advisories, macOS, Windows, both installers executed, and the gates |
@@ -994,7 +994,7 @@ Working on it:
 ```bash
 make help       # every entry point
 make test       # the whole workspace
-make lint       # clippy denied, a format check, the workflows, and the scripts
+make lint       # clippy denied, a format check, the workflows, the scripts, and app.js
 make fixtures   # synthesize the test media
 make gates      # every milestone's exit gates — the real state of the build
 make demo       # rebuild the GIF at the top, from a real render
@@ -1038,7 +1038,7 @@ Read in this order; later files never override earlier ones.
 
 | File | What it is |
 |---|---|
-| [`decisions.md`](decisions.md) | **Single source of truth.** 156 numbered decisions, each with the evidence that produced it. |
+| [`decisions.md`](decisions.md) | **Single source of truth.** 157 numbered decisions, each with the evidence that produced it. |
 | [`plan.md`](plan.md) | Milestones M0–M5, each with entry conditions, deliverables, and exit gates that are runnable commands. |
 | [`ffmpeg-findings.md`](ffmpeg-findings.md) | Benchmarks measured on real hardware, with reproduction commands. Evidence, not policy. |
 | [`PROCESS.md`](PROCESS.md) | How the work is actually done — reproduce, fix, prove the test fails without the fix. |

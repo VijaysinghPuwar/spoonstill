@@ -15,7 +15,7 @@ CARGO ?= cargo
 # Scratch for `make demo`. Outside the tree: it holds a render, not a fixture.
 DEMO_DIR ?= $(CURDIR)/target/demo
 
-.PHONY: help test tts-live lint workflows shell fmt fixtures brand demo check clean gates gates-m0 gates-m1 gates-m2
+.PHONY: help test tts-live lint workflows shell ui fmt fixtures brand demo check clean gates gates-m0 gates-m1 gates-m2
 
 help: ## Show available targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -30,11 +30,12 @@ tts-live: ## Exercise the Edge provider against the real service (D-094)
 	@# the thing that goes stale.
 	$(CARGO) test -p spoonstill-tts --test edge_live -- --ignored --nocapture
 
-lint: ## clippy with warnings denied, a format check, the workflows and the scripts
+lint: ## clippy with warnings denied, a format check, the workflows, the scripts and the window's JavaScript
 	$(CARGO) clippy --workspace --all-targets -- -D warnings
 	$(CARGO) fmt --all --check
 	@$(MAKE) --no-print-directory workflows
 	@$(MAKE) --no-print-directory shell
+	@$(MAKE) --no-print-directory ui
 
 workflows: ## Validate .github/workflows — this one cannot be done in CI (D-136)
 	@# A workflow GitHub rejects runs **no jobs at all**: no logs, no
@@ -61,6 +62,19 @@ shell: ## Check every shell script — the harness runs `rm -rf` (D-175)
 	else \
 	  echo "  shellcheck is not installed — the scripts were NOT checked."; \
 	  echo "  brew install shellcheck   (or see https://www.shellcheck.net)"; \
+	  exit 1; \
+	fi
+
+ui: ## Syntax-check the window's JavaScript — a webview fails in silence (D-190)
+	@# A syntax error in app.js is not reported anywhere an operator can see:
+	@# the window opens, draws its markup, and every control is dead. Nothing
+	@# else in this tree parses the file, so until this existed every edit to
+	@# it was checked by hand with `node --check` or not at all.
+	@if command -v node >/dev/null 2>&1; then \
+	  for f in apps/desktop/ui/*.js; do node --check "$$f" || exit 1; done && echo "  window scripts OK"; \
+	else \
+	  echo "  node is not installed — the window's JavaScript was NOT checked."; \
+	  echo "  brew install node   (or see https://nodejs.org)"; \
 	  exit 1; \
 	fi
 
