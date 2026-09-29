@@ -9006,3 +9006,58 @@ webview — the window opens, draws its markup, and every control is dead.
 both ways: a file holding `function (` fails the target, and with `node` off
 `PATH` it names the tool and exits non-zero rather than passing by checking
 nothing.
+
+### D-191 — Python is found by its install folder, not only by `PATH` · Accepted
+
+**Reported 2026-09-29 from this Windows machine:** Settings said *"Spoonstill
+needs a small program called edge-tts … it is not installed yet"*, and Install
+it for me failed with *"`pipx` is not on this machine; `python` is not on this
+machine; `python3` is not on this machine"*. `runs.csv` holds twenty identical
+`install_tool` failures in six minutes.
+
+**Both tools were installed.** `%LOCALAPPDATA%\Programs\Python\Python312\
+python.exe` and `…\Python312\Scripts\edge-tts.exe` (7.2.7) were on disk. What
+had changed was the **user `PATH`**: 1 471 characters holding the machine
+`PATH` three times over, ending in a truncated `C:\Program Files ` — the shape
+`setx PATH "%PATH%;…"` leaves, since it copies the merged value into the user
+key and cuts it at 1024. The python.org installer's two entries were cut off
+the end, so every program launched afterwards had no Python at all.
+
+**The fault that is ours:** `tools::locate` searched `PATH` and then a short
+list of package-manager folders, and on Windows that list had `%APPDATA%\
+Python\*\Scripts` (where `pip install --user` writes) but **not** the
+python.org installer's own default, `%LOCALAPPDATA%\Programs\Python\Python3xx`
+and its `Scripts` — which is where a plain `pip install edge-tts` writes. D-103
+is exactly this defect for Homebrew on macOS; the Windows list was simply
+missing the most common Python there is.
+
+Now searched on Windows, all by reading the disk rather than naming versions:
+
+- `%LOCALAPPDATA%\Programs\Python\Python*` and each `Scripts`, and `Launcher`
+  (`py.exe`) — the per-user python.org install;
+- the same under `%ProgramFiles%` — the all-users install, filtered to
+  `Python*` so this is not a walk of Program Files;
+- a Microsoft Store Python's `pip --user` target,
+  `Packages\PythonSoftwareFoundation.Python.*\LocalCache\local-packages\
+  Python*\Scripts`;
+- a Conda base environment in `~\miniconda3`, `~\anaconda3`, `~\miniforge3`.
+
+And the Windows installer list gains `py -3 -m pip install --user edge-tts`,
+the one spelling of Python that its installer puts in a folder of its own.
+
+**Measured against a control.** With `PATH` set to `C:\WINDOWS\system32;
+C:\WINDOWS` — no Python, which is what the damaged machine amounted to —
+`still doctor` built from 66c6d6b reports `missing edge` with the exact
+sentence in the screenshot, and built from this change reports `ok edge`. A
+real narration was spoken and a captioned film rendered under that same `PATH`.
+
+**Deliberately not searched:** `%LOCALAPPDATA%\Microsoft\WindowsApps`. On a
+machine without Store Python its `python.exe` is the alias that opens the Store
+and exits 9009; naming it would turn "not on this machine" into a stranger
+failure. When that folder is on `PATH` it is already found there.
+
+**This machine's `PATH` was repaired by hand**, with the old value kept in
+`~\user-PATH-backup-2026-09-29.txt`: the duplicated machine entries and the
+truncated one removed, Python, its `Scripts`, the launcher and `~\.cargo\bin`
+put back. That is an operator's environment rather than this program, and is
+recorded here so the next session does not mistake it for a regression.

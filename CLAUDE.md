@@ -274,6 +274,34 @@ be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
 
+### State as of 2026-09-29 — "edge-tts is not installed" over an installed edge-tts (D-191)
+
+**Windows 11, the author's machine, `v0.1.14`.** Settings said the voice
+service was missing and Install failed with *"`pipx`/`python`/`python3` is not
+on this machine"* — while Python 3.12 and `edge-tts` 7.2.7 were both on disk.
+The **user `PATH` had been truncated** (1 471 chars, the machine `PATH`
+repeated three times, ending `C:\Program Files ` — `setx`'s 1024 cut),
+dropping Python's two entries. Repaired by hand; the old value is in
+`~\user-PATH-backup-2026-09-29.txt`. **If a shell there cannot find `cargo`
+or `python`, check the user `PATH` before anything else.**
+
+Ours: `tools::locate` never searched the python.org installer's own default,
+`%LOCALAPPDATA%\Programs\Python\Python3xx\{,Scripts}` — D-103 for Windows. Now
+it does, plus `%ProgramFiles%\Python*`, Store Python's `pip --user` target,
+Conda bases, and `py -3 -m pip` as a last installer. Proven against a control
+built from 66c6d6b under `PATH=C:\WINDOWS\system32;C:\WINDOWS`: control says
+`missing edge` (the screenshot's sentence), fix says `ok edge`; a 40-scene
+spoken, captioned render under that `PATH` is exit 0 and a warm re-render is
+40/40 reused and byte-identical. M1 7/8 and M2 22/23 there, the one miss in
+each being Smart App Control refusing a test binary before it ran.
+
+**Smart App Control, one more trap.** The link is deterministic, so a blocked
+`still.exe` rebuilt in place is **the same hash and blocked again** — five
+relinks in a row stayed blocked. Building into another directory changes the
+embedded PDB path and so the hash: `cargo build --release -p spoonstill-cli
+--target-dir target\alt`, then copy `target\alt\release\still.exe` over
+`target\release\still.exe`; cargo treats the copy as fresh and the gates run it.
+
 ### State as of 2026-09-24 — a damaged narration no longer shortens a film in silence
 
 **D-190, and `v0.1.13`.** The author asked for a Clipchamp voice (`Rehaan`),

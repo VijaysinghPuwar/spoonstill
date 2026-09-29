@@ -101,6 +101,21 @@ const INSTALLERS: &[(&str, &[&str])] = &[
         "python3",
         &["-m", "pip", "install", "--user", "--upgrade", "edge-tts"],
     ),
+    // The python.org launcher, which its installer puts in a folder of its own
+    // and which is the one Python spelling that survives a damaged `PATH`
+    // being found by `tools::locate` (D-191).
+    (
+        "py",
+        &[
+            "-3",
+            "-m",
+            "pip",
+            "install",
+            "--user",
+            "--upgrade",
+            "edge-tts",
+        ],
+    ),
 ];
 
 /// The last thing a failing tool said, which is the part that names the cause.

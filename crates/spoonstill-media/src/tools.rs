@@ -444,6 +444,26 @@ fn package_manager_dirs() -> Vec<PathBuf> {
             // operator who ran exactly the command the error named still had no
             // FFmpeg this search could see (D-142).
             dirs.extend(winget_ffmpeg_bins(&winget.join("Packages")));
+            // The python.org installer's per-user default (D-191):
+            // `Programs\Python\Python312` holds `python.exe`, its `Scripts`
+            // holds whatever `pip install` put there — `edge-tts.exe` included
+            // — and `Launcher` holds `py.exe`. The installer adds the first two
+            // to the user `PATH`, and that `PATH` is one `setx` away from being
+            // truncated at 1024 characters, which is how a machine with Python
+            // and `edge-tts` both installed reported neither.
+            dirs.extend(python_org_dirs(
+                &PathBuf::from(&local).join(r"Programs\Python"),
+            ));
+            // Microsoft Store Python sends `pip install --user` into its
+            // package sandbox: `Packages\PythonSoftwareFoundation.Python.3.12_
+            // <id>\LocalCache\local-packages\Python312\Scripts`.
+            dirs.extend(store_python_scripts(
+                &PathBuf::from(&local).join("Packages"),
+            ));
+        }
+        // The same installer run "for all users".
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            dirs.extend(python_org_dirs(&PathBuf::from(&program_files)));
         }
         if let Some(data) = std::env::var_os("ProgramData") {
             dirs.push(PathBuf::from(&data).join(r"chocolatey\bin"));
@@ -453,6 +473,12 @@ fn package_manager_dirs() -> Vec<PathBuf> {
             // pipx's own shims, then `pip install --user`, whose directory
             // carries the Python version: `%APPDATA%\Python\Python314\Scripts`.
             dirs.push(home.join(r".local\bin"));
+            // A Conda base environment: the interpreter at its root, what pip
+            // installed in `Scripts`.
+            for conda in ["miniconda3", "anaconda3", "miniforge3"] {
+                dirs.push(home.join(conda));
+                dirs.push(home.join(conda).join("Scripts"));
+            }
         }
         if let Some(roaming) = std::env::var_os("APPDATA") {
             dirs.extend(subdirectories(
@@ -513,6 +539,61 @@ fn subdirectories(parent: &Path, leaf: &str) -> Vec<PathBuf> {
         .collect();
     found.sort();
     found
+}
+
+/// Every python.org install directly under `parent`, and each one's `Scripts`.
+///
+/// Only children named `Python…` (and the `Launcher` that holds `py.exe`), so
+/// pointed at `C:\Program Files` this is the Python installs and not every
+/// program on the machine. Sorted, oldest first, like [`subdirectories`].
+#[cfg(any(target_os = "windows", test))]
+fn python_org_dirs(parent: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return Vec::new();
+    };
+    let mut installs: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            name.starts_with("python") || name == "launcher"
+        })
+        .map(|entry| entry.path())
+        .filter(|dir| dir.is_dir())
+        .collect();
+    installs.sort();
+    let mut dirs = Vec::new();
+    for install in installs {
+        let scripts = install.join("Scripts");
+        dirs.push(install);
+        if scripts.is_dir() {
+            dirs.push(scripts);
+        }
+    }
+    dirs
+}
+
+/// `Packages\PythonSoftwareFoundation.Python.*\LocalCache\local-packages\
+/// Python*\Scripts` — where a Store Python's `pip install --user` writes.
+#[cfg(any(target_os = "windows", test))]
+fn store_python_scripts(packages: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(packages) else {
+        return Vec::new();
+    };
+    let mut roots: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("PythonSoftwareFoundation.Python.")
+        })
+        .map(|entry| entry.path().join(r"LocalCache").join("local-packages"))
+        .collect();
+    roots.sort();
+    roots
+        .iter()
+        .flat_map(|root| subdirectories(root, "Scripts"))
+        .collect()
 }
 
 /// Every `bin` directory belonging to a winget-installed `Gyan.FFmpeg`.
@@ -1004,6 +1085,68 @@ mod tests {
             subdirectories(&scratch.join("no-such-thing"), "bin").is_empty(),
             "a parent that does not exist is not an error"
         );
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// D-191. A python.org install is found by its folder, not by `PATH`:
+    /// the interpreter, its `Scripts` (where `edge-tts.exe` lands) and the
+    /// launcher — and nothing else that happens to live beside them.
+    #[test]
+    fn a_python_org_install_is_searched_without_path() {
+        let scratch = std::env::temp_dir().join(format!(
+            "spoonstill-tools-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(scratch.join("Python313/Scripts")).expect("scratch");
+        std::fs::create_dir_all(scratch.join("Python312/Scripts")).expect("scratch");
+        std::fs::create_dir_all(scratch.join("Python311")).expect("scratch");
+        std::fs::create_dir_all(scratch.join("Launcher")).expect("scratch");
+        // Something else in Program Files is not searched.
+        std::fs::create_dir_all(scratch.join("Git/Scripts")).expect("scratch");
+
+        assert_eq!(
+            python_org_dirs(&scratch),
+            vec![
+                scratch.join("Launcher"),
+                scratch.join("Python311"),
+                scratch.join("Python312"),
+                scratch.join("Python312").join("Scripts"),
+                scratch.join("Python313"),
+                scratch.join("Python313").join("Scripts"),
+            ]
+        );
+        assert!(python_org_dirs(&scratch.join("absent")).is_empty());
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// D-191. A Store Python's `pip --user` target is found by reading the
+    /// sandbox, and an unrelated package beside it is not searched.
+    #[test]
+    fn a_store_python_user_scripts_directory_is_found() {
+        let scratch = std::env::temp_dir().join(format!(
+            "spoonstill-tools-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&scratch);
+        let scripts = scratch
+            .join("PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0")
+            .join("LocalCache")
+            .join("local-packages")
+            .join("Python312")
+            .join("Scripts");
+        std::fs::create_dir_all(&scripts).expect("scratch");
+        std::fs::create_dir_all(
+            scratch.join("Microsoft.Something/LocalCache/local-packages/Python312/Scripts"),
+        )
+        .expect("scratch");
+
+        assert_eq!(store_python_scripts(&scratch), vec![scripts]);
+        assert!(store_python_scripts(&scratch.join("absent")).is_empty());
 
         let _ = std::fs::remove_dir_all(&scratch);
     }
