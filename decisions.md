@@ -9061,3 +9061,34 @@ failure. When that folder is on `PATH` it is already found there.
 truncated one removed, Python, its `Scripts`, the launcher and `~\.cargo\bin`
 put back. That is an operator's environment rather than this program, and is
 recorded here so the next session does not mistake it for a regression.
+
+### D-192 — The speech installer says why it failed, and `install`'s documentation is its own · Accepted
+
+**Found 2026-09-29 on the Mac, checking D-191 before it was released.** D-191
+widened where `edge-tts` and Python are looked for; the Install button that
+report was about had a second defect beside it, older than D-191 and not in it.
+
+**D-123 was applied to one of the two installers.** It found that
+`tools::install` reported every failure of `spawn().and_then(wait_until)` as
+*"is not on this machine"*, when four things can fail and only
+`BinaryMissing` means that, and it fixed FFmpeg's. `Edge::install` kept
+`Err(_) => "… is not on this machine"`. Its ceiling is **five minutes**, and a
+`pip install edge-tts` on a slow connection — which on Windows is the
+installer that normally runs — can outlive it. That operator watched Python
+work for five minutes and was told Python was missing, which is D-123's wrong
+diagnosis in the one place D-123 did not reach, on the screen D-191 is about.
+
+`describe_failure` is public now and `Edge::install` calls it: one sentence
+per failure kind, one implementation, both Install buttons. **Not separately
+tested**: the four cases are pinned by D-123's
+`an_installer_that_fails_says_why_rather_than_guessing`, and driving
+`Edge::install` into a timeout would need `locate` redirected for `pipx`,
+`python` and `py`, which it is not built to be. What is unproven is the one
+line of wiring.
+
+**And D-123 cut `install`'s documentation in half.** `describe_failure` was
+inserted between `tools::install`'s doc comment and the function, under its
+`# Errors` heading, so rustdoc gave *"Fetch FFmpeg through whichever package
+manager this machine has …"* to `describe_failure` and left `install` with
+only its error paragraph. Each comment is back on its own function. No
+behaviour changes.

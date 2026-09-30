@@ -274,6 +274,27 @@ be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
 
+### State as of 2026-09-29, on the Mac — D-191 checked, D-192, and `v0.1.14` released
+
+**D-191 holds on macOS and cross-compiles clean for Windows.** Pulled
+`2647f3f`, reviewed it line by line: the installer loop moves to the next
+candidate on a non-zero exit, so a Store `python.exe` alias exiting 9009 still
+reaches `py`; D-191's two tests are `cfg(any(windows, test))` and run here.
+
+**D-192, found while checking it.** `Edge::install` still said *"`python` is
+not on this machine"* for **every** failure — including a `pip install` that
+ran past its five-minute ceiling. D-123 had fixed exactly that for FFmpeg's
+installer and never reached this one. `tools::describe_failure` is public and
+both installers use it. Also: D-123 had inserted that function *inside*
+`tools::install`'s doc comment, so rustdoc gave "Fetch FFmpeg…" to the wrong
+function; both comments are back where they belong.
+
+`make gates` 39/39, `make lint` green, `cargo test --workspace` **694 passed /
+0 failed / 11 ignored** (output kept, no unnamed failure this time), `cargo
+audit --deny warnings` clean, D-132 Windows cross-check clean. **Not run on
+Windows**: D-192's wiring is one line and is unit-tested only through D-123's
+test of `describe_failure`.
+
 ### State as of 2026-09-29 — "edge-tts is not installed" over an installed edge-tts (D-191)
 
 **Windows 11, the author's machine, `v0.1.14`.** Settings said the voice

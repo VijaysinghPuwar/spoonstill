@@ -65,7 +65,7 @@ use std::time::Duration;
 
 use spoonstill_media::atomic;
 use spoonstill_media::command::{Cancel, FfmpegCommand};
-use spoonstill_media::tools::locate;
+use spoonstill_media::tools::{describe_failure, locate};
 
 use crate::{Availability, Provider, Remedy, Request, Spoken, TtsError, Voice, opening};
 
@@ -1209,8 +1209,11 @@ impl Provider for Edge {
                     last_line(&finished.stderr)
                 )),
                 // Not installed on this machine — the next candidate is the
-                // point of having a list.
-                Err(_) => tried.push(format!("`{program}` is not on this machine")),
+                // point of having a list. But only `BinaryMissing` means that:
+                // a `pip install` that outlived the ceiling ran, and telling
+                // that operator their Python "is not on this machine" sends
+                // them to install the one they have (D-123, D-192).
+                Err(error) => tried.push(describe_failure(program, &error)),
             }
         }
 

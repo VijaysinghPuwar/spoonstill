@@ -215,6 +215,27 @@ const INSTALL_TIMEOUT: Duration = Duration::from_secs(900);
 /// How long the post-install re-check gets. A stat and a spawn.
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Why an installer did not run, in the operator's terms.
+///
+/// The four ways `spawn().and_then(wait_until)` can fail mean four different
+/// things, and only one of them is "install this first" (D-123). Collapsing
+/// them into that one is a wrong diagnosis, not a vague one. Public because
+/// FFmpeg is not the only thing this program installs: `edge-tts`'s Install
+/// button runs `pip`, which is the slower of the two (D-192).
+pub fn describe_failure(program: &str, error: &MediaError) -> String {
+    match error {
+        MediaError::BinaryMissing { .. } => format!("`{program}` is not on this machine"),
+        MediaError::Timeout { waited, .. } => format!(
+            "`{program}` was still running after {} minutes and was stopped — \
+             it is installed, and the install did not finish in time",
+            waited.as_secs() / 60
+        ),
+        MediaError::Cancelled { .. } => format!("`{program}` was cancelled"),
+        MediaError::Spawn { source, .. } => format!("`{program}` could not be started: {source}"),
+        other => format!("`{program}` failed: {other}"),
+    }
+}
+
 /// Fetch FFmpeg through whichever package manager this machine has.
 ///
 /// This is the second half of D-105, and it exists because the first half was
@@ -231,25 +252,6 @@ const VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
 ///
 /// # Errors
 ///
-/// Why an installer did not run, in the operator's terms.
-///
-/// The four ways `spawn().and_then(wait_until)` can fail mean four different
-/// things, and only one of them is "install this first" (D-123). Collapsing
-/// them into that one is a wrong diagnosis, not a vague one.
-fn describe_failure(program: &str, error: &MediaError) -> String {
-    match error {
-        MediaError::BinaryMissing { .. } => format!("`{program}` is not on this machine"),
-        MediaError::Timeout { waited, .. } => format!(
-            "`{program}` was still running after {} minutes and was stopped — \
-             it is installed, and the install did not finish in time",
-            waited.as_secs() / 60
-        ),
-        MediaError::Cancelled { .. } => format!("`{program}` was cancelled"),
-        MediaError::Spawn { source, .. } => format!("`{program}` could not be started: {source}"),
-        other => format!("`{program}` failed: {other}"),
-    }
-}
-
 /// A [`Remedy`] naming every candidate that was tried and what each said. Not
 /// installable — pressing the button again would do the same thing, and the
 /// operator now needs the detail rather than another press.
