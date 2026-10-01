@@ -64,6 +64,14 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # The window's script must *start*, not only parse (D-194). A handler
+      # wired to a function an edit had removed shipped a window that opened
+      # on its title bar and nothing else, past every test above.
+      - name: The window's script starts (D-194)
+        run: |
+          node --check apps/desktop/ui/app.js
+          node scripts/ui-smoke.mjs apps/desktop/ui/app.js
+
       # The release's asset names are a contract across three files that
       # nothing type-checks (D-125). Explicit, because a failure here means the
       # next tag publishes a release the installers cannot install.

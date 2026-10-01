@@ -1130,6 +1130,11 @@ button.small { padding: 3px 9px; font-size: 11px; }
 /* ------------------------------------------------------------- drop layer */
 
 .drop {
+  /* Invisible to `elementFromPoint` (D-194). The drop handler finds the row
+     under the pointer by asking what is there — and once this overlay was up,
+     the answer was always the overlay, so no row could ever be found and the
+     overlay never came down. */
+  pointer-events: none;
   position: fixed;
   inset: 0;
   display: flex;
@@ -1393,3 +1398,47 @@ button.small { padding: 3px 9px; font-size: 11px; }
 /* A row scrolled to (after an import) lands below the sticky header, not
    under it — the first imported scene was hidden behind the column names. */
 .grid tbody tr { scroll-margin-top: 44px; }
+
+/* --- pictures on one scene (D-194) ----------------------------------------- */
+button.thumb-missing, button.thumb-button {
+  padding: 0; cursor: pointer; background: transparent; font: inherit;
+}
+button.thumb-missing:hover:not(:disabled) { border-color: var(--ink); color: var(--ink); background: var(--hover); }
+button.thumb-button { border: 1px solid transparent; border-radius: 4px; line-height: 0; }
+button.thumb-button:hover:not(:disabled) { border-color: var(--ink-2); }
+button.thumb-missing:focus-visible, button.thumb-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* The row a picture will land on, while it is being dragged. Loud on purpose:
+   this is the one place a fast operator must not have to look twice. */
+.grid tr.drop-target td { background: var(--accent-soft); }
+.grid tr.drop-target td:first-child { box-shadow: inset 4px 0 0 var(--accent); }
+.grid tr.drop-target .thumb-missing { border-style: solid; border-color: var(--accent); color: var(--ink); }
+.grid tr.landed td { background: var(--accent-soft); transition: background 0.6s; }
+.drop-label {
+  position: fixed; z-index: 30; pointer-events: none;
+  padding: 5px 10px; border-radius: 6px; font-size: 13px; font-weight: 600;
+  background: var(--accent); color: var(--on-accent);
+}
+.drop-label.bad { background: var(--bad); color: var(--on-accent); }
+
+.picture-menu {
+  position: fixed; z-index: 40; min-width: 220px; padding: 6px;
+  display: flex; flex-direction: column; gap: 4px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.35);
+}
+.picture-menu > button { text-align: left; }
+.picture-menu .move-row { display: flex; align-items: center; gap: 6px; }
+.picture-menu .move-row label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-2); }
+.picture-menu input {
+  width: 64px; padding: 5px 6px; font: inherit; font-size: 13px; color: var(--ink);
+  background: var(--input); border: 1px solid var(--line); border-radius: 5px;
+}
+.picture-menu .danger-text { color: var(--bad); }
+
+/* While a picture is being dragged between rows nothing else is selected, and
+   the pointer says what is happening. */
+body.moving-picture, body.moving-picture * { user-select: none; cursor: grabbing !important; }
+button.thumb-button img { pointer-events: none; -webkit-user-drag: none; }
+.drop-label.warn { background: var(--warn); color: var(--on-accent); }
+#status button.undo { padding: 0 4px; font-size: inherit; text-decoration: underline; }

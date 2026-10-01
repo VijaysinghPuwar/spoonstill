@@ -65,13 +65,14 @@ shell: ## Check every shell script — the harness runs `rm -rf` (D-175)
 	  exit 1; \
 	fi
 
-ui: ## Syntax-check the window's JavaScript — a webview fails in silence (D-190)
+ui: ## Check the window's JavaScript parses and starts — a webview fails in silence (D-190, D-194)
 	@# A syntax error in app.js is not reported anywhere an operator can see:
 	@# the window opens, draws its markup, and every control is dead. Nothing
 	@# else in this tree parses the file, so until this existed every edit to
 	@# it was checked by hand with `node --check` or not at all.
 	@if command -v node >/dev/null 2>&1; then \
-	  for f in apps/desktop/ui/*.js; do node --check "$$f" || exit 1; done && echo "  window scripts OK"; \
+	  for f in apps/desktop/ui/*.js; do node --check "$$f" || exit 1; done && \
+	  node scripts/ui-smoke.mjs apps/desktop/ui/app.js && echo "  window scripts OK"; \
 	else \
 	  echo "  node is not installed — the window's JavaScript was NOT checked."; \
 	  echo "  brew install node   (or see https://nodejs.org)"; \

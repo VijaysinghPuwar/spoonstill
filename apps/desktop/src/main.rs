@@ -317,6 +317,16 @@ fn app_settings(app: tauri::AppHandle) -> AppSettingsView {
     view(adopted)
 }
 
+/// Set how Import chapter cuts by default (D-194).
+#[tauri::command]
+fn set_chapter_cut(by: Option<String>) -> Result<spoonstill_app::machine::Machine, String> {
+    journalled(
+        "set_chapter_cut",
+        None,
+        spoonstill_app::machine::set_chapter_cut(by.as_deref()),
+    )
+}
+
 /// Set the fallback voice, or clear it by passing nothing.
 #[tauri::command]
 fn set_default_voice(voice: Option<String>) -> Result<spoonstill_app::machine::Machine, String> {
@@ -370,6 +380,49 @@ fn journalled<T>(
             .record(&Event::error(scope, "window command failed").with("detail", detail.clone())),
     }
     outcome
+}
+
+/// [`journalled`], with what the command did written down too (D-194).
+///
+/// For the commands an operator repeats hundreds of times in a session —
+/// putting pictures on scenes, moving them, importing a chapter — "command
+/// finished" says that something happened and not what. The sentence the
+/// window shows is recorded as the row's `detail`, so the log can answer how
+/// the window is actually used: how many pictures at a time, how often one is
+/// replaced or undone, how long between drops. It holds scene numbers and
+/// counts; it never holds the words of a narration.
+fn journalled_said(
+    scope: &'static str,
+    root: Option<&std::path::Path>,
+    outcome: Result<String, String>,
+) -> Result<String, String> {
+    let journal = spoonstill_app::Journal::for_surface(root);
+    match &outcome {
+        Ok(said) => journal
+            .record(&Event::info(scope, "window command finished").with("detail", said.clone())),
+        Err(detail) => journal
+            .record(&Event::error(scope, "window command failed").with("detail", detail.clone())),
+    }
+    outcome
+}
+
+/// What the operator did on a screen that never reaches Rust otherwise
+/// (D-194): splitting or joining a cut, a drop that was refused, a drag let go
+/// on nothing, a Cmd+Z. One row each, in the same `runs.csv`, under the scope
+/// `usage` — so how the window is used can be read back alongside what it did.
+///
+/// The page sends counts and scene numbers only; anything longer than a short
+/// line is cut here as well, so a narration can never be written to the log by
+/// a careless caller.
+#[tauri::command]
+fn usage(event: String, detail: Option<String>) {
+    let clip = |text: String| text.chars().take(160).collect::<String>();
+    let journal = spoonstill_app::Journal::for_surface(None);
+    let mut row = Event::info("usage", clip(event));
+    if let Some(detail) = detail {
+        row = row.with("detail", clip(detail));
+    }
+    journal.record(&row);
 }
 
 /// Install whichever tool the window was asked about, and say what was run.
@@ -748,6 +801,81 @@ fn project_root(session: &Session, claimed: &str) -> Result<PathBuf, String> {
 struct Session {
     root: Mutex<Option<PathBuf>>,
     film: Mutex<Option<PathBuf>>,
+    /// What the probe said about each file, while the file is unchanged
+    /// (D-194). See [`RememberedProbe`].
+    probes: Mutex<ProbeMemo>,
+    /// The picture changes made in this window, newest last, for Undo
+    /// (D-194). Kept with the project they were made in, so an undo can never
+    /// reach into a project the window has since navigated away from.
+    undo: Mutex<(Option<PathBuf>, Vec<spoonstill_app::picture::Change>)>,
+}
+
+/// How many picture changes Undo can walk back through.
+const UNDO_DEPTH: usize = 50;
+
+fn remember_change(
+    session: &Session,
+    root: &std::path::Path,
+    change: spoonstill_app::picture::Change,
+) {
+    if let Ok(mut slot) = session.undo.lock() {
+        if slot.0.as_deref() != Some(root) {
+            *slot = (Some(root.to_path_buf()), Vec::new());
+        }
+        slot.1.push(change);
+        if slot.1.len() > UNDO_DEPTH {
+            slot.1.remove(0);
+        }
+    }
+}
+
+/// A file as the probe saw it: where, which role, how long, last modified.
+/// A change to any of them is a different file as far as a probe is concerned.
+type ProbeKey = (PathBuf, bool, u64, Option<std::time::SystemTime>);
+type ProbeMemo = std::collections::HashMap<ProbeKey, Option<spoonstill_core::SourceGeometry>>;
+
+/// The real probe, remembering every answer it gave about a file that has not
+/// changed since (D-194).
+///
+/// Putting a picture on a scene re-reads the project, and reading probes
+/// every picture: measured at **1.49 s for 580 scenes** on the author's
+/// machine — after every single drop, in a task that is a drop every few
+/// seconds for an hour. With this, a re-read probes only what changed.
+///
+/// Only a usable answer is remembered. A failure may be a timeout on a slow
+/// volume (D-179) that the next look would not repeat, and remembering it
+/// would keep a good picture marked broken. Re-check forgets everything.
+struct RememberedProbe<'a> {
+    inner: spoonstill_app::ProbeCheck,
+    memo: &'a Mutex<ProbeMemo>,
+}
+
+impl spoonstill_app::MediaCheck for RememberedProbe<'_> {
+    fn check(
+        &self,
+        path: &std::path::Path,
+        role: spoonstill_app::Role,
+    ) -> Result<Option<spoonstill_core::SourceGeometry>, String> {
+        let meta = std::fs::metadata(path).ok();
+        let key = (
+            path.to_path_buf(),
+            role == spoonstill_app::Role::Image,
+            meta.as_ref().map_or(0, std::fs::Metadata::len),
+            meta.and_then(|m| m.modified().ok()),
+        );
+        if let Some(known) = self.memo.lock().ok().and_then(|m| m.get(&key).copied()) {
+            return Ok(known);
+        }
+        let answer = self.inner.check(path, role)?;
+        if let Ok(mut memo) = self.memo.lock() {
+            memo.insert(key, answer);
+        }
+        Ok(answer)
+    }
+
+    fn ready(&self) -> Result<(), spoonstill_core::Remedy> {
+        self.inner.ready()
+    }
 }
 
 /// Read a folder and report everything true about it — the same call
@@ -755,10 +883,17 @@ struct Session {
 #[tauri::command]
 async fn validate_project(
     path: String,
+    fresh: Option<bool>,
     app: tauri::AppHandle,
     session: State<'_, Session>,
 ) -> Result<ProjectView, String> {
     let root = PathBuf::from(&path);
+    // Re-check means look again at everything (D-194).
+    if fresh.unwrap_or(false)
+        && let Ok(mut memo) = session.probes.lock()
+    {
+        memo.clear();
+    }
     let outcome = validate_project_inner(path, app, session).await;
     journalled("validate_project", Some(&root), outcome)
 }
@@ -768,14 +903,19 @@ async fn validate_project_inner(
     app: tauri::AppHandle,
     session: State<'_, Session>,
 ) -> Result<ProjectView, String> {
+    let handle = app.clone();
     let view = tauri::async_runtime::spawn_blocking(move || -> Result<ProjectView, String> {
         let root = PathBuf::from(&path);
+        let session = handle.state::<Session>();
         // Opening a project is not a render and the window offers no way to
         // stop one; it runs on a blocking thread, so the window stays live
         // while it reads (D-186).
         let project = spoonstill_app::import::load(
             &root,
-            &spoonstill_app::ProbeCheck::from_env(),
+            &RememberedProbe {
+                inner: spoonstill_app::ProbeCheck::from_env(),
+                memo: &session.probes,
+            },
             &Cancel::new(),
         )
         .map_err(|e| e.to_string())?;
@@ -1286,10 +1426,16 @@ fn chapter_view(cuts: Vec<spoonstill_core::chapter::Cut>) -> ChapterView {
     }
 }
 
-/// Cut a chapter into scenes (D-193). Pure: nothing is read or written.
+/// Cut a chapter into scenes (D-193), by time or by a number of sentences
+/// (D-194). Pure: nothing is read or written.
 #[tauri::command]
-fn chapter_cut(text: String, min: f64, max: f64) -> ChapterView {
-    chapter_view(spoonstill_app::chapter::plan(&text, min, max))
+fn chapter_cut(text: String, by: Option<String>, min: f64, max: f64) -> ChapterView {
+    chapter_view(spoonstill_app::chapter::plan_by(
+        &text,
+        by.as_deref().unwrap_or("time"),
+        min,
+        max,
+    ))
 }
 
 /// Re-measure cuts the operator has edited by hand, without cutting again.
@@ -1328,8 +1474,14 @@ async fn import_chapter(
     pieces: Vec<String>,
 ) -> Result<ImportedView, String> {
     let named = PathBuf::from(&root);
+    let count = pieces.len();
     let outcome = import_chapter_inner(&session, root, pieces).await;
-    journalled("import_chapter", Some(&named), outcome)
+    let said = outcome
+        .as_ref()
+        .map(|done| format!("{} ({count} cuts sent)", done.summary))
+        .map_err(Clone::clone);
+    let _ = journalled_said("import_chapter", Some(&named), said);
+    outcome
 }
 
 /// What an import did: the sentence, and the first scene it added, which is
@@ -1358,6 +1510,167 @@ async fn import_chapter_inner(
     .map_err(|e| format!("the import failed: {e}"))?
 }
 
+/// Put a picture on one scene (D-194). `path` is a file the operator chose or
+/// dropped, as `add_media`'s are; the scene is checked like any id from the
+/// page, and the project is the one this window has open (D-127).
+#[tauri::command]
+async fn set_picture(
+    session: State<'_, Session>,
+    root: String,
+    scene: String,
+    path: String,
+) -> Result<String, String> {
+    let named = PathBuf::from(&root);
+    let outcome = picture_inner(&session, root, move |root| {
+        spoonstill_app::picture::set(
+            root,
+            &scene,
+            std::path::Path::new(&path),
+            &spoonstill_app::ProbeCheck::from_env(),
+        )
+        .map(|placed| {
+            let said = placed.summary();
+            (
+                said,
+                Some(spoonstill_app::picture::Change::Placed(vec![placed])),
+            )
+        })
+    })
+    .await;
+    journalled_said("set_picture", Some(&named), outcome)
+}
+
+/// Put several pictures down from one scene on (D-194): each on the next
+/// scene still waiting for a picture, in the order dragged.
+#[tauri::command]
+async fn fill_pictures(
+    session: State<'_, Session>,
+    root: String,
+    scene: String,
+    paths: Vec<String>,
+) -> Result<String, String> {
+    let named = PathBuf::from(&root);
+    let outcome = picture_inner(&session, root, move |root| {
+        let sources: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+        spoonstill_app::picture::fill(
+            root,
+            &scene,
+            &sources,
+            &spoonstill_app::ProbeCheck::from_env(),
+        )
+        .map(|filled| {
+            let said = filled.summary();
+            let change = (!filled.placed.is_empty())
+                .then_some(spoonstill_app::picture::Change::Placed(filled.placed));
+            (said, change)
+        })
+    })
+    .await;
+    journalled_said("fill_pictures", Some(&named), outcome)
+}
+
+/// Take a scene's picture off, into `removed/` (D-194).
+#[tauri::command]
+async fn remove_picture(
+    session: State<'_, Session>,
+    root: String,
+    scene: String,
+) -> Result<String, String> {
+    let named = PathBuf::from(&root);
+    let outcome = picture_inner(&session, root, move |root| {
+        spoonstill_app::picture::remove(root, &scene).map(|change| {
+            let said = match &change {
+                spoonstill_app::picture::Change::Removed { binned, .. } => format!(
+                    "Scene {scene}'s picture is in {}/ as {} — nothing was deleted.",
+                    spoonstill_app::arrange::REMOVED_DIR,
+                    binned
+                        .file_name()
+                        .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+                ),
+                _ => String::new(),
+            };
+            (said, Some(change))
+        })
+    })
+    .await;
+    journalled_said("remove_picture", Some(&named), outcome)
+}
+
+/// Move a scene's picture to another scene, swapping if it has one (D-194).
+#[tauri::command]
+async fn move_picture(
+    session: State<'_, Session>,
+    root: String,
+    scene: String,
+    to: String,
+) -> Result<String, String> {
+    let named = PathBuf::from(&root);
+    let outcome = picture_inner(&session, root, move |root| {
+        spoonstill_app::picture::move_to(root, &scene, &to).map(|moved| {
+            let said = moved.summary();
+            (said, Some(spoonstill_app::picture::Change::Moved(moved)))
+        })
+    })
+    .await;
+    journalled_said("move_picture", Some(&named), outcome)
+}
+
+/// Take back the newest picture change made in this window (D-194).
+#[tauri::command]
+async fn undo_picture(session: State<'_, Session>, root: String) -> Result<String, String> {
+    let named = PathBuf::from(&root);
+    let outcome = undo_picture_inner(&session, root).await;
+    journalled_said("undo_picture", Some(&named), outcome)
+}
+
+async fn undo_picture_inner(session: &Session, root: String) -> Result<String, String> {
+    let root = project_root(session, &root)?;
+    let change = {
+        let mut slot = session
+            .undo
+            .lock()
+            .map_err(|_| "the undo list is poisoned")?;
+        if slot.0.as_deref() != Some(root.as_path()) {
+            None
+        } else {
+            slot.1.pop()
+        }
+    };
+    let Some(change) = change else {
+        return Err("There is nothing to undo.".to_owned());
+    };
+    // Popped whether or not it can be taken back: one that cannot (the folder
+    // changed since) would otherwise sit on top and block every older one.
+    tauri::async_runtime::spawn_blocking(move || {
+        spoonstill_app::picture::undo(&root, &change).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("the undo failed: {e}"))?
+}
+
+async fn picture_inner(
+    session: &Session,
+    root: String,
+    work: impl FnOnce(
+        &std::path::Path,
+    ) -> Result<
+        (String, Option<spoonstill_app::picture::Change>),
+        spoonstill_app::picture::PictureError,
+    > + Send
+    + 'static,
+) -> Result<String, String> {
+    let root = project_root(session, &root)?;
+    let worked_in = root.clone();
+    let (said, change) =
+        tauri::async_runtime::spawn_blocking(move || work(&worked_in).map_err(|e| e.to_string()))
+            .await
+            .map_err(|e| format!("the picture change failed: {e}"))??;
+    if let Some(change) = change {
+        remember_change(session, &root, change);
+    }
+    Ok(said)
+}
+
 /// Take a scene out of the project (D-100).
 ///
 /// The files are moved, never deleted — `removed/` inside the project holds
@@ -1371,7 +1684,7 @@ async fn remove_scene(
 ) -> Result<String, String> {
     let named = PathBuf::from(&root);
     let outcome = remove_scene_inner(session, root, scene).await;
-    journalled("remove_scene", Some(&named), outcome)
+    journalled_said("remove_scene", Some(&named), outcome)
 }
 
 async fn remove_scene_inner(
@@ -1408,7 +1721,7 @@ async fn move_scene(
 ) -> Result<String, String> {
     let named = PathBuf::from(&root);
     let outcome = move_scene_inner(session, root, scene, to).await;
-    journalled("move_scene", Some(&named), outcome)
+    journalled_said("move_scene", Some(&named), outcome)
 }
 
 async fn move_scene_inner(
@@ -2131,6 +2444,8 @@ fn main() {
             forget_project,
             app_settings,
             set_default_voice,
+            set_chapter_cut,
+            usage,
             voice_choice,
             activity_log,
             open_activity_log,
@@ -2142,6 +2457,11 @@ fn main() {
             chapter_review,
             chapter_read,
             import_chapter,
+            set_picture,
+            fill_pictures,
+            remove_picture,
+            move_picture,
+            undo_picture,
             voices,
             preview_voice,
             resolve_output,

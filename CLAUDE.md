@@ -274,6 +274,37 @@ be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
 
+### State as of 2026-09-30, later — pictures go on the row they were put on (D-194), `v0.1.16`
+
+**Read D-194 before touching `spoonstill_app::picture`, `RememberedProbe`,
+`journalled_said`, the `usage` command, `rowAt`/`dragScale`, `edgeScroll`,
+`startPictureDrag`, `pictureBusy`, the undo stack, `CutBy`, or
+`scripts/ui-smoke.mjs`.** Steps 2 and part of 3 of D-193's plan are done:
+**+** opens a picker; a file dropped on a row lands there (several fill the
+next waiting scenes); a picture dragged between rows moves or swaps; Replace /
+Move to scene / Remove on every picture; Undo and Cmd+Z, fifty deep; the list
+auto-scrolls at its edges; the chapter can be cut by time or by 1–3 sentences
+(Settings › Chapter cutting, `--by`); the activity log records what each action
+did and a `usage` row for screen-only actions (counts, never narration text).
+
+**Two traps, both macOS-only and both found only by a real drag:** the drag
+position is window **points** on macOS and physical pixels on Windows despite
+Tauri's type; and a full-window overlay without `pointer-events: none`
+swallows `elementFromPoint`. **And one that shipped nothing but nearly did:**
+a script edit removed two sections of `app.js`, the window opened blank, and
+every existing check passed — `make ui` and CI now *run* the script.
+
+**Testing the window from here:** real drags with a `CGEvent` tool work, but
+**not while the author is using the same desktop** — synthetic input lands
+wherever focus is. When they are, drive the real `app.js` in Chrome behind a
+recording stand-in backend; it asserts the *absence* of unwanted commands,
+which a screenshot cannot.
+
+**Still to do (D-193's list):** the style note + Copy for Google Flow; a
+placeholder so a waiting scene renders; the voice question (each cut spoken
+alone vs the chapter spoken once). `make gates` 39/39, `cargo test` 743 / 0 /
+11, `make lint` green, D-132 Windows check clean. **Not run on Windows.**
+
 ### State as of 2026-09-30 — a chapter is imported and waits for its pictures (D-193), `v0.1.15`
 
 **Asked for by the author**: paste a whole chapter, have it cut into scenes of

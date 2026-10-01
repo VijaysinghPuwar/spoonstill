@@ -160,6 +160,26 @@ pub fn plan(chapter: &str, min_seconds: f64, max_seconds: f64) -> Vec<Cut> {
     cut(chapter, Pacing::new(min_seconds, max_seconds))
 }
 
+/// Cut a chapter by `by` — `time`, or a number of sentences (D-194). An
+/// unreadable name cuts by time rather than failing: it is a preference.
+#[must_use]
+pub fn plan_by(chapter: &str, by: &str, min_seconds: f64, max_seconds: f64) -> Vec<Cut> {
+    let pacing = Pacing::new(min_seconds, max_seconds);
+    spoonstill_core::chapter::cut_by(
+        chapter,
+        spoonstill_core::chapter::CutBy::parse(by, pacing)
+            .unwrap_or(spoonstill_core::chapter::CutBy::Time(pacing)),
+    )
+}
+
+/// This machine's default way to cut, from Settings: `time` when none is set.
+#[must_use]
+pub fn default_cut() -> String {
+    crate::machine::load()
+        .chapter_cut
+        .unwrap_or_else(|| "time".to_owned())
+}
+
 /// What an import did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Imported {

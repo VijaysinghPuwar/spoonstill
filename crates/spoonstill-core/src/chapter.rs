@@ -123,6 +123,96 @@ pub struct Cut {
     pub seconds: f64,
 }
 
+/// How a chapter is cut: by length, or by a count of sentences (D-194).
+///
+/// The author's words: *"select the length of auto cut — one sentence, two
+/// sentences — so the user has flexibility"*. Time is the default because it
+/// is what was asked for first; a count of sentences is simpler to predict
+/// and is what an operator who writes one picture per sentence wants.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CutBy {
+    /// About this long each, cut where the story allows.
+    Time(Pacing),
+    /// This many whole sentences each, never part of one.
+    Sentences(usize),
+}
+
+impl CutBy {
+    /// The names a setting or a flag uses: `time`, or `1`, `2`, `3` — a number
+    /// of sentences. Anything else is `None`, and a caller that must answer
+    /// uses the default rather than guessing.
+    #[must_use]
+    pub fn parse(name: &str, pacing: Pacing) -> Option<CutBy> {
+        let name = name.trim().to_ascii_lowercase();
+        if name == "time" || name.is_empty() {
+            return Some(CutBy::Time(pacing));
+        }
+        let count = name
+            .trim_end_matches("sentences")
+            .trim_end_matches("sentence")
+            .trim()
+            .parse::<usize>()
+            .ok()?;
+        (1..=10).contains(&count).then_some(CutBy::Sentences(count))
+    }
+
+    /// The name [`CutBy::parse`] reads back.
+    #[must_use]
+    pub fn name(&self) -> String {
+        match self {
+            CutBy::Time(_) => "time".to_owned(),
+            CutBy::Sentences(n) => n.to_string(),
+        }
+    }
+}
+
+/// Cut a chapter the way `by` says.
+#[must_use]
+pub fn cut_by(chapter: &str, by: CutBy) -> Vec<Cut> {
+    match by {
+        CutBy::Time(pacing) => cut(chapter, pacing),
+        CutBy::Sentences(count) => cut_sentences(chapter, count),
+    }
+}
+
+/// Cut a chapter into pieces of `count` whole sentences each (D-194).
+///
+/// A blank line still always ends a piece, so the last piece of a paragraph
+/// may hold fewer. A sentence is never split, however long it runs — that is
+/// the promise this mode makes, and the reason to choose it over time.
+#[must_use]
+pub fn cut_sentences(chapter: &str, count: usize) -> Vec<Cut> {
+    let count = count.max(1);
+    let mut out = Vec::new();
+    for paragraph in paragraphs(chapter) {
+        let mut piece: Vec<&str> = Vec::new();
+        let mut sentences = 0;
+        for word in paragraph.split_whitespace() {
+            piece.push(word);
+            if ends_sentence(word) {
+                sentences += 1;
+                if sentences == count {
+                    let text = piece.join(" ");
+                    out.push(Cut {
+                        seconds: estimate(&text),
+                        text,
+                    });
+                    piece.clear();
+                    sentences = 0;
+                }
+            }
+        }
+        if !piece.is_empty() {
+            let text = piece.join(" ");
+            out.push(Cut {
+                seconds: estimate(&text),
+                text,
+            });
+        }
+    }
+    out
+}
+
 /// The estimated time to say `text`.
 #[must_use]
 pub fn estimate(text: &str) -> f64 {
@@ -537,6 +627,67 @@ eyes again, he had crossed over.";
     }
 
     #[test]
+    fn by_sentences_keeps_exactly_that_many_whole_sentences() {
+        let text = "One. Two is longer than one. Three! Four? Five.\n\nSix. Seven.";
+        assert_eq!(
+            texts(&cut_sentences(text, 1)),
+            vec![
+                "One.",
+                "Two is longer than one.",
+                "Three!",
+                "Four?",
+                "Five.",
+                "Six.",
+                "Seven."
+            ]
+        );
+        assert_eq!(
+            texts(&cut_sentences(text, 2)),
+            vec![
+                "One. Two is longer than one.",
+                "Three! Four?",
+                "Five.",
+                "Six. Seven."
+            ],
+            "a blank line still ends a piece"
+        );
+        assert_eq!(
+            texts(&cut_sentences(text, 3)),
+            vec![
+                "One. Two is longer than one. Three!",
+                "Four? Five.",
+                "Six. Seven."
+            ]
+        );
+        // A title is not a sentence end here either.
+        assert_eq!(
+            texts(&cut_sentences("Mr. Chen spoke. Then he left.", 1)),
+            vec!["Mr. Chen spoke.", "Then he left."]
+        );
+        // Text with no full stop at all is one piece, never lost.
+        assert_eq!(
+            texts(&cut_sentences("no stops here at all", 1)),
+            vec!["no stops here at all"]
+        );
+    }
+
+    #[test]
+    fn the_cut_setting_reads_back_what_it_writes() {
+        let p = Pacing::DEFAULT;
+        for by in [
+            CutBy::Time(p),
+            CutBy::Sentences(1),
+            CutBy::Sentences(2),
+            CutBy::Sentences(3),
+        ] {
+            assert_eq!(CutBy::parse(&by.name(), p), Some(by));
+        }
+        assert_eq!(CutBy::parse("2 sentences", p), Some(CutBy::Sentences(2)));
+        assert_eq!(CutBy::parse("0", p), None);
+        assert_eq!(CutBy::parse("banana", p), None);
+    }
+
+    #[test]
     fn short_sentences_are_joined_rather_than_flashed() {
         let cuts = cut(
             "He ran. She followed. The door slammed. Nobody spoke.",
@@ -720,6 +871,19 @@ mod stress {
                 normalize(&text),
                 "round {round}: {text:?}"
             );
+
+            // The same for every sentence count.
+            let by = 1 + (round as usize % 3);
+            let sentences: Vec<String> = cut_sentences(&text, by)
+                .into_iter()
+                .map(|c| c.text)
+                .collect();
+            assert_eq!(
+                sentences.join(" "),
+                normalize(&text),
+                "round {round} by {by}"
+            );
+            assert!(sentences.iter().all(|p| !p.is_empty()), "round {round}");
 
             for c in &cuts {
                 assert!(!c.text.is_empty(), "round {round}: an empty piece");

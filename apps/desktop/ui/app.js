@@ -306,6 +306,7 @@ async function loadFallbackVoice() {
   try {
     const view = await invoke("app_settings");
     appDefaultVoice = view.settings.default_voice || null;
+    el("app-chapter-cut").value = view.settings.chapter_cut || "time";
     // A file that is there and could not be read is said where its setting is
     // (D-171). `drawFix` hides itself when there is nothing wrong, so the
     // ordinary machine sees no change.
@@ -383,11 +384,11 @@ async function openProject() {
   if (typeof chosen === "string") await load(chosen);
 }
 
-async function load(path) {
+async function load(path, fresh = false) {
   setStatus("Reading the folder…");
   const opening = project?.root !== path;
   try {
-    project = await invoke("validate_project", { path });
+    project = await invoke("validate_project", { path, fresh });
   } catch (error) {
     project = null;
     show("start");
@@ -552,6 +553,10 @@ function drawRows() {
   const broken = new Set(project.problems.filter((p) => p.severity === "error" && p.scene).map((p) => p.scene));
   const rows = el("rows");
   const shown = visible();
+  // Kept across the redraw: emptying the table collapses it, which clamps the
+  // scroll to the top — after every picture dropped on row 300 of 580 (D-194).
+  const wrap = rows.closest(".grid-wrap");
+  const keep = wrap.scrollTop;
   rows.innerHTML = "";
   el("grid-empty").hidden = shown.length > 0;
 
@@ -569,8 +574,8 @@ function drawRows() {
     tr.innerHTML = `
       <td class="c-scene"></td>
       <td class="c-still">${scene.waiting
-        ? `<span class="thumb-missing ${shape}" title="No picture yet">+</span>`
-        : `<img class="thumb ${shape}" loading="lazy" alt="" />`}</td>
+        ? `<button class="thumb-missing ${shape}">+</button>`
+        : `<button class="thumb-button"><img class="thumb ${shape}" loading="lazy" alt="" /></button>`}</td>
       <td class="c-source"><div class="source-cell">
         <span class="file"></span><span class="narration"></span>
       </div></td>
@@ -627,8 +632,11 @@ function drawRows() {
 
     tr.querySelector(".c-resolved").innerHTML = resolved(scene);
     drawArrange(tr.querySelector(".arrange"), scene, shown.length);
+    tr.dataset.scene = scene.id;
+    drawPictureControl(tr.querySelector(".c-still"), scene);
     rows.appendChild(tr);
   }
+  wrap.scrollTop = keep;
 }
 
 // Duration, and the honesty about it: a silent scene's length is *declared*, a
@@ -1830,11 +1838,25 @@ async function watchDrops() {
   const events = window.__TAURI__?.event;
   if (!events) return;
   const over = el("drop");
-  await events.listen("tauri://drag-enter", () => { over.hidden = false; });
-  await events.listen("tauri://drag-leave", () => { over.hidden = true; });
+  const follow = (position) => {
+    if (position) edgeScroll(position.y / dragScale());
+    const tr = rowAt(position);
+    showDropTarget(tr);
+    // Over a row the row says what will happen; anywhere else the whole
+    // window does, because a drop there adds to the end (D-194).
+    over.hidden = Boolean(tr);
+  };
+  await events.listen("tauri://drag-enter", (event) => {
+    dragPaths = event.payload?.paths ?? [];
+    follow(event.payload?.position);
+  });
+  await events.listen("tauri://drag-over", (event) => follow(event.payload?.position));
+  await events.listen("tauri://drag-leave", () => { dragPaths = []; endDrag(); });
   await events.listen("tauri://drag-drop", async (event) => {
-    over.hidden = true;
     const paths = event.payload?.paths ?? [];
+    const tr = rowAt(event.payload?.position);
+    dragPaths = [];
+    endDrag();
     if (paths.length === 0) return;
     // A folder dropped with no project open is a project being opened, which is
     // almost always what was meant.
@@ -1852,8 +1874,396 @@ async function watchDrops() {
       else setStatus("Drop one .txt file here to import it as the chapter.");
       return;
     }
+    // Onto one scene: one picture on exactly that scene, or several on it and
+    // the scenes after it that are still waiting for one.
+    if (tr) {
+      if (rendering) return;
+      if (pictureBusy) {
+        setStatus("Nothing was changed — the last picture is still being saved. Drop it again.");
+        logUsage("drop refused", "still saving the last picture");
+        return;
+      }
+      if (paths.some((path) => !isPicture(path))) {
+        setStatus("Nothing was changed — only pictures can be dropped on a scene.");
+        logUsage("drop refused", `${paths.length} files, not all pictures, on scene ${tr.dataset.scene}`);
+        return;
+      }
+      if (paths.length === 1) await putPicture(tr.dataset.scene, paths[0]);
+      else await pictureChange("fill_pictures", { scene: tr.dataset.scene, paths });
+      return;
+    }
+    logUsage("drop at the end", `${paths.length} files`);
     await addMedia(paths);
   });
+}
+
+// ---------------------------------------------------------------- pictures
+//
+// D-194. A picture goes on the row it was put on: by clicking that row's +,
+// by dropping a file onto that row, or from the menu on a picture already
+// there — Replace, Move to scene, Remove. Nothing is deleted; Rust moves a
+// replaced or removed picture to removed/ and says so.
+
+// One row in the activity log for something done on a screen that Rust would
+// not otherwise hear about (D-194). Counts and scene numbers only — never the
+// words of a narration — and never allowed to get in the way.
+const logUsage = (event, detail = "") => {
+  invoke("usage", { event, detail: String(detail) }).catch(() => {});
+};
+
+const PICTURE = ["jpg", "jpeg", "png", "webp", "heic", "heif", "tif", "tiff", "bmp"];
+const isPicture = (path) => PICTURE.includes((path.split(".").pop() || "").toLowerCase());
+
+function drawPictureControl(cell, scene) {
+  const button = cell.querySelector("button");
+  if (!button || !project.convention) return;
+  button.disabled = rendering;
+  if (scene.waiting) {
+    button.title = `Choose a picture for scene ${scene.id}`;
+    button.setAttribute("aria-label", `Choose a picture for scene ${scene.id}`);
+    button.addEventListener("click", () => guard(choosePicture(scene.id)));
+  } else {
+    button.title = `Scene ${scene.id}'s picture — click to replace, move or remove; drag it onto another scene to move it`;
+    button.setAttribute("aria-label", `Picture options for scene ${scene.id}`);
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      // A press that turned into a drag is not a click.
+      if (movedPicture) { movedPicture = false; return; }
+      openPictureMenu(button, scene);
+    });
+    button.addEventListener("pointerdown", (event) => startPictureDrag(event, button, scene));
+  }
+}
+
+// Dragging a picture from one scene's row to another's (D-194).
+//
+// Done with pointer events inside the page rather than the system's drag and
+// drop, which Tauri takes for files (see the drop handler). A press that moves
+// less than a few pixels is a click and opens the menu; one that moves further
+// is a drag, and the row under the pointer says what letting go will do — the
+// same label, the same rule as `move_picture`: onto a scene with no picture it
+// moves; onto one with a picture the two swap.
+let movedPicture = false;
+
+function startPictureDrag(event, button, scene) {
+  // Every press starts as a click. A drag that ended on another row produces
+  // no click on this button to consume the flag, and the next real click on a
+  // picture was swallowed — found by the drag stress test.
+  movedPicture = false;
+  if (rendering || pictureBusy || event.button !== 0) return;
+  const start = { x: event.clientX, y: event.clientY };
+  let dragging = false;
+  let target = null;
+  const label = el("drop-label");
+
+  let lastY = start.y;
+  let lastX = start.x;
+  const scroller = setInterval(() => {
+    if (dragging && edgeScroll(lastY)) move({ clientX: lastX, clientY: lastY, buttons: 1, fromTimer: true });
+  }, 40);
+
+  const move = (e) => {
+    lastY = e.clientY;
+    lastX = e.clientX;
+    // No button held means the release was missed — a click that switched
+    // windows, a busy machine. A drag that outlived its button would turn the
+    // operator's next ordinary click into a move they never made, so it ends
+    // here, having done nothing.
+    if ((e.buttons & 1) === 0) {
+      if (dragging) logUsage("picture drag cancelled", "button release was missed");
+      cancelled();
+      return;
+    }
+    if (!dragging && Math.hypot(e.clientX - start.x, e.clientY - start.y) < 6) return;
+    if (!dragging) {
+      dragging = true;
+      closePictureMenu();
+      document.body.classList.add("moving-picture");
+    }
+    if (!e.fromTimer) edgeScroll(e.clientY);
+    const hit = document.elementFromPoint(e.clientX, e.clientY)?.closest?.("#rows tr[data-scene]");
+    target = hit && hit.dataset.scene !== scene.id ? hit : null;
+    for (const old of el("rows").querySelectorAll("tr.drop-target")) {
+      if (old !== target) old.classList.remove("drop-target");
+    }
+    if (target) {
+      target.classList.add("drop-target");
+      const swapping = !target.querySelector(".thumb-missing");
+      label.textContent = swapping
+        ? `Swap pictures with scene ${target.dataset.scene}`
+        : `Move picture to scene ${target.dataset.scene}`;
+      label.classList.remove("bad");
+    } else {
+      label.textContent = `Moving scene ${scene.id}'s picture — let go on another scene`;
+      label.classList.add("bad");
+    }
+    label.hidden = false;
+    label.style.left = e.clientX + 14 + "px";
+    label.style.top = e.clientY + 14 + "px";
+  };
+
+  const finish = () => {
+    clearInterval(scroller);
+    document.removeEventListener("pointermove", move);
+    document.removeEventListener("pointerup", finish);
+    document.removeEventListener("pointercancel", cancelled);
+    window.removeEventListener("blur", cancelled);
+    try { button.releasePointerCapture(event.pointerId); } catch { /* already released */ }
+    document.body.classList.remove("moving-picture");
+    showDropTarget(null);
+    if (!dragging || aborted) return;
+    movedPicture = true;
+    if (target) {
+      guard(pictureChange("move_picture", { scene: scene.id, to: target.dataset.scene }));
+    } else {
+      setStatus("Nothing was changed — let go on another scene's row to move a picture.");
+      logUsage("picture drag let go on no scene", `from scene ${scene.id}`);
+    }
+  };
+  let aborted = false;
+  const cancelled = () => { target = null; aborted = true; finish(); };
+
+  // Captured, so the release reaches this drag wherever the pointer is.
+  try { button.setPointerCapture(event.pointerId); } catch { /* not supported */ }
+  document.addEventListener("pointermove", move);
+  document.addEventListener("pointerup", finish);
+  document.addEventListener("pointercancel", cancelled);
+  window.addEventListener("blur", cancelled);
+}
+
+async function choosePicture(id) {
+  const chosen = await dialog({
+    multiple: false,
+    title: `Choose the picture for scene ${id}`,
+    filters: [{ name: "Pictures", extensions: PICTURE }],
+  });
+  if (typeof chosen === "string") await putPicture(id, chosen);
+  else logUsage("picture chooser closed without a file", `scene ${id}`);
+}
+
+// One picture change at a time (D-194). On a slow machine a second drop or an
+// impatient second click arrives while the first is still being written, and
+// it would land on a grid that is about to be redrawn under it. While this is
+// set every picture gesture is ignored, and the status line says why.
+let pictureBusy = false;
+
+async function pictureChange(command, args) {
+  if (!project || rendering) return;
+  if (pictureBusy) {
+    setStatus("Still saving the last change — try again in a moment.");
+    logUsage("ignored while saving", command);
+    return;
+  }
+  pictureBusy = true;
+  closePictureMenu();
+  try {
+    setStatus("Working…");
+    const said = await invoke(command, { root: project.root, ...args });
+    await load(project.root);
+    sayWithUndo(said);
+    flashRow(args.to ?? args.scene);
+  } catch (error) {
+    setStatus(String(error));
+  } finally {
+    pictureBusy = false;
+  }
+}
+
+// What a picture change did, with the way to take it back next to it.
+function sayWithUndo(said) {
+  const status = el("status");
+  status.textContent = said + " ";
+  const button = document.createElement("button");
+  button.className = "link undo";
+  button.textContent = "Undo (⌘Z)";
+  button.addEventListener("click", () => { logUsage("undo", "button"); guard(undoPicture()); });
+  status.appendChild(button);
+}
+
+async function undoPicture() {
+  if (!project || rendering || pictureBusy) return;
+  pictureBusy = true;
+  try {
+    const said = await invoke("undo_picture", { root: project.root });
+    await load(project.root);
+    sayWithUndo(said);
+  } catch (error) {
+    setStatus(String(error));
+  } finally {
+    pictureBusy = false;
+  }
+}
+
+// ⌘Z / Ctrl+Z undoes a picture change — but never while typing, where it is
+// the text box's own undo.
+document.addEventListener("keydown", (event) => {
+  if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "z" || event.shiftKey) return;
+  const typing = event.target.closest?.("input, textarea, [contenteditable]");
+  if (typing || el("app").hidden) return;
+  event.preventDefault();
+  logUsage("undo", "keyboard");
+  guard(undoPicture());
+});
+
+const putPicture = (scene, path) => pictureChange("set_picture", { scene, path });
+
+// A brief mark on the row that just changed, so a fast operator sees where it
+// landed without reading the status line. Matched by number, so `24` from the
+// move box finds row `024`.
+function flashRow(id) {
+  const wanted = Number(id);
+  const tr = [...el("rows").querySelectorAll("tr[data-scene]")]
+    .find((row) => Number(row.dataset.scene) === wanted);
+  if (!tr) return;
+  tr.classList.add("landed");
+  setTimeout(() => tr.classList.remove("landed"), 1200);
+}
+
+let pictureMenu = null;
+
+function closePictureMenu() {
+  pictureMenu?.remove();
+  pictureMenu = null;
+}
+
+function openPictureMenu(anchor, scene) {
+  closePictureMenu();
+  const menu = document.createElement("div");
+  menu.className = "picture-menu";
+  menu.setAttribute("role", "menu");
+  menu.innerHTML = `
+    <button data-do="replace">Replace…</button>
+    <form class="move-row"><label>Move to scene <input type="text" inputmode="numeric" size="5" /></label>
+      <button type="submit">Move</button></form>
+    <button data-do="remove" class="danger-text">Remove picture</button>`;
+  menu.querySelector('[data-do="replace"]').addEventListener("click", () => {
+    closePictureMenu();
+    guard(choosePicture(scene.id));
+  });
+  menu.querySelector('[data-do="remove"]').addEventListener("click", () =>
+    guard(pictureChange("remove_picture", { scene: scene.id })));
+  const input = menu.querySelector("input");
+  input.setAttribute("aria-label", "Scene number to move the picture to");
+  menu.querySelector("form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const to = input.value.trim();
+    if (!/^\d+$/.test(to)) {
+      setStatus("Type the number of the scene to move it to.");
+      input.focus();
+      return;
+    }
+    guard(pictureChange("move_picture", { scene: scene.id, to }));
+  });
+  menu.addEventListener("keydown", (event) => { if (event.key === "Escape") closePictureMenu(); });
+  document.body.appendChild(menu);
+  const rect = anchor.getBoundingClientRect();
+  const top = Math.min(rect.bottom + 4, innerHeight - menu.offsetHeight - 8);
+  menu.style.left = Math.max(8, rect.left) + "px";
+  menu.style.top = Math.max(8, top) + "px";
+  pictureMenu = menu;
+  input.focus();
+}
+
+document.addEventListener("click", (event) => {
+  if (pictureMenu && !pictureMenu.contains(event.target)) closePictureMenu();
+});
+
+// ------------------------------------------------------- drag onto a scene
+//
+// The webview never sees a file drag — Tauri takes it so a drop carries real
+// paths — so "which row is under the pointer" is worked out here from the
+// position Tauri reports.
+//
+// **That position is not in the same units on the two platforms**, whatever
+// its type says (Tauri calls it `PhysicalPosition` on both). Read in the
+// pinned wry 0.55.1, not assumed:
+//
+// - macOS: `draggingLocation()` flipped to the top left — window **points**,
+//   which is what the page measures in already. Dividing by the Retina ratio
+//   halved it, so the row lit up was the one at half the pointer's height —
+//   reported by the author as "it's selecting randomly".
+// - Windows: `ScreenToClient` — **physical** pixels of the client area, which
+//   is the page (D-160 keeps the native title bar outside it), so there it
+//   divides.
+
+let dragPaths = [];
+
+// Scroll the scenes list while something is held near its top or bottom edge
+// (D-194), so a row that is not on screen can still be dropped on — at 580
+// scenes most of them are not. Faster the closer to the edge. Returns whether
+// it scrolled.
+function edgeScroll(clientY) {
+  const wrap = el("rows").closest(".grid-wrap");
+  if (!wrap || el("pane-scenes").hidden) return false;
+  const box = wrap.getBoundingClientRect();
+  const zone = 48;
+  const top = clientY - box.top;
+  const bottom = box.bottom - clientY;
+  let step = 0;
+  if (top >= 0 && top < zone) step = -Math.ceil((zone - top) / 3);
+  else if (bottom >= 0 && bottom < zone) step = Math.ceil((zone - bottom) / 3);
+  if (!step) return false;
+  const before = wrap.scrollTop;
+  wrap.scrollTop += step;
+  return wrap.scrollTop !== before;
+}
+
+const dragScale = () =>
+  document.documentElement.dataset.os === "windows" ? window.devicePixelRatio || 1 : 1;
+
+function rowAt(position) {
+  if (!position || el("app").hidden || el("pane-scenes").hidden || !project?.convention) return null;
+  const ratio = dragScale();
+  const hit = document.elementFromPoint(position.x / ratio, position.y / ratio);
+  return hit?.closest?.("#rows tr[data-scene]") ?? null;
+}
+
+function showDropTarget(tr) {
+  for (const old of el("rows").querySelectorAll("tr.drop-target")) {
+    if (old !== tr) old.classList.remove("drop-target");
+  }
+  const label = el("drop-label");
+  if (!tr) {
+    label.hidden = true;
+    return;
+  }
+  tr.classList.add("drop-target");
+  const plan = dropPlan(tr.dataset.scene);
+  label.textContent = plan.says;
+  label.classList.toggle("bad", !plan.ok);
+  label.classList.toggle("warn", plan.ok && Boolean(plan.replaces));
+  const rect = tr.getBoundingClientRect();
+  label.hidden = false;
+  label.style.top = Math.max(4, rect.top - label.offsetHeight - 2) + "px";
+  label.style.left = rect.left + 12 + "px";
+}
+
+// What dropping the held files on scene `id` would do — said on the label
+// while dragging, and the same rule Rust applies (`picture::set` for one,
+// `picture::fill` for several), so what the label promises is what happens.
+function dropPlan(id) {
+  const n = dragPaths.length;
+  if (n === 0) return { ok: false, says: "" };
+  if (dragPaths.some((path) => !isPicture(path))) {
+    return { ok: false, says: n === 1 ? "That is not a picture" : "Not all of these are pictures" };
+  }
+  const rows = allRows();
+  const at = rows.findIndex((row) => row.id === id);
+  if (n === 1) {
+    return rows[at]?.waiting
+      ? { ok: true, says: `Put on scene ${id}` }
+      : { ok: true, replaces: true, says: `Replace scene ${id}'s picture — the old one is kept` };
+  }
+  const targets = rows.slice(at).filter((row) => row.waiting).slice(0, n);
+  if (targets.length < n) {
+    return { ok: false, says: `${n} pictures — only ${targets.length} scenes from ${id} on need one` };
+  }
+  return { ok: true, says: `${n} pictures → scenes ${targets[0].id}–${targets[n - 1].id}` };
+}
+
+function endDrag() {
+  showDropTarget(null);
+  el("drop").hidden = true;
 }
 
 // --------------------------------------------------------- import chapter
@@ -1871,8 +2281,35 @@ async function watchDrops() {
 let pieces = [];
 let reviewToken = 0;
 
+// The way to cut opens on this machine's choice in Settings (D-194), and can
+// be changed for this one chapter here without changing Settings.
+async function chooseCutDefault() {
+  try {
+    const view = await invoke("app_settings");
+    el("chapter-by").value = view.settings.chapter_cut || "time";
+  } catch {
+    el("chapter-by").value = "time";
+  }
+  showSeconds();
+}
+
+function showSeconds() {
+  el("chapter-seconds").hidden = el("chapter-by").value !== "time";
+}
+
+async function setCutDefault(by) {
+  const said = el("app-chapter-cut-said");
+  try {
+    await invoke("set_chapter_cut", { by });
+    said.textContent = "Saved. Import chapter will cut this way.";
+  } catch (error) {
+    said.textContent = String(error);
+  }
+}
+
 async function openChapter() {
   if (!project || rendering) return;
+  if (pieces.length === 0) await chooseCutDefault();
   if (el("app").hidden) {
     show("app");
     await refreshVoice();
@@ -1926,10 +2363,12 @@ async function cutChapter() {
   }
   const view = await invoke("chapter_cut", {
     text,
+    by: el("chapter-by").value,
     min: Number(el("chapter-min").value) || 3,
     max: Number(el("chapter-max").value) || 5,
   });
   pieces = view.cuts.map((c) => c.text);
+  logUsage("chapter cut", `by ${el("chapter-by").value}, ${pieces.length} cuts, ${text.length} characters`);
   showChapterStep("review");
   drawCuts(view, 0, 0);
 }
@@ -2009,6 +2448,7 @@ async function restructure(index, at) {
 
 function joinCuts(i) {
   if (i + 1 >= pieces.length) return;
+  logUsage("chapter cuts joined", `cuts ${i + 1} and ${i + 2} of ${pieces.length}`);
   const at = pieces[i].trimEnd().length;
   pieces.splice(i, 2, (pieces[i].trimEnd() + " " + pieces[i + 1].trimStart()).trim());
   guard(restructure(i, at + 1));
@@ -2031,6 +2471,7 @@ function cutKeys(event, box, i) {
       return;
     }
     pieces.splice(i, 1, before, after);
+    logUsage("chapter cut split", `cut ${i + 1} of ${pieces.length - 1}`);
     guard(restructure(i + 1, 0));
     return;
   }
@@ -2168,6 +2609,8 @@ el("chapter-back").addEventListener("click", () => {
   el("chapter-text").focus();
 });
 el("chapter-add").addEventListener("click", () => guard(addChapter()));
+el("chapter-by").addEventListener("change", showSeconds);
+el("app-chapter-cut").addEventListener("change", (e) => guard(setCutDefault(e.target.value)));
 el("chapter-text").addEventListener("keydown", (event) => {
   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
@@ -2177,7 +2620,7 @@ el("chapter-text").addEventListener("keydown", (event) => {
 el("add").addEventListener("click", chooseMedia);
 el("render").addEventListener("click", render);
 el("cancel").addEventListener("click", cancel);
-el("recheck").addEventListener("click", () => project && load(project.root));
+el("recheck").addEventListener("click", () => project && load(project.root, true));
 el("search").addEventListener("input", onFrame(() => { drawRows(); drawStatus(); }));
 el("play").addEventListener("click", () => guard(invoke("open_film")));
 el("reveal").addEventListener("click", () => guard(invoke("reveal_project")));

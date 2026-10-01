@@ -705,7 +705,7 @@ fn expand(sources: &[PathBuf], report: &mut Ingested) -> Vec<PathBuf> {
 }
 
 /// Copy one file in under a scene name, keeping its extension.
-fn copy_in(root: &Path, source: &Path, stem: &str) -> Result<Copied, IngestError> {
+pub(crate) fn copy_in(root: &Path, source: &Path, stem: &str) -> Result<Copied, IngestError> {
     let extension = source
         .extension()
         .and_then(OsStr::to_str)

@@ -42,6 +42,10 @@ enum Command {
     /// Cut a chapter into scenes of a few seconds each, waiting for pictures
     /// (D-193). Shows the cuts; `--apply` adds them to the project.
     ImportChapter(ImportChapterArgs),
+    /// Put a picture on one scene, take it off, or move it to another
+    /// (D-194). Nothing is deleted: a replaced or removed picture goes to
+    /// removed/.
+    Picture(PictureArgs),
     /// Take a scene out of a project, keeping its files (D-100).
     Remove(RemoveArgs),
     /// Move a scene to another position in the film (D-100).
@@ -111,6 +115,12 @@ struct ImportChapterArgs {
     #[arg(long)]
     apply: bool,
 
+    /// How to cut: `time` (about MIN to MAX seconds each, where the story
+    /// allows), or `1`, `2`, `3` — whole sentences per scene. Defaults to the
+    /// choice in the window's Settings, or `time`.
+    #[arg(long, value_name = "HOW")]
+    by: Option<String>,
+
     /// The shortest a scene should usually be, in seconds. A guide, not a rule:
     /// a cut always lands where the story allows one.
     #[arg(long, value_name = "SECONDS", default_value_t = 3.0)]
@@ -121,6 +131,30 @@ struct ImportChapterArgs {
     /// mid-phrase.
     #[arg(long, value_name = "SECONDS", default_value_t = 5.0)]
     max: f64,
+}
+
+#[derive(Debug, Args)]
+struct PictureArgs {
+    /// The project folder.
+    #[arg(value_name = "DIR")]
+    project: PathBuf,
+
+    /// The scene, by number — `24`, `024`.
+    #[arg(value_name = "SCENE")]
+    scene: String,
+
+    /// The picture to put on it. Copied in; the original stays where it is.
+    #[arg(value_name = "FILE", conflicts_with_all = ["remove", "to"], required_unless_present_any = ["remove", "to"])]
+    file: Option<PathBuf>,
+
+    /// Take the scene's picture off, into removed/.
+    #[arg(long, conflicts_with = "to")]
+    remove: bool,
+
+    /// Move the scene's picture to this scene. If that scene has a picture,
+    /// the two swap.
+    #[arg(long, value_name = "SCENE")]
+    to: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -493,6 +527,7 @@ impl Command {
             Command::New(_) => "new",
             Command::Add(_) => "add",
             Command::ImportChapter(_) => "import-chapter",
+            Command::Picture(_) => "picture",
             Command::Remove(_) => "remove",
             Command::Move(_) => "move",
             Command::Validate(_) => "validate",
@@ -517,6 +552,7 @@ impl Command {
             Command::New(a) => Some(&a.project),
             Command::Add(a) => Some(&a.project),
             Command::ImportChapter(a) => Some(&a.project),
+            Command::Picture(a) => Some(&a.project),
             Command::Remove(a) => Some(&a.project),
             Command::Move(a) => Some(&a.project),
             Command::Validate(a) => Some(&a.project),
@@ -541,6 +577,7 @@ fn dispatch(command: Command) -> Result<(), String> {
         Command::New(args) => new_project(args),
         Command::Add(args) => add_media(&args.project, &args.media),
         Command::ImportChapter(args) => import_chapter(&args),
+        Command::Picture(args) => picture(&args),
         Command::Remove(args) => remove_scenes(&args.project, &args.scenes),
         Command::Move(args) => move_scene(&args.project, &args.scene, args.to),
         Command::Validate(args) => validate(args),
@@ -652,7 +689,13 @@ fn import_chapter(args: &ImportChapterArgs) -> Result<(), String> {
     use spoonstill_app::chapter;
 
     let text = chapter::read(&args.chapter).map_err(|e| e.to_string())?;
-    let cuts = chapter::plan(&text, args.min, args.max);
+    let by = args.by.clone().unwrap_or_else(chapter::default_cut);
+    if spoonstill_core::chapter::CutBy::parse(&by, spoonstill_core::chapter::Pacing::DEFAULT)
+        .is_none()
+    {
+        return Err(format!("{by:?} is not a way to cut — use time, 1, 2 or 3"));
+    }
+    let cuts = chapter::plan_by(&text, &by, args.min, args.max);
     if cuts.is_empty() {
         return Err(format!("{} has no words in it", args.chapter.display()));
     }
@@ -682,6 +725,36 @@ fn import_chapter(args: &ImportChapterArgs) -> Result<(), String> {
     let pieces: Vec<String> = cuts.into_iter().map(|c| c.text).collect();
     let done = chapter::import(&args.project, &pieces).map_err(|e| e.to_string())?;
     println!("{}", done.summary());
+    Ok(())
+}
+
+/// `still picture DIR SCENE FILE | --remove | --to SCENE` (D-194).
+fn picture(args: &PictureArgs) -> Result<(), String> {
+    use spoonstill_app::picture;
+    let root = &args.project;
+    if args.remove {
+        if let picture::Change::Removed { binned, .. } =
+            picture::remove(root, &args.scene).map_err(|e| e.to_string())?
+        {
+            println!(
+                "Scene {}'s picture is in {} — nothing was deleted.",
+                args.scene,
+                binned.display()
+            );
+        }
+    } else if let Some(to) = &args.to {
+        let moved = picture::move_to(root, &args.scene, to).map_err(|e| e.to_string())?;
+        println!("{}", moved.summary());
+    } else if let Some(file) = &args.file {
+        let placed = picture::set(
+            root,
+            &args.scene,
+            file,
+            &spoonstill_app::ProbeCheck::from_env(),
+        )
+        .map_err(|e| e.to_string())?;
+        println!("{}", placed.summary());
+    }
     Ok(())
 }
 

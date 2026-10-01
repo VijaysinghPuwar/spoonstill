@@ -99,6 +99,20 @@
         </section>
 
         <section class="card">
+          <h3>Chapter cutting</h3>
+          <p class="sub tight">How Import chapter cuts a chapter into scenes. You can still change it for one chapter.</p>
+          <div class="row-actions">
+            <select id="app-chapter-cut" class="select wide-select">
+              <option value="time">About 3–5 seconds each, where the story allows</option>
+              <option value="1">1 sentence per scene</option>
+              <option value="2">2 sentences per scene</option>
+              <option value="3">3 sentences per scene</option>
+            </select>
+          </div>
+          <p id="app-chapter-cut-said" class="whisper left"></p>
+        </section>
+
+        <section class="card">
           <h3>Fallback voice</h3>
           <p class="sub tight">When a project names none. Never written to <code>project.yaml</code>.</p>
           <div class="row-actions">
@@ -280,12 +294,20 @@
         <textarea id="chapter-text" class="chapter-text" spellcheck="false"
           placeholder="Paste the chapter here."></textarea>
         <div class="chapter-bar">
-          <label class="chapter-pace">Each scene
-            <input id="chapter-min" type="number" min="1" max="30" step="0.5" value="3" />
-            to
-            <input id="chapter-max" type="number" min="1" max="30" step="0.5" value="5" />
-            seconds
-          </label>
+          <div class="chapter-pace">
+            <select id="chapter-by" class="select" aria-label="How to cut the chapter">
+              <option value="time">By time</option>
+              <option value="1">1 sentence each</option>
+              <option value="2">2 sentences each</option>
+              <option value="3">3 sentences each</option>
+            </select>
+            <label class="chapter-pace" id="chapter-seconds">
+              <input id="chapter-min" type="number" min="1" max="30" step="0.5" value="3" aria-label="Shortest scene, seconds" />
+              to
+              <input id="chapter-max" type="number" min="1" max="30" step="0.5" value="5" aria-label="Longest scene, seconds" />
+              seconds
+            </label>
+          </div>
           <button id="chapter-cut" class="primary big">Cut into scenes</button>
         </div>
       </div>
@@ -532,7 +554,8 @@
     </main>
   </section>
 
-  <div id="drop" class="drop" hidden><span>Drop to add</span></div>
+  <div id="drop" class="drop" hidden><span>Drop to add at the end — or drop on one scene's row to put the picture there</span></div>
+  <div id="drop-label" class="drop-label" hidden></div>
 
   <footer class="status-bar">
     <span id="status"></span>

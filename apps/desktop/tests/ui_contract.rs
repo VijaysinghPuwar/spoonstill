@@ -706,7 +706,8 @@ fn every_fallible_window_command_is_written_down() {
         let body_end = block[signature_end..]
             .find("\n}\n")
             .map_or(block.len(), |at| signature_end + at);
-        if !block[signature_end..body_end].contains("journalled(") {
+        let body = &block[signature_end..body_end];
+        if !body.contains("journalled(") && !body.contains("journalled_said(") {
             unlogged.push(name.to_owned());
         }
     }

@@ -43,6 +43,10 @@ pub struct Machine {
     /// a `--voice` on the command line wins over both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_voice: Option<String>,
+    /// How Import chapter cuts a chapter unless told otherwise (D-194):
+    /// `time`, or `1`, `2`, `3` — sentences per scene. Absent means `time`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chapter_cut: Option<String>,
 }
 
 /// Where the file is, whether or not it exists yet.
@@ -221,6 +225,27 @@ pub fn set_default_voice(voice: Option<&str>) -> Result<Machine, String> {
     Ok(settings)
 }
 
+/// Set how Import chapter cuts by default (D-194), or clear it.
+///
+/// # Errors
+///
+/// A name [`spoonstill_core::chapter::CutBy::parse`] does not read, or as
+/// [`save`].
+pub fn set_chapter_cut(by: Option<&str>) -> Result<Machine, String> {
+    use spoonstill_core::chapter::{CutBy, Pacing};
+    let mut settings = load();
+    settings.chapter_cut = match by.map(str::trim).filter(|b| !b.is_empty()) {
+        None => None,
+        Some(name) => {
+            let parsed = CutBy::parse(name, Pacing::DEFAULT)
+                .ok_or_else(|| format!("{name:?} is not a way to cut — use time, 1, 2 or 3"))?;
+            (parsed != CutBy::Time(Pacing::DEFAULT)).then(|| parsed.name())
+        }
+    };
+    save(&settings)?;
+    Ok(settings)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,6 +389,7 @@ mod tests {
     fn a_setting_survives_being_written_and_read() {
         let full = Machine {
             default_voice: Some("en-GB-RyanNeural".to_owned()),
+            chapter_cut: Some("2".to_owned()),
         };
         let text = serde_yaml_ng::to_string(&full).expect("serialise");
         assert_eq!(

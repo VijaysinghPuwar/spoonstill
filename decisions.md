@@ -9191,3 +9191,102 @@ photos…" still fill waiting scenes in order, because they number from the
 highest *picture* — which is the next waiting line — though a drop that also
 carries scripts stops at the first name a waiting line already holds, and says
 so, rather than overwriting it.
+
+### D-194 — A picture goes on the row it was put on, every change can be undone, and the log says how the window is used · Accepted
+
+**Reported 2026-09-30 by the author, on v0.1.15:** *"the plus image icon is not
+opening anything, and when I drag and drop the image on a particular sentence
+it's selecting the entire window"*. Both were defects in what shipped: D-193
+drew a **+** that did nothing and a drop that always meant "add at the end".
+Then, while it was being built: *"make sure I have an option to remove the
+image in case I put it in another sentence, or drag and drop it to the correct
+place"*, *"prevent accidental change of image, in case of a laggy system or by
+mistake"*, *"the user can select the length of auto cut — one sentence, two
+sentences — in Settings"*, and *"whatever the user is doing, keep it in the
+logs so later you can optimise the software for how it is used"*.
+
+**`spoonstill_app::picture`** is the one place a picture is put on, taken off or
+moved between scenes, with `arrange`'s and `ingest`'s rules: copied in and
+never moved from where the operator keeps it, never seen half-written (D-120),
+**nothing deleted** — a replaced or removed picture goes to `removed/` under a
+name that never overwrites what is there — and a swap parked under D-121's
+journal names so `recover` finishes one that was interrupted. `set` checks the
+new picture with the same probe `still validate` uses and puts everything back
+if it does not read. `fill` puts several down at once: the first on the scene
+dropped on, each next one on the next scene **still waiting for a picture**,
+never over one already there, and refused before anything changes when a file
+is not a picture or too few scenes are waiting. `undo` takes back any of these,
+refusing — and changing nothing — if the folder changed since. The CLI is
+`still picture DIR SCENE FILE | --remove | --to SCENE`.
+
+**The drop found the wrong row, twice over, and both were found only by
+dragging a real file in the real window.** Tauri types the drag position as
+`PhysicalPosition` on both platforms; read in the pinned wry 0.55.1, macOS
+reports window **points** and Windows physical pixels (`ScreenToClient`).
+Dividing by the Retina ratio on macOS lit the row at half the pointer's height
+— reported as *"it's selecting randomly"*. And once the whole-window "add at
+the end" overlay was up, `elementFromPoint` answered with the overlay, so no
+row could ever be found and every drop went to the end: the overlay is
+`pointer-events: none` now.
+
+**What the window does with a picture**, all with one label saying what letting
+go will do, before it happens:
+
+- **+** on a waiting row opens the system picker, for any folder.
+- **A file dragged onto a row** lands on that row — *"Put on scene 024"*;
+  several fill from there — *"9 pictures → scenes 025–033"*; onto a row with a
+  picture it replaces, in the warning colour — *"the old one is kept"*. A drop
+  that would fail is refused in red and changes nothing.
+- **A picture dragged from its row onto another** moves, or swaps with one
+  already there. Pointer events inside the page, not the system's drag, which
+  Tauri takes for files. A press must travel six pixels to be a drag, so a
+  click is never a move; a click opens **Replace… / Move to scene… / Remove**.
+- **The list scrolls itself** while anything is held near its top or bottom
+  edge — at 580 scenes most rows are off screen.
+
+**Mistakes are made hard, and every one can be taken back:** **Undo** beside
+every picture message and **Cmd+Z** (never while typing), fifty deep, per
+project. **One change at a time**: while one is being saved, further drops,
+drags and undos are ignored and said so — measured with a backend made to take
+a second per change, one move went out, not two. **A drag whose button release
+is lost** — a click that switched windows, a busy machine — is cancelled on
+the next pointer movement with no button held, captures the pointer, and ends
+on window blur; before this, the operator's next ordinary click would have
+completed a move they never made. After a re-read the list keeps its scroll
+position instead of jumping to the top.
+
+**A re-read no longer re-probes every picture.** At 580 scenes the window's
+full read took **1.49 s**, after every drop. The window now remembers each
+probe answer keyed by path, role, size and modification time — only usable
+answers, because a timeout (D-179) must not mark a good picture broken — and
+Re-check forgets them all.
+
+**How the chapter is cut is a setting**: `CutBy::Time` (D-193's 3–5 s) or
+`CutBy::Sentences(1..=10)` — whole sentences, never part of one, a blank line
+still a cut. Stored as `chapter_cut` in the machine's `settings.yaml` (D-168),
+chosen in **Settings › Chapter cutting**, offered again on the Import chapter
+screen for one chapter, and `still import-chapter --by time|1|2|3`.
+
+**The activity log now says how the window is used.** Picture, scene and
+chapter commands record the sentence the window showed as the row's `detail`
+(`journalled_said`), and a `usage` command records what never reaches Rust:
+a cut and how, a split or join, a refused drop and why, a drag let go on
+nothing or cancelled, an undo and whether by key or button. **Counts and scene
+numbers only — never the words of a narration**; `usage` cuts anything longer
+than 160 characters itself, so a careless caller cannot change that.
+
+**A safeguard against the worst defect of this work.** An edit removed two
+sections of `app.js` and the window opened on its own title bar and nothing
+else — past `node --check`, every Rust test and the UI contract, because all of
+them check that the script *parses*, none that it *runs*. `scripts/ui-smoke.mjs`
+imports it against a stand-in page and fails on any error while starting; it
+is in `make ui` (so `make lint`) and in CI on every push, and was proven to fail
+on the broken script and pass on the fix. It then caught a page-wide listener
+on its first day.
+
+**How this was tested, since nothing here had GUI automation (D-131):** real
+drags from Finder into the real window with a `CGEvent` tool, on a copy of the
+author's 580-scene project; then — once the author was using the same desktop —
+the real `app.js` in a Chrome tab behind a stand-in backend that records every
+command, so a test could assert not only that the right change was sent but
+that **no other** was.

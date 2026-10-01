@@ -586,7 +586,7 @@ fn removing_parts(name: &str) -> Option<(String, String)> {
 /// `.arranging-<from>-to-<wanted>.<ext>` — a dot so the folder scan ignores it
 /// (D-050), and both ids so an interrupted run can be finished or undone
 /// without guessing (D-121).
-fn parked_name(from: &str, wanted: &str, extension: &str) -> String {
+pub(crate) fn parked_name(from: &str, wanted: &str, extension: &str) -> String {
     format!(".arranging-{from}-to-{wanted}.{extension}")
 }
 
@@ -692,7 +692,7 @@ pub fn recover(root: &Path) -> Result<usize, ArrangeError> {
 }
 
 /// A path nothing is using yet.
-fn unique(candidate: PathBuf) -> PathBuf {
+pub(crate) fn unique(candidate: PathBuf) -> PathBuf {
     if !candidate.exists() {
         return candidate;
     }
@@ -724,7 +724,7 @@ fn rename(from: &Path, to: &Path) -> Result<(), ArrangeError> {
     })
 }
 
-fn has_extension(path: &Path, allowed: &[&str]) -> bool {
+pub(crate) fn has_extension(path: &Path, allowed: &[&str]) -> bool {
     path.extension()
         .and_then(OsStr::to_str)
         .map(str::to_ascii_lowercase)

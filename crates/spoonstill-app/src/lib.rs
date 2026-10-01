@@ -20,6 +20,7 @@ pub mod formats;
 pub mod import;
 pub mod ingest;
 pub mod machine;
+pub mod picture;
 pub mod pool;
 pub mod render;
 pub mod subtitles;
