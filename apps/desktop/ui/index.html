@@ -151,6 +151,7 @@
     <div class="stack">
       <h2 id="fill-name">—</h2>
       <button id="choose-media" class="primary big">Choose photos…</button>
+      <button id="fill-chapter" class="big">Import chapter…</button>
       <p class="whisper">
         Drop them here instead if you like. Recordings and <code>.txt</code>
         scripts can come in the same drop, and anything you do not supply
@@ -229,6 +230,7 @@
         Use the arrows to reorder, and Remove to take a scene out — its files move to <code>removed/</code>, never deleted.</p>
         </div>
         <div class="pane-tools">
+          <button id="import-chapter">Import chapter…</button>
           <button id="add">Add photos…</button>
           <button id="reveal">Show in Finder</button>
           <button id="recheck">Re-check</button>
@@ -259,6 +261,45 @@
           <tbody id="rows"></tbody>
         </table>
         <p id="grid-empty" class="empty-note" hidden>No scene matches that filter.</p>
+      </div>
+    </div>
+
+    <!-- --------------------------------------------------------- chapter -->
+    <!-- D-193. Two steps on one screen: the text, then the cuts. Nothing is
+         written to the project until "Add … scenes" is pressed. -->
+    <div class="pane" id="pane-chapter" hidden>
+      <div class="pane-head thin">
+        <div><h2>Import chapter</h2></div>
+        <div class="pane-tools">
+          <button id="chapter-file">Choose file…</button>
+          <button id="chapter-cancel">Cancel</button>
+        </div>
+      </div>
+
+      <div class="chapter-write" id="chapter-write">
+        <textarea id="chapter-text" class="chapter-text" spellcheck="false"
+          placeholder="Paste the chapter here."></textarea>
+        <div class="chapter-bar">
+          <label class="chapter-pace">Each scene
+            <input id="chapter-min" type="number" min="1" max="30" step="0.5" value="3" />
+            to
+            <input id="chapter-max" type="number" min="1" max="30" step="0.5" value="5" />
+            seconds
+          </label>
+          <button id="chapter-cut" class="primary big">Cut into scenes</button>
+        </div>
+      </div>
+
+      <div class="chapter-review" id="chapter-review" hidden>
+        <div class="chapter-bar top">
+          <span id="chapter-summary" class="chapter-summary"></span>
+          <span class="chapter-keys">Enter splits · Backspace at the start joins</span>
+        </div>
+        <ol id="chapter-cuts" class="cuts"></ol>
+        <div class="chapter-bar">
+          <button id="chapter-back">← Edit text</button>
+          <button id="chapter-add" class="primary big">Add scenes</button>
+        </div>
       </div>
     </div>
 

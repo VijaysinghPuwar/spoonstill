@@ -9092,3 +9092,102 @@ inserted between `tools::install`'s doc comment and the function, under its
 manager this machine has …"* to `describe_failure` and left `install` with
 only its error paragraph. Each comment is back on its own function. No
 behaviour changes.
+
+### D-193 — A chapter is imported, cut where the story allows, and each line waits for its picture · Accepted
+
+**Asked for 2026-09-30, by the author, in their own words:** a new picture
+*"with each sentence or sometimes a group of words, every 3 to 5 seconds"*;
+*"paste the entire chapter and it auto cuts everything, and with each cut I
+make an image and put it in front of it"*; *"keep the current thing"*; and,
+once the first cuts were shown, *"the cuts should make sense in the story or
+narration"*. The author makes the pictures in Google Flow, one per line.
+
+**The workflow this replaces** was measured in the author's own folder: ten
+scenes between 21:34 and 21:54, one picture saved as `NNN.jpeg` and one line
+typed into `NNN.txt` at a time. At three-to-five-second scenes a chapter is a
+hundred and fifty of them.
+
+**One kind of project, and an "Import chapter…" button — not a mode chosen at
+New project.** Two kinds of project would put a question on every screen and
+lock a folder into the answer given on its first day, and real work mixes the
+two: a chapter imported, then photographs added the old way; an old project
+given its next chapter. The button is on the empty project's screen beside
+"Choose photos…", which is where the choice was asked for, and on Scenes. The
+CLI has the same thing: `still import-chapter DIR CHAPTER [--apply]`, which
+shows the cuts and writes only with `--apply`.
+
+**The cut is a shortest path over word gaps** (`spoonstill_core::chapter`),
+where a gap after a full stop is free, after a comma or dash costs 2, before
+`and`/`but`/`when`… costs 6, anywhere else 25, and after a dangling function
+word 20 more — plus a cost per second outside the pacing, gentle for the first
+2.5 s over and steep after it. **The story decides and the seconds are a
+guide**: a sentence with no pause in it stays whole well past five seconds.
+And one shape is refused outright, because it reads as a mistake — **the end of
+one sentence joined to the start of the next.** The first version produced
+*"playing a game. Then his vision had gone black,"* from the author's own
+opening; that is the reason for the rule, and a test holds it. A blank line is
+always a cut; a single line break is not (text pasted from a document arrives
+hard-wrapped). `Mr.`, `Dr.` and a single capital initial end no sentence; `no.`
+deliberately does. Devanagari's danda and CJK full stops end sentences.
+
+**The seconds are an estimate, and every surface says so.** 15 characters a
+second was **measured** on the author's own ten lines in their own voice
+(`en-US-AndrewMultilingualNeural`, 965 characters, 63.9 s, spread 12.8–17.0).
+It is deliberately not `edge.rs`'s 17.3, which is the fastest observed rate
+and is used to refuse a line no scene could hold — a ceiling, where this is a
+typical value. The real length is measured when a line is spoken (D-021).
+
+**A numbered line with no picture is a scene waiting for one.** This is the
+change under everything else. Until now a scene was its still (D-050), so a
+numbered `.txt` alone was `UnpairedFile` — *"pairs with no image, so it is not
+part of any scene"* — and, worse, D-170's orphan, which makes every renumber
+refuse. Importing a chapter would have appeared to do nothing and then broken
+the arrows. Now:
+
+- the folder scan returns it in `Rows::awaiting` / `Project::awaiting`, with
+  its words, instead of an `UnpairedFile`; a stem that is **not** a number is
+  still an `UnpairedFile`, exactly as before;
+- `arrange::scenes` includes it, so it is moved, removed and renumbered like any
+  scene and a renumber never lands on it. D-170's guard stays and is still
+  tested — against a folder at a scene's name, the one thing left that belongs
+  to no scene;
+- `ProblemKind::NeedsPicture` is **one line for the project** (D-145's reason) —
+  a warning while some scene has a picture, because the render leaves waiting
+  ones out exactly as it always left an unpaired file out; an error when none
+  has, replacing a `NoScenes` that would have said "no image/narration pairs
+  found" over a grid full of the operator's lines;
+- the window lists it in film order with a dashed empty picture slot and a
+  **NO PICTURE** badge, under its own "Needs a picture" filter; its words can be
+  edited but not emptied, since emptying them would delete the scene in
+  silence, which is Remove's job.
+
+**The effect on existing projects is a message, not a film.** A folder with a
+numbered narration whose photograph was deleted renders exactly as it did —
+that file was left out then and is left out now — and says "has no picture yet"
+instead of "pairs with no image". Its arrows now work instead of refusing.
+
+**Import never overwrites and never shows a half-written file.** Numbering
+starts one past the highest scene number of *any* kind — a waiting line holds
+its number as firmly as a finished scene — and each file is written beside its
+name, claimed with `create_new`, and renamed (D-120). A folder mid-renumber is
+recovered first (D-121). A manifest project is refused before anything is
+written, because numbered files would not become scenes there. A chapter file
+is measured before it is read (D-126): 4 MiB, a round number.
+
+**The screen is built for repetitive work at speed**, as asked: large text, one
+line of help, and nothing written until one button — *Add N scenes* — is
+pressed. The cut list edits like text: Enter splits a cut at the cursor,
+Backspace at the start joins it to the one above, Delete at the end joins the
+one below, and the arrows walk between cuts. A cut more than 2.5 s over the
+maximum shows its seconds in the warning colour — worth a look, not an error. A
+`.txt` dropped on this screen is the chapter, not a scene.
+
+**Not in this step, and next:** a picture dropped onto one particular row, with
+the row it will land on highlighted while dragging, and a picture on the wrong
+row removable or movable to another; the style note and Copy button for Google
+Flow; a scene with no picture rendering as a placeholder; and whether each cut
+is spoken separately or the chapter in one go. Until then `still add` and "Add
+photos…" still fill waiting scenes in order, because they number from the
+highest *picture* — which is the next waiting line — though a drop that also
+carries scripts stops at the first name a waiting line already holds, and says
+so, rather than overwriting it.

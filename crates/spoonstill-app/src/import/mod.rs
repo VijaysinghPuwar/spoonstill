@@ -46,7 +46,7 @@ use spoonstill_media::scene::Cancel;
 use crate::pool;
 use spoonstill_media::{Tools, probe};
 
-pub use rows::{Mode, Rows, RowsError};
+pub use rows::{Awaiting, Mode, Rows, RowsError};
 pub use settings::{Settings, SettingsError};
 
 /// How long a single validation probe may take.
@@ -297,6 +297,9 @@ pub struct Project {
     pub scenes: Vec<ResolvedScene>,
     /// Everything wrong, from every stage, in one list.
     pub problems: Vec<Problem>,
+    /// Numbered scenes waiting for a picture (D-193), in render order. Not in
+    /// `scenes`, because nothing here can render them yet.
+    pub awaiting: Vec<rows::Awaiting>,
 }
 
 impl Project {
@@ -536,6 +539,23 @@ pub fn load(root: &Path, media: &dyn MediaCheck, cancel: &Cancel) -> Result<Proj
         problems.push(Problem::in_project(kind));
     }
 
+    // Scenes waiting for a picture (D-193). One line for the project, not one
+    // per scene — a chapter is a hundred and fifty of them, and one fact said
+    // a hundred and fifty times is how warnings stop being read (D-145). With
+    // no picture anywhere, `NoScenes` would say "no image/narration pairs
+    // found" over a grid full of the operator's lines; this says what is true.
+    if let Some(first) = rows.awaiting.first() {
+        let none_pictured = resolved.is_empty();
+        if none_pictured {
+            problems.retain(|p| !matches!(p.kind, ProblemKind::NoScenes));
+        }
+        problems.push(Problem::in_project(ProblemKind::NeedsPicture {
+            scenes: rows.awaiting.len(),
+            first: first.id.clone(),
+            none_pictured,
+        }));
+    }
+
     order_by_scene(&mut problems, &rows.drafts);
 
     Ok(Project {
@@ -544,6 +564,7 @@ pub fn load(root: &Path, media: &dyn MediaCheck, cancel: &Cancel) -> Result<Proj
         mode: rows.mode,
         scenes: resolved,
         problems,
+        awaiting: rows.awaiting,
     })
 }
 

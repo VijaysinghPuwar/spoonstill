@@ -39,6 +39,9 @@ enum Command {
     New(NewArgs),
     /// Copy photos and recordings into a project, numbered and paired.
     Add(AddArgs),
+    /// Cut a chapter into scenes of a few seconds each, waiting for pictures
+    /// (D-193). Shows the cuts; `--apply` adds them to the project.
+    ImportChapter(ImportChapterArgs),
     /// Take a scene out of a project, keeping its files (D-100).
     Remove(RemoveArgs),
     /// Move a scene to another position in the film (D-100).
@@ -90,6 +93,34 @@ struct AddArgs {
     /// Photos and recordings, or folders of them.
     #[arg(value_name = "FILE", required = true)]
     media: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct ImportChapterArgs {
+    /// The project folder to add the scenes to.
+    #[arg(value_name = "DIR")]
+    project: PathBuf,
+
+    /// The chapter, as a plain text file. A blank line between paragraphs is
+    /// always a cut.
+    #[arg(value_name = "CHAPTER")]
+    chapter: PathBuf,
+
+    /// Add the cuts to the project. Without it, nothing is written — the cuts
+    /// are only shown.
+    #[arg(long)]
+    apply: bool,
+
+    /// The shortest a scene should usually be, in seconds. A guide, not a rule:
+    /// a cut always lands where the story allows one.
+    #[arg(long, value_name = "SECONDS", default_value_t = 3.0)]
+    min: f64,
+
+    /// The longest a scene should usually be, in seconds. Also a guide: a
+    /// sentence with no natural pause in it is kept whole rather than broken
+    /// mid-phrase.
+    #[arg(long, value_name = "SECONDS", default_value_t = 5.0)]
+    max: f64,
 }
 
 #[derive(Debug, Args)]
@@ -461,6 +492,7 @@ impl Command {
         match self {
             Command::New(_) => "new",
             Command::Add(_) => "add",
+            Command::ImportChapter(_) => "import-chapter",
             Command::Remove(_) => "remove",
             Command::Move(_) => "move",
             Command::Validate(_) => "validate",
@@ -484,6 +516,7 @@ impl Command {
         match self {
             Command::New(a) => Some(&a.project),
             Command::Add(a) => Some(&a.project),
+            Command::ImportChapter(a) => Some(&a.project),
             Command::Remove(a) => Some(&a.project),
             Command::Move(a) => Some(&a.project),
             Command::Validate(a) => Some(&a.project),
@@ -507,6 +540,7 @@ fn dispatch(command: Command) -> Result<(), String> {
     match command {
         Command::New(args) => new_project(args),
         Command::Add(args) => add_media(&args.project, &args.media),
+        Command::ImportChapter(args) => import_chapter(&args),
         Command::Remove(args) => remove_scenes(&args.project, &args.scenes),
         Command::Move(args) => move_scene(&args.project, &args.scene, args.to),
         Command::Validate(args) => validate(args),
@@ -609,6 +643,59 @@ fn move_scene(root: &std::path::Path, id: &str, to: usize) -> Result<(), String>
     Ok(())
 }
 
+/// `still import-chapter DIR CHAPTER [--apply]` (D-193).
+///
+/// Shows the cuts by default, because the cuts are the decision: an operator
+/// reads the list, and only then writes it. The seconds are an estimate from
+/// the text, and the header says so.
+fn import_chapter(args: &ImportChapterArgs) -> Result<(), String> {
+    use spoonstill_app::chapter;
+
+    let text = chapter::read(&args.chapter).map_err(|e| e.to_string())?;
+    let cuts = chapter::plan(&text, args.min, args.max);
+    if cuts.is_empty() {
+        return Err(format!("{} has no words in it", args.chapter.display()));
+    }
+    let total: f64 = cuts.iter().map(|c| c.seconds).sum();
+    let width = cuts.len().to_string().len();
+    for (index, cut) in cuts.iter().enumerate() {
+        println!(
+            "  {:>width$}  {:>4.1}s  {}",
+            index + 1,
+            cut.seconds,
+            cut.text,
+            width = width
+        );
+    }
+    println!(
+        "{} cuts, about {} — {} pictures to make. Times are estimated from the text; \
+         the real length is measured when each line is spoken.",
+        cuts.len(),
+        minutes(total),
+        cuts.len()
+    );
+
+    if !args.apply {
+        println!("Nothing was written. Add --apply to add these as scenes.");
+        return Ok(());
+    }
+    let pieces: Vec<String> = cuts.into_iter().map(|c| c.text).collect();
+    let done = chapter::import(&args.project, &pieces).map_err(|e| e.to_string())?;
+    println!("{}", done.summary());
+    Ok(())
+}
+
+/// `75.2` seconds as `1 min 15 s`.
+fn minutes(seconds: f64) -> String {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let whole = seconds.round() as u64;
+    if whole < 60 {
+        format!("{whole} s")
+    } else {
+        format!("{} min {} s", whole / 60, whole % 60)
+    }
+}
+
 fn add_media(root: &std::path::Path, media: &[PathBuf]) -> Result<(), String> {
     let report = spoonstill_app::add_media(root, media).map_err(|e| e.to_string())?;
 
@@ -624,7 +711,10 @@ fn add_media(root: &std::path::Path, media: &[PathBuf]) -> Result<(), String> {
             ),
             (Some(audio), None) => name_of(&audio.source),
             (None, Some(script)) => format!("{} (spoken)", name_of(&script.source)),
-            (None, None) => "silent".to_owned(),
+            (None, None) => match report.filled_for(image) {
+                Some(waiting) => format!("{waiting} (the line that was waiting for it)"),
+                None => "silent".to_owned(),
+            },
         };
         println!(
             "  {:<12} {}  +  {}",

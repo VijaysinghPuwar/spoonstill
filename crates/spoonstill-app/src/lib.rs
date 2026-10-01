@@ -13,6 +13,7 @@
 pub mod arrange;
 pub mod audio;
 pub mod capacity;
+pub mod chapter;
 pub mod diagnostics;
 pub mod film;
 pub mod formats;

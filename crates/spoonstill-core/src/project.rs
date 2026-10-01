@@ -476,6 +476,19 @@ pub enum ProblemKind {
     },
     /// The project resolved to no scenes at all.
     NoScenes,
+    /// Numbered scenes have words but no picture yet (D-193).
+    ///
+    /// A **warning** while some scene has a picture — the render leaves the
+    /// waiting ones out, as it always left an unpaired file out, and this says
+    /// so. An **error** when none has, because then there is no film to make.
+    NeedsPicture {
+        /// How many scenes are waiting.
+        scenes: usize,
+        /// The first of them, so the operator knows where to start.
+        first: String,
+        /// Whether no scene at all has a picture.
+        none_pictured: bool,
+    },
     /// The tooling a check needs is not on this machine (D-103).
     ///
     /// **Project-level, and deliberately not per scene.** A probe that cannot
@@ -601,6 +614,13 @@ impl ProblemKind {
             | ProblemKind::UnlistedImage { .. }
             | ProblemKind::UndersizedSources { .. }
             | ProblemKind::UndrawableCaption { .. } => Severity::Warn,
+            ProblemKind::NeedsPicture { none_pictured, .. } => {
+                if *none_pictured {
+                    Severity::Error
+                } else {
+                    Severity::Warn
+                }
+            }
             _ => Severity::Error,
         }
     }
@@ -661,6 +681,28 @@ impl fmt::Display for ProblemKind {
             } => write!(f, "`{field}` {value:?}: {detail}"),
             ProblemKind::NoScenes => {
                 f.write_str("no scenes — no manifest rows and no image/narration pairs found")
+            }
+            ProblemKind::NeedsPicture {
+                scenes,
+                first,
+                none_pictured,
+            } => {
+                if *none_pictured {
+                    write!(
+                        f,
+                        "no scene has a picture yet — {scenes} {} waiting, starting \
+                         with scene {first}; add a picture to render",
+                        if *scenes == 1 { "is" } else { "are" }
+                    )
+                } else {
+                    write!(
+                        f,
+                        "{scenes} scene{} {} no picture yet and will be left out of \
+                         the film — the first is scene {first}",
+                        if *scenes == 1 { "" } else { "s" },
+                        if *scenes == 1 { "has" } else { "have" }
+                    )
+                }
             }
             ProblemKind::ToolingMissing { remedy } => write!(f, "{remedy}"),
             ProblemKind::UnusableSetting {

@@ -218,6 +218,35 @@ pub fn scenes(root: &Path) -> Result<Vec<Scene>, ArrangeError> {
         });
     }
 
+    // A numbered scene with words or a recording and no still is a scene
+    // waiting for its picture (D-193), and it is arranged like any other. It
+    // used to belong to nothing — D-170's orphan — which was right for a
+    // narration whose photograph had been deleted and made every move refuse
+    // in a project whose lines were imported before their pictures. A stem
+    // that is not a number is still not a scene, and still not renumbered.
+    for file in &everything {
+        if !(has_extension(file, &AUDIO_EXTENSIONS) || has_extension(file, &TEXT_EXTENSIONS)) {
+            continue;
+        }
+        let Some(stem) = file.file_stem().and_then(OsStr::to_str) else {
+            continue;
+        };
+        let Ok(number) = stem.parse::<usize>() else {
+            continue;
+        };
+        if let Some(scene) = scenes.iter_mut().find(|scene| scene.id == stem) {
+            if !scene.files.contains(file) {
+                scene.files.push(file.clone());
+            }
+            continue;
+        }
+        scenes.push(Scene {
+            id: stem.to_owned(),
+            number,
+            files: vec![file.clone()],
+        });
+    }
+
     scenes.sort_by_key(|scene| scene.number);
     Ok(scenes)
 }
@@ -1201,9 +1230,12 @@ mod tests {
                 ("005", &["jpeg", "txt"]),
             ],
         );
-        // A narration whose photograph is gone. It is not a scene, so nothing
-        // parks it.
-        fs::write(project.0.join("004.txt"), "ORPHAN-SURVIVOR").expect("write");
+        // Something at a name a renumbered scene wants that belongs to no
+        // scene. Since D-193 a numbered `.txt` *is* a scene — one waiting for
+        // its picture — so the obstacle here is a folder of that name, which
+        // nothing can make part of a scene and nothing may rename over.
+        fs::create_dir(project.0.join("004.txt")).expect("mkdir");
+        fs::write(project.0.join("004.txt").join("keep"), "SURVIVOR").expect("write");
 
         let error = move_to(project.path(), "005", 4).expect_err("refused, not silently");
 
@@ -1214,9 +1246,8 @@ mod tests {
         let said = error.to_string();
         assert!(said.contains("004.txt"), "{said}");
         assert_eq!(
-            fs::read_to_string(project.0.join("004.txt")).expect("still there"),
-            "ORPHAN-SURVIVOR",
-            "the operator's narration must survive"
+            fs::read_to_string(project.0.join("004.txt").join("keep")).expect("still there"),
+            "SURVIVOR",
         );
 
         // And nothing was touched on the way to refusing — asserted on the raw
@@ -1226,26 +1257,57 @@ mod tests {
         assert_eq!(
             project.listing(),
             vec![
-                "001.jpeg", "001.txt", "002.jpeg", "002.txt", "003.jpeg", "003.txt", "004.txt",
-                "005.jpeg", "005.txt",
+                "001.jpeg", "001.txt", "002.jpeg", "002.txt", "003.jpeg", "003.txt", "005.jpeg",
+                "005.txt",
             ],
-            "the folder is exactly as it was"
-        );
-        assert_eq!(
-            project.contents(),
-            vec!["001.jpeg", "002.jpeg", "003.jpeg", "005.jpeg"],
-            "and it still reads as the same four scenes"
+            "the folder is exactly as it was (the listing is files only)"
         );
     }
 
-    /// The same obstacle reached through `still remove`, which is the command
-    /// that prints "Nothing was deleted" — so it is the one that must not.
+    /// D-193. A numbered narration with no picture is a scene waiting for one,
+    /// and a move carries it like any other scene — it used to be D-170's
+    /// orphan, which made every move in a freshly imported chapter refuse.
     #[test]
-    fn a_removal_that_would_overwrite_an_orphan_refuses_before_moving_anything() {
-        // Five scenes, so removing one leaves four and the fourth wants the
-        // orphan's name.
+    fn a_scene_waiting_for_its_picture_moves_with_the_others() {
         let project = Project::new(
-            "orphan-remove",
+            "waiting",
+            &[
+                ("001", &["jpeg", "txt"]),
+                ("002", &["jpeg", "txt"]),
+                ("003", &["jpeg", "txt"]),
+                ("005", &["jpeg", "txt"]),
+            ],
+        );
+        fs::write(project.0.join("004.txt"), "WAITING").expect("write");
+
+        let all = scenes(project.path()).expect("numbered");
+        assert_eq!(all.len(), 5, "the waiting line is a scene: {all:?}");
+
+        move_to(project.path(), "005", 4).expect("moves");
+
+        assert_eq!(
+            project.listing(),
+            vec![
+                "001.jpeg", "001.txt", "002.jpeg", "002.txt", "003.jpeg", "003.txt", "004.jpeg",
+                "004.txt", "005.txt",
+            ],
+        );
+        assert_eq!(
+            fs::read_to_string(project.0.join("005.txt")).expect("moved, not lost"),
+            "WAITING"
+        );
+        assert_ne!(
+            fs::read_to_string(project.0.join("004.txt")).expect("read"),
+            "WAITING",
+            "the picture's own line travelled with it"
+        );
+    }
+
+    /// The same through `still remove`, which prints "Nothing was deleted".
+    #[test]
+    fn a_removal_carries_a_scene_waiting_for_its_picture() {
+        let project = Project::new(
+            "waiting-remove",
             &[
                 ("001", &["jpeg", "txt"]),
                 ("002", &["jpeg", "txt"]),
@@ -1254,23 +1316,30 @@ mod tests {
                 ("006", &["jpeg", "txt"]),
             ],
         );
-        fs::write(project.0.join("004.txt"), "ORPHAN-SURVIVOR").expect("write");
+        fs::write(project.0.join("004.txt"), "WAITING").expect("write");
 
-        let error = remove(project.path(), "001").expect_err("refused");
+        let removed = remove(project.path(), "001").expect("removes");
 
-        assert!(matches!(error, ArrangeError::Occupied { .. }), "{error}");
+        assert_eq!(removed.remaining, 5);
         assert_eq!(
-            fs::read_to_string(project.0.join("004.txt")).expect("still there"),
-            "ORPHAN-SURVIVOR"
+            fs::read_to_string(project.0.join("003.txt")).expect("renumbered, not lost"),
+            "WAITING"
         );
+        assert!(project.path().join(REMOVED_DIR).join("001.jpeg").exists());
+    }
+
+    /// A picture-less file whose name is not a scene number is still nobody's
+    /// scene, and is never renamed.
+    #[test]
+    fn an_unnumbered_line_is_not_a_scene() {
+        let project = three();
+        fs::write(project.0.join("notes.txt"), "mine").expect("write");
+        let all = scenes(project.path()).expect("numbered");
+        assert_eq!(all.len(), 3);
+        move_to(project.path(), "003", 1).expect("moves");
         assert_eq!(
-            project.contents(),
-            vec!["001.jpeg", "002.jpeg", "003.jpeg", "005.jpeg", "006.jpeg"],
-            "the scene it was asked to remove is still in the project"
-        );
-        assert!(
-            !project.path().join(REMOVED_DIR).join("001.jpeg").exists(),
-            "and nothing reached the removed folder"
+            fs::read_to_string(project.0.join("notes.txt")).expect("untouched"),
+            "mine"
         );
     }
 

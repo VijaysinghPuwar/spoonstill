@@ -129,6 +129,13 @@ pub struct Ingested {
     /// Stills that paired with neither a recording nor a script, and will hold
     /// for the project's default duration as silent scenes (D-050).
     pub image_without_audio: usize,
+    /// Stills that landed on a scene already waiting for its picture (D-193),
+    /// by scene name, with the waiting file they now pair with — `023.txt`.
+    ///
+    /// Reported because the drop itself carried no words for them, so without
+    /// this every one read as *silent* — the first stress test of D-193 said
+    /// "5 photos, 5 silent" over five scenes about to be spoken.
+    pub filled: Vec<(String, String)>,
 }
 
 impl Ingested {
@@ -153,6 +160,17 @@ impl Ingested {
     #[must_use]
     pub fn script_for(&self, image: &Copied) -> Option<&Copied> {
         with_stem(&self.scripts, &image.name)
+    }
+
+    /// The waiting line or recording this still landed on, if it filled a
+    /// scene that was waiting for its picture (D-193).
+    #[must_use]
+    pub fn filled_for(&self, image: &Copied) -> Option<&str> {
+        let stem = stem_of(Path::new(&image.name));
+        self.filled
+            .iter()
+            .find(|(scene, _)| *scene == stem)
+            .map(|(_, file)| file.as_str())
     }
 
     /// Scripts that will be **spoken**: the ones with no recording beside them.
@@ -197,6 +215,13 @@ impl Ingested {
         let captions = self.captions().count();
         if captions > 0 {
             parts.push(format!("{captions} caption{}", plural(captions)));
+        }
+        if !self.filled.is_empty() {
+            let n = self.filled.len();
+            parts.push(format!(
+                "{n} filling scene{} that waited for a picture",
+                plural(n)
+            ));
         }
         if self.image_without_audio > 0 {
             parts.push(format!("{} silent", self.image_without_audio));
@@ -540,18 +565,26 @@ pub fn add_media(root: &Path, sources: &[PathBuf]) -> Result<Ingested, IngestErr
             });
         }
     }
-    report.image_without_audio = narration
-        .iter()
-        .zip(&lines)
-        .filter(|(a, t)| a.is_none() && t.is_none())
-        .count();
-
     let start = next_index(root);
     let width = MIN_WIDTH.max(digits(start + images.len().saturating_sub(1)));
 
     for (offset, image) in images.iter().enumerate() {
         let stem = format!("{:0width$}", start + offset, width = width);
+        // Asked before the copy: is there already a line or a recording at
+        // this number — a scene waiting for its picture (D-193)?
+        let waiting = if narration[offset].is_none() && lines[offset].is_none() {
+            waiting_file(root, &stem)
+        } else {
+            None
+        };
         report.images.push(copy_in(root, image, &stem)?);
+        match waiting {
+            Some(file) => report.filled.push((stem.clone(), file)),
+            None if narration[offset].is_none() && lines[offset].is_none() => {
+                report.image_without_audio += 1;
+            }
+            None => {}
+        }
         if let Some(narration) = narration[offset].as_ref() {
             report.audio.push(copy_in(root, narration, &stem)?);
         }
@@ -763,6 +796,23 @@ fn copy_in(root: &Path, source: &Path, stem: &str) -> Result<Copied, IngestError
     })
 }
 
+/// The line or recording already in the project at `stem`, if there is one —
+/// which, where no still shares it, is a scene waiting for its picture.
+fn waiting_file(root: &Path, stem: &str) -> Option<String> {
+    let mut found: Vec<String> = fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .filter(|path| path.file_stem().and_then(OsStr::to_str) == Some(stem))
+        .filter(|path| matches!(kind_of(path), Some(Kind::Audio | Kind::Text)))
+        .filter_map(|path| path.file_name().and_then(OsStr::to_str).map(str::to_owned))
+        .collect();
+    found.sort();
+    found.into_iter().next()
+}
+
 /// Every file of one kind directly inside a folder.
 fn media_in(root: &Path, wanted: Kind) -> Vec<PathBuf> {
     fs::read_dir(root)
@@ -888,6 +938,41 @@ mod tests {
             source: PathBuf::from(name),
             name: name.to_owned(),
         }
+    }
+
+    /// D-193. Photos dropped onto a project whose next scenes are lines
+    /// waiting for pictures fill them, and the report says so — the first
+    /// stress test of D-193 printed "5 photos, 5 silent" over five scenes
+    /// about to be spoken.
+    #[test]
+    fn photos_that_fill_waiting_scenes_are_not_reported_as_silent() {
+        let project = Temp::new("filled");
+        project.file("p/001.jpeg", b"x");
+        project.file("p/001.txt", b"one");
+        project.file("p/002.txt", b"waiting line");
+        project.file("p/003.mp3", b"waiting take");
+        let a = project.file("in/flow-a.jpeg", b"a");
+        let b = project.file("in/flow-b.jpeg", b"b");
+        let c = project.file("in/flow-c.jpeg", b"c");
+
+        let report = add_media(&project.0.join("p"), &[a, b, c]).expect("adds");
+
+        assert_eq!(
+            report.filled,
+            vec![
+                ("002".to_owned(), "002.txt".to_owned()),
+                ("003".to_owned(), "003.mp3".to_owned())
+            ]
+        );
+        assert_eq!(report.image_without_audio, 1, "only 004 is silent");
+        assert_eq!(report.filled_for(&report.images[0]), Some("002.txt"));
+        let summary = report.summary();
+        assert!(summary.contains("2 filling scenes"), "{summary}");
+        assert!(summary.contains("1 silent"), "{summary}");
+        assert_eq!(
+            fs::read_to_string(project.0.join("p/002.txt")).expect("kept"),
+            "waiting line"
+        );
     }
 
     /// D-152, the reported case: a folder of photographs almost always holds a

@@ -274,6 +274,48 @@ be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
 
+### State as of 2026-09-30 — a chapter is imported and waits for its pictures (D-193), `v0.1.15`
+
+**Asked for by the author**: paste a whole chapter, have it cut into scenes of
+three to five seconds *"where the story allows"*, and make one picture per cut
+(they make pictures in Google Flow). **Step 1 of 4 is built**: the cut, the
+Import chapter screen, and scenes that wait for a picture. Read D-193 before
+touching `spoonstill_core::chapter`, `spoonstill_app::chapter`,
+`Rows::awaiting`, `ProblemKind::NeedsPicture`, `arrange::scenes`,
+`Ingested::filled`, or the window's `WaitingView` / `allRows()`.
+
+**The load-bearing change is not the cutter.** A numbered `.txt` (or recording)
+with no still is now a **scene waiting for its picture** — in the scan, in
+`arrange`, and in the window — where it used to be D-170's orphan, which made
+every move refuse. A stem that is not a number is still an `UnpairedFile`. In
+existing projects only the warning's wording changes; the film does not.
+
+**Stress-tested before release, and the testing found eight defects**, all
+fixed and most with a test: two classes of bad cut (half of one sentence plus
+half of the next; a list or adjective pair split at its comma), `still add`
+reporting photos as *silent* when they filled waiting lines, a per-file
+`fsync` that made 506 lines take 2.35 s (now 0.09 s), and four window
+defects found by driving the **real** window (badge wrap, first imported row
+hidden under the sticky header, two false "needs attention" messages on an
+empty project, a suppressed focus ring). 1 500 random chapters run against
+the cut's invariants on every `cargo test`.
+
+**How the window was driven, since nothing here had GUI automation (D-131):**
+launch `target/release/spoonstill-desktop <project>` (it takes a folder as its
+first argument), read the window's bounds with `osascript`, and post clicks and
+keys with a ten-line Swift `CGEvent` tool; `screencapture -R` for evidence.
+`osascript … click at` is refused (-25208); `CGEvent` is not.
+
+**Next, in order** (D-193's last paragraph): drop a picture onto one row, with
+the row lit while dragging, and **Remove picture / Move picture to scene…** on
+every row that has one — the author asked for this explicitly; a style note
+plus Copy for Google Flow; a placeholder so a scene without a picture still
+renders; then the voice question (each cut spoken separately vs the chapter
+spoken once and cut at word boundaries).
+
+`make gates` 39/39, `cargo test --workspace` **726 passed / 11 ignored**,
+`make lint` green, D-132 Windows cross-check clean. **Not run on Windows.**
+
 ### State as of 2026-09-29, on the Mac — D-191 checked, D-192, and `v0.1.14` released
 
 **D-191 holds on macOS and cross-compiles clean for Windows.** Pulled

@@ -131,6 +131,7 @@ function setStatus(text) { el("status").textContent = text || ""; }
 function tab(name) {
   for (const button of el("tabs").children) button.classList.toggle("on", button.dataset.tab === name);
   for (const pane of TABS) el("pane-" + pane).hidden = pane !== name;
+  el("pane-chapter").hidden = true;
   if (name === "voice") loadVoices();
   if (name === "subtitles") loadThemes();
 }
@@ -487,7 +488,7 @@ async function addMedia(files) {
 function draw() {
   el("s-geometry").textContent = project.geometry;
   drawFormats();
-  el("s-scenes").textContent = String(project.scenes.length);
+  el("s-scenes").textContent = String(allRows().length);
   el("s-mode").textContent = project.mode;
   el("s-root").textContent = project.root;
   el("s-output").textContent = project.output_path || project.output;
@@ -498,17 +499,26 @@ function draw() {
   drawVoiceChoice();
   drawStatus();
 
-  el("pip-scenes").textContent = String(project.scenes.length);
+  el("pip-scenes").textContent = String(allRows().length);
   updateRender();
 }
 
 const count = (kind) => project.scenes.filter((s) => s.source === kind).length;
+
+// Every row of the grid in film order: finished scenes and the ones still
+// waiting for a picture (D-193). Rust numbers both (`position`), so the order
+// is not worked out here.
+function allRows() {
+  const waiting = (project.waiting ?? []).map((w) => ({ ...w, waiting: true, source: "waiting" }));
+  return [...project.scenes, ...waiting].sort((a, b) => a.position - b.position);
+}
 const attention = () => project.problems.filter((p) => p.severity === "error").length;
 
 function drawChips() {
   const chips = [
-    ["all", "All", project.scenes.length, false],
+    ["all", "All", allRows().length, false],
     ["attention", "Needs attention", attention(), true],
+    ["waiting", "Needs a picture", (project.waiting ?? []).length, true],
     ["tts", "Spoken", count("tts"), false],
     ["file", "Supplied", count("file"), false],
     ["silent", "Silent", count("silent"), false],
@@ -529,9 +539,9 @@ function drawChips() {
 function visible() {
   const needle = el("search").value.trim().toLowerCase();
   const broken = new Set(project.problems.filter((p) => p.severity === "error" && p.scene).map((p) => p.scene));
-  return project.scenes.filter((scene) => {
+  return allRows().filter((scene) => {
     if (filter === "attention" && !broken.has(scene.id)) return false;
-    if (["tts", "file", "silent"].includes(filter) && scene.source !== filter) return false;
+    if (["tts", "file", "silent", "waiting"].includes(filter) && scene.source !== filter) return false;
     if (!needle) return true;
     return (scene.id + " " + scene.image + " " + scene.narration + " " + scene.audio)
       .toLowerCase().includes(needle);
@@ -554,11 +564,13 @@ function drawRows() {
 
   for (const scene of shown) {
     const tr = document.createElement("tr");
-    tr.id = "scene-" + scene.index;
+    tr.id = scene.waiting ? "waiting-" + scene.id : "scene-" + scene.index;
     if (broken.has(scene.id)) tr.classList.add("problem");
     tr.innerHTML = `
       <td class="c-scene"></td>
-      <td class="c-still"><img class="thumb ${shape}" loading="lazy" alt="" /></td>
+      <td class="c-still">${scene.waiting
+        ? `<span class="thumb-missing ${shape}" title="No picture yet">+</span>`
+        : `<img class="thumb ${shape}" loading="lazy" alt="" />`}</td>
       <td class="c-source"><div class="source-cell">
         <span class="file"></span><span class="narration"></span>
       </div></td>
@@ -569,15 +581,21 @@ function drawRows() {
     // textContent, never innerHTML, for anything an operator named or typed: a
     // file called <img onerror=…> is a filename, not markup (D-052).
     tr.querySelector(".c-scene").textContent = scene.id;
-    tr.querySelector(".thumb").src = convertFileSrc(scene.image_path);
-    tr.querySelector(".file").textContent = scene.image;
+    if (!scene.waiting) {
+      tr.querySelector(".thumb").src = convertFileSrc(scene.image_path);
+      tr.querySelector(".file").textContent = scene.image;
+    }
 
     const badge = tr.querySelector(".badge");
     badge.classList.add(scene.source);
-    badge.textContent = { tts: "TTS", file: "FILE", silent: "SILENT" }[scene.source] ?? scene.source;
+    badge.textContent = { tts: "TTS", file: "FILE", silent: "SILENT", waiting: "NO PICTURE" }[scene.source]
+      ?? scene.source;
 
     const cell = tr.querySelector(".narration");
-    if (scene.source === "file") {
+    if (scene.waiting && !scene.narration) {
+      cell.textContent = scene.audio;
+      cell.classList.add("blank");
+    } else if (scene.source === "file") {
       cell.textContent = scene.audio;
       cell.classList.add("blank");
       cell.title = "This scene has a recording. Its length is the recording's.";
@@ -588,7 +606,7 @@ function drawRows() {
       cell.textContent = project.convention ? "Write what this scene should say…" : "silent";
       cell.classList.add("blank");
     }
-    if (scene.source !== "file" && project.convention) {
+    if (scene.source !== "file" && project.convention && !(scene.waiting && !scene.narration)) {
       // A real control, not a `<span>` with a click handler (D-183). It had
       // no `tabindex` and no `role`, so writing a narration — the one thing
       // this grid exists to let you do — could not be reached from the
@@ -743,8 +761,8 @@ function drawArrange(box, scene, showing) {
     return;
   }
 
-  const total = project.scenes.length;
-  const position = scene.index + 1;
+  const total = allRows().length;
+  const position = scene.position;
   const filtered = showing !== total;
 
   // `wordy` marks a button whose label is a word rather than a glyph. Below
@@ -847,9 +865,11 @@ function drawProblems() {
 function drawStatus() {
   const shown = visible().length;
   const declared = project.scenes.reduce((sum, s) => sum + (s.seconds ?? 0), 0);
-  const parts = [`${shown} of ${project.scenes.length} scenes`];
+  const parts = [`${shown} of ${allRows().length} scenes`];
   if (declared > 0) parts.push(`${declared.toFixed(1)}s declared`);
-  const errors = attention();
+  // An empty project's one "error" is that it has nothing in it yet, which
+  // is not something that "needs attention".
+  const errors = project.empty ? 0 : attention();
   el("counts").innerHTML = "";
   el("counts").textContent = parts.join("   ");
   if (errors > 0) {
@@ -1377,6 +1397,14 @@ function renderBlocker() {
   // cannot render a perfect project either — and this one has a button on the
   // Render screen rather than a fix the operator has to go and find.
   if (ffmpegBlocker) return ffmpegBlocker;
+  // A project imported from a chapter and not yet given a single picture
+  // (D-193). Said plainly, rather than as "1 scene needs attention".
+  if (project.scenes.length === 0 && (project.waiting ?? []).length > 0) {
+    return "No scene has a picture yet. Add pictures to render.";
+  }
+  // Reachable since the Import chapter screen can open over an empty project:
+  // "1 scene needs attention" over a project with no scenes was false.
+  if (project.empty) return "Add photos or import a chapter to start.";
   if (project.has_errors) {
     const n = attention();
     return `${n} scene${n === 1 ? " needs" : "s need"} attention — see the list on Scenes.`;
@@ -1818,8 +1846,257 @@ async function watchDrops() {
       setStatus("Open a project first, then drop your photos in.");
       return;
     }
+    // On the Import chapter screen a text file is the chapter, not a scene.
+    if (!el("pane-chapter").hidden) {
+      if (paths.length === 1 && /\.(txt|md)$/i.test(paths[0])) await readChapter(paths[0]);
+      else setStatus("Drop one .txt file here to import it as the chapter.");
+      return;
+    }
     await addMedia(paths);
   });
+}
+
+// --------------------------------------------------------- import chapter
+//
+// D-193. Two steps on one screen: the text, then the cuts. The cutting and the
+// estimates are Rust's (`chapter_cut`, `chapter_review`) — this page only holds
+// the list the operator is editing, and nothing reaches the project until
+// "Add … scenes".
+//
+// The list edits like text, because it is used at speed and repetitively:
+// Enter splits a cut where the cursor is, Backspace at the start of a cut
+// joins it to the one above, Delete at the end joins the one below, and the
+// arrow keys walk off the top or bottom of a cut into its neighbour.
+
+let pieces = [];
+let reviewToken = 0;
+
+async function openChapter() {
+  if (!project || rendering) return;
+  if (el("app").hidden) {
+    show("app");
+    await refreshVoice();
+    draw();
+  }
+  for (const button of el("tabs").children) button.classList.remove("on");
+  for (const pane of TABS) el("pane-" + pane).hidden = true;
+  el("pane-chapter").hidden = false;
+  showChapterStep(pieces.length > 0 ? "review" : "write");
+  if (pieces.length === 0) el("chapter-text").focus();
+}
+
+function closeChapter() {
+  pieces = [];
+  el("chapter-text").value = "";
+  if (project?.empty) { el("counts").textContent = ""; show("fill"); return; }
+  tab("scenes");
+}
+
+function showChapterStep(step) {
+  el("chapter-write").hidden = step !== "write";
+  el("chapter-review").hidden = step !== "review";
+}
+
+async function chooseChapter() {
+  const chosen = await dialog({
+    multiple: false,
+    title: "Choose the chapter",
+    filters: [{ name: "Text", extensions: ["txt", "md"] }],
+  });
+  if (typeof chosen === "string") await readChapter(chosen);
+}
+
+async function readChapter(path) {
+  try {
+    el("chapter-text").value = await invoke("chapter_read", { path });
+    showChapterStep("write");
+    el("chapter-text").focus();
+    setStatus("");
+  } catch (error) {
+    setStatus(String(error));
+  }
+}
+
+async function cutChapter() {
+  const text = el("chapter-text").value;
+  if (!text.trim()) {
+    setStatus("Paste the chapter first.");
+    el("chapter-text").focus();
+    return;
+  }
+  const view = await invoke("chapter_cut", {
+    text,
+    min: Number(el("chapter-min").value) || 3,
+    max: Number(el("chapter-max").value) || 5,
+  });
+  pieces = view.cuts.map((c) => c.text);
+  showChapterStep("review");
+  drawCuts(view, 0, 0);
+}
+
+// Redraw the whole list, then put the cursor at `at` in cut `index`.
+function drawCuts(view, index, at) {
+  const list = el("chapter-cuts");
+  list.innerHTML = "";
+  view.cuts.forEach((cut, i) => {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="n"></span><textarea rows="1" spellcheck="false"></textarea>
+      <span class="s"></span><button class="join link" title="Join with the next scene">⤓</button>`;
+    li.querySelector(".n").textContent = String(i + 1);
+    const box = li.querySelector("textarea");
+    box.value = cut.text;
+    box.setAttribute("aria-label", `Scene ${i + 1}`);
+    box.addEventListener("input", () => { pieces[i] = box.value; fit(box); review(); });
+    box.addEventListener("keydown", (event) => cutKeys(event, box, i));
+    const join = li.querySelector(".join");
+    join.disabled = i === view.cuts.length - 1;
+    join.setAttribute("aria-label", `Join scene ${i + 1} with the next`);
+    join.addEventListener("click", () => joinCuts(i));
+    list.appendChild(li);
+  });
+  drawEstimates(view);
+  fitAll(list);
+  const target = list.children[Math.min(index, list.children.length - 1)]?.querySelector("textarea");
+  if (target) {
+    target.focus();
+    target.setSelectionRange(at, at);
+  }
+}
+
+function fit(box) {
+  box.style.height = "auto";
+  box.style.height = box.scrollHeight + 2 + "px";
+}
+
+// Every box at once: all the writes, then all the reads, then all the writes.
+// `fit` one box at a time makes the page lay itself out once per box — five
+// hundred times for a long chapter, on every split and join.
+function fitAll(list) {
+  const boxes = [...list.querySelectorAll("textarea")];
+  for (const box of boxes) box.style.height = "auto";
+  const heights = boxes.map((box) => box.scrollHeight);
+  boxes.forEach((box, i) => { box.style.height = heights[i] + 2 + "px"; });
+}
+
+// The seconds and the total, from Rust, without rebuilding the list — so the
+// cut being typed in keeps its cursor.
+function drawEstimates(view) {
+  const max = Number(el("chapter-max").value) || 5;
+  const rows = el("chapter-cuts").children;
+  view.cuts.forEach((cut, i) => {
+    const s = rows[i]?.querySelector(".s");
+    if (!s) return;
+    s.textContent = cut.seconds.toFixed(1) + "s";
+    // Long enough to be worth a look, not an error: the story decides.
+    s.classList.toggle("long", cut.seconds > max + 2.5);
+  });
+  el("chapter-summary").textContent = view.summary;
+  const n = pieces.filter((p) => p.trim()).length;
+  el("chapter-add").textContent = `Add ${n} scene${n === 1 ? "" : "s"}`;
+  el("chapter-add").disabled = n === 0;
+}
+
+const review = onFrame(async () => {
+  const token = ++reviewToken;
+  const view = await invoke("chapter_review", { pieces });
+  if (token === reviewToken) drawEstimates(view);
+});
+
+async function restructure(index, at) {
+  const view = await invoke("chapter_review", { pieces });
+  drawCuts(view, index, at);
+}
+
+function joinCuts(i) {
+  if (i + 1 >= pieces.length) return;
+  const at = pieces[i].trimEnd().length;
+  pieces.splice(i, 2, (pieces[i].trimEnd() + " " + pieces[i + 1].trimStart()).trim());
+  guard(restructure(i, at + 1));
+}
+
+function cutKeys(event, box, i) {
+  const start = box.selectionStart;
+  const end = box.selectionEnd;
+  const collapsed = start === end;
+  const length = box.value.length;
+
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    const before = box.value.slice(0, start).trim();
+    const after = box.value.slice(end).trim();
+    // At either end there is nothing to split — move on instead, which is what
+    // someone pressing Enter to confirm a cut means.
+    if (!before || !after) {
+      focusCut(i + 1, 0);
+      return;
+    }
+    pieces.splice(i, 1, before, after);
+    guard(restructure(i + 1, 0));
+    return;
+  }
+  if (event.key === "Backspace" && collapsed && start === 0 && i > 0) {
+    event.preventDefault();
+    joinCuts(i - 1);
+    return;
+  }
+  if (event.key === "Delete" && collapsed && start === length && i + 1 < pieces.length) {
+    event.preventDefault();
+    joinCuts(i);
+    return;
+  }
+  if (event.key === "ArrowUp" && collapsed && !box.value.slice(0, start).includes("\n")
+      && start <= firstLineEnd(box) && i > 0) {
+    event.preventDefault();
+    focusCut(i - 1, null);
+    return;
+  }
+  if (event.key === "ArrowDown" && collapsed && start >= lastLineStart(box) && i + 1 < pieces.length) {
+    event.preventDefault();
+    focusCut(i + 1, 0);
+  }
+}
+
+// A textarea wraps, so "on the first line" is judged by where the caret sits
+// against the box's own width — approximated by the text length that fits one
+// visual line. At the ends it is exact; in the middle an arrow moves within
+// the cut, which is what an arrow in a paragraph does.
+function firstLineEnd(box) { return box.value.length === 0 ? 0 : Math.min(box.value.length, visualLine(box)); }
+function lastLineStart(box) { return Math.max(0, box.value.length - visualLine(box)); }
+function visualLine(box) {
+  const lines = Math.max(1, Math.round(box.scrollHeight / parseFloat(getComputedStyle(box).lineHeight)));
+  return Math.ceil(box.value.length / lines);
+}
+
+function focusCut(index, at) {
+  const box = el("chapter-cuts").children[index]?.querySelector("textarea");
+  if (!box) return;
+  box.focus();
+  const where = at ?? box.value.length;
+  box.setSelectionRange(where, where);
+}
+
+async function addChapter() {
+  if (!project || rendering) return;
+  const button = el("chapter-add");
+  button.disabled = true;
+  try {
+    const done = await invoke("import_chapter", { root: project.root, pieces });
+    pieces = [];
+    el("chapter-text").value = "";
+    await load(project.root);
+    filter = "waiting";
+    tab("scenes");
+    drawChips();
+    drawRows();
+    drawStatus();
+    // Land on the first scene just added — that is where the work starts, and
+    // in a project that already had waiting scenes it is not the top.
+    document.getElementById("waiting-" + done.first)?.scrollIntoView({ block: "start" });
+    setStatus(done.summary);
+  } catch (error) {
+    setStatus(String(error));
+    button.disabled = false;
+  }
 }
 
 // ------------------------------------------------------------------ plumbing
@@ -1878,6 +2155,25 @@ el("activity-reveal").addEventListener("click", () => guard(openActivityLog(true
 el("new-project").addEventListener("click", newProject);
 el("open-project").addEventListener("click", openProject);
 el("choose-media").addEventListener("click", chooseMedia);
+el("fill-chapter").addEventListener("click", () => guard(openChapter()));
+el("import-chapter").addEventListener("click", () => guard(openChapter()));
+el("chapter-file").addEventListener("click", () => guard(chooseChapter()));
+el("chapter-cancel").addEventListener("click", closeChapter);
+el("chapter-cut").addEventListener("click", () => guard(cutChapter()));
+el("chapter-back").addEventListener("click", () => {
+  // The text box still holds what was cut; hand-made edits to the cuts are
+  // not carried back into it, so say so rather than lose them silently.
+  showChapterStep("write");
+  setStatus("Cutting again replaces the changes you made to the list.");
+  el("chapter-text").focus();
+});
+el("chapter-add").addEventListener("click", () => guard(addChapter()));
+el("chapter-text").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault();
+    guard(cutChapter());
+  }
+});
 el("add").addEventListener("click", chooseMedia);
 el("render").addEventListener("click", render);
 el("cancel").addEventListener("click", cancel);

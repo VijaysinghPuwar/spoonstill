@@ -18,6 +18,7 @@
 pub const STATE_DIR: &str = ".spoonstill";
 
 pub mod captions;
+pub mod chapter;
 pub mod diagnostics;
 pub mod geometry;
 pub mod hash;

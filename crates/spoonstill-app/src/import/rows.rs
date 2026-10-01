@@ -137,6 +137,29 @@ pub struct Rows {
     pub drafts: Vec<SceneDraft>,
     /// Anything unresolved, as typed warnings (D-050).
     pub problems: Vec<Problem>,
+    /// Numbered scenes that have words or a recording and no picture yet
+    /// (D-193), in render order. Always empty in manifest mode.
+    pub awaiting: Vec<Awaiting>,
+}
+
+/// A scene that is waiting for its picture (D-193).
+///
+/// Importing a chapter writes `001.txt`, `002.txt`, … before a single picture
+/// exists, and the operator then makes one picture per line. Until D-193 a
+/// numbered `.txt` with no still beside it was an [`ProblemKind::UnpairedFile`]
+/// warning — *"pairs with no image, so it is not part of any scene"* — which is
+/// true of a narration whose photograph was deleted and exactly wrong for a
+/// line that is waiting for one. It is a scene; it has no picture yet; the
+/// render leaves it out and says so, exactly as it always left an unpaired
+/// file out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Awaiting {
+    /// The numeric stem — `004`.
+    pub id: String,
+    /// Its words, when it has a `.txt`. Read with the same limits as a scene's.
+    pub text: Option<String>,
+    /// Its recording's file name, when it has one.
+    pub audio: Option<String>,
 }
 
 /// Collect the project's rows, from a manifest if there is one and from the
@@ -264,6 +287,7 @@ fn from_manifest(path: &Path) -> Result<Rows, RowsError> {
         mode: Mode::Manifest(path.to_path_buf()),
         drafts,
         problems,
+        awaiting: Vec::new(),
     })
 }
 
@@ -363,6 +387,7 @@ fn from_convention(root: &Path, settings: &Settings) -> Result<Rows, RowsError> 
     }
 
     let mut drafts = Vec::new();
+    let mut awaiting = Vec::new();
     for group in groups.into_values() {
         // Ambiguity is reported before anything is chosen from it (D-111).
         // Reported per slot and against the scene, so `still validate` prints
@@ -390,8 +415,36 @@ fn from_convention(root: &Path, settings: &Settings) -> Result<Rows, RowsError> 
         let group_text = group.text.into_iter().next();
 
         let Some(image) = group.image.into_iter().next() else {
-            // Narration with no still. Reported, never skipped in silence:
-            // "scene 12 never rendered" has to be answerable (D-050).
+            // A *numbered* scene with words or a recording and no still is a
+            // scene waiting for its picture (D-193) — what importing a chapter
+            // makes. Same rule `arrange` uses for what a scene is, so moving
+            // one of these rows moves its files and nothing is left behind at
+            // a number another scene wants (D-170).
+            if group.stem.parse::<usize>().is_ok() {
+                let text = match &group_text {
+                    Some(name) => match read_line(&root.join(name)) {
+                        Ok(text) => Some(text),
+                        Err(detail) => {
+                            problems.push(Problem::in_project(ProblemKind::NotUsableMedia {
+                                field: "text",
+                                value: name.clone(),
+                                detail,
+                            }));
+                            None
+                        }
+                    },
+                    None => None,
+                };
+                awaiting.push(Awaiting {
+                    id: group.stem,
+                    text,
+                    audio: group_audio,
+                });
+                continue;
+            }
+            // Narration with no still, under a name that is not a scene
+            // number. Reported, never skipped in silence: "scene 12 never
+            // rendered" has to be answerable (D-050).
             for orphan in [group_audio, group_text].into_iter().flatten() {
                 problems.push(Problem::in_project(ProblemKind::UnpairedFile {
                     value: orphan,
@@ -452,6 +505,7 @@ fn from_convention(root: &Path, settings: &Settings) -> Result<Rows, RowsError> 
         mode: Mode::Convention,
         drafts,
         problems,
+        awaiting,
     })
 }
 
@@ -686,7 +740,9 @@ mod tests {
     /// D-050: unresolved inputs are reported, never silently skipped.
     #[test]
     fn narration_with_no_still_is_a_warning() {
-        let scratch = Scratch::new(&[("001.png", ""), ("002.mp3", ""), ("003.txt", "orphan")]);
+        // Names that are not scene numbers: a numbered one is a scene waiting
+        // for its picture since D-193, which the next test covers.
+        let scratch = Scratch::new(&[("001.png", ""), ("take-2.mp3", ""), ("notes.txt", "orphan")]);
         let rows = scratch.collect();
 
         assert_eq!(ids(&rows), vec!["001"]);
@@ -700,12 +756,42 @@ mod tests {
         }
         let rendered: Vec<String> = rows.problems.iter().map(ToString::to_string).collect();
         assert!(
-            rendered.iter().any(|p| p.contains("002.mp3")),
+            rendered.iter().any(|p| p.contains("take-2.mp3")),
             "{rendered:?}"
         );
         assert!(
-            rendered.iter().any(|p| p.contains("003.txt")),
+            rendered.iter().any(|p| p.contains("notes.txt")),
             "{rendered:?}"
+        );
+    }
+
+    /// D-193. A numbered line or recording with no still is a scene waiting
+    /// for its picture: listed, in order, with its words — and not a stray file.
+    #[test]
+    fn a_numbered_line_with_no_still_is_waiting_for_its_picture() {
+        let scratch = Scratch::new(&[
+            ("001.png", ""),
+            ("001.txt", "first"),
+            ("002.txt", "  second line \n"),
+            ("003.mp3", ""),
+            ("010.txt", "tenth"),
+        ]);
+        let rows = scratch.collect();
+
+        assert_eq!(ids(&rows), vec!["001"]);
+        assert!(rows.problems.is_empty(), "{:?}", rows.problems);
+        let waiting: Vec<(&str, Option<&str>, Option<&str>)> = rows
+            .awaiting
+            .iter()
+            .map(|a| (a.id.as_str(), a.text.as_deref(), a.audio.as_deref()))
+            .collect();
+        assert_eq!(
+            waiting,
+            vec![
+                ("002", Some("second line"), None),
+                ("003", None, Some("003.mp3")),
+                ("010", Some("tenth"), None),
+            ]
         );
     }
 

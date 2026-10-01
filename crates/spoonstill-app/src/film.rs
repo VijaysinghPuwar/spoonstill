@@ -2032,6 +2032,7 @@ mod tests {
             mode: crate::import::Mode::Convention,
             scenes,
             problems: Vec::new(),
+            awaiting: Vec::new(),
         }
     }
 
@@ -2944,6 +2945,7 @@ mod tests {
             mode: crate::import::Mode::Convention,
             scenes: Vec::new(),
             problems: Vec::new(),
+            awaiting: Vec::new(),
         };
 
         let options = RenderProjectOptions::for_project("/projects/demo");
@@ -2983,6 +2985,7 @@ mod tests {
             mode: crate::import::Mode::Convention,
             scenes: Vec::new(),
             problems: Vec::new(),
+            awaiting: Vec::new(),
         };
         let options = RenderProjectOptions::for_project(&root);
         // De-prefixed, because that is what `real_path` now hands back on
@@ -3045,6 +3048,7 @@ mod tests {
             mode: crate::import::Mode::Convention,
             scenes: Vec::new(),
             problems: Vec::new(),
+            awaiting: Vec::new(),
         };
         let options = RenderProjectOptions::for_project(&root);
 

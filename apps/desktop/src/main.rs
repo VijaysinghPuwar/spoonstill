@@ -48,6 +48,9 @@ use tauri_plugin_opener::OpenerExt;
 #[derive(Debug, Clone, Serialize)]
 struct SceneView {
     index: usize,
+    /// Where this row sits in the film counting scenes that are still waiting
+    /// for a picture (D-193), from one — the number `move_scene` means.
+    position: usize,
     /// The scene's own name — in convention mode, the shared file stem.
     id: String,
     /// `tts`, `file` or `silent` — D-051's source badge.
@@ -79,6 +82,22 @@ struct SceneView {
     /// because a provider that is not installed is still a row the grid must
     /// be able to mark.
     renderable: bool,
+}
+
+/// A scene that has words but no picture yet (D-193).
+///
+/// Its own type rather than a [`SceneView`] with an empty image, because
+/// `SceneView::index` is the render's own index — the live progress panel
+/// finds its row by it — and a scene that cannot render has no such index.
+#[derive(Debug, Clone, Serialize)]
+struct WaitingView {
+    id: String,
+    /// Where it sits in the film, from one, counting every scene.
+    position: usize,
+    /// Its words, when it has a `.txt`.
+    narration: String,
+    /// Its recording's file name, when it has one.
+    audio: String,
 }
 
 /// What writing one `.txt` can change about the row that holds it (D-182).
@@ -161,6 +180,8 @@ struct ProjectView {
     /// Which edge they sit against.
     subtitle_placement: String,
     scenes: Vec<SceneView>,
+    /// Scenes waiting for a picture, in film order (D-193).
+    waiting: Vec<WaitingView>,
     problems: Vec<ProblemView>,
     has_errors: bool,
     /// Whether this folder is genuinely empty — no scenes, and nothing wrong
@@ -771,6 +792,7 @@ async fn validate_project_inner(
                 let edited = edited_scene(scene);
                 SceneView {
                     index,
+                    position: 0,
                     id: scene.spec.id.as_str().to_owned(),
                     // Every source renders now that slice 4 has landed; the
                     // field stays because a provider that is not installed is
@@ -791,6 +813,19 @@ async fn validate_project_inner(
                 }
             })
             .collect();
+
+        let mut scenes = scenes;
+        let mut waiting: Vec<WaitingView> = project
+            .awaiting
+            .iter()
+            .map(|a| WaitingView {
+                id: a.id.clone(),
+                position: 0,
+                narration: a.text.clone().unwrap_or_default(),
+                audio: a.audio.clone().unwrap_or_default(),
+            })
+            .collect();
+        number_rows(&mut scenes, &mut waiting);
 
         let problems = project
             .problems
@@ -862,11 +897,13 @@ async fn validate_project_inner(
             subtitle_placement: project.settings.subtitle_placement.as_str().to_owned(),
             has_errors: project.has_errors(),
             empty: project.scenes.is_empty()
+                && project.awaiting.is_empty()
                 && project
                     .problems
                     .iter()
                     .all(|p| matches!(p.kind, spoonstill_core::ProblemKind::NoScenes)),
             scenes,
+            waiting,
             problems,
         })
     })
@@ -969,16 +1006,38 @@ async fn set_narration_inner(
         // is reachable from a webview, and without it an unknown id writes a
         // `NNN.txt` that pairs with nothing and turns up later as an unpaired
         // narration with no explanation of where it came from.
-        if !before
-            .scenes
-            .iter()
-            .any(|s| s.spec.id.as_str() == scene.as_str())
+        let waiting = before.awaiting.iter().any(|a| a.id == scene);
+        if !waiting
+            && !before
+                .scenes
+                .iter()
+                .any(|s| s.spec.id.as_str() == scene.as_str())
         {
             return Err(format!("there is no scene {scene} in this project"));
         }
 
         let path = root.join(format!("{scene}.txt"));
         let trimmed = text.trim();
+        // A scene waiting for its picture *is* its words (D-193). Emptying
+        // them would delete the scene in silence, which is Remove's job — and
+        // Remove keeps the file.
+        if waiting && trimmed.is_empty() {
+            return Err(format!(
+                "scene {scene} has no picture yet, so its words are all it is — \
+                 use Remove to take it out"
+            ));
+        }
+        if waiting {
+            std::fs::write(&path, format!("{trimmed}\n"))
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            return Ok(Some(EditedScene {
+                source: "waiting".to_owned(),
+                narration: trimmed.to_owned(),
+                voice: String::new(),
+                seconds: None,
+                caption: String::new(),
+            }));
+        }
         if trimmed.is_empty() {
             // Removing the words makes it a silent scene again, which is a
             // real state and not an error (D-050). An absent file and a blank
@@ -1007,6 +1066,36 @@ async fn set_narration_inner(
     })
     .await
     .map_err(|e| format!("the write failed: {e}"))?
+}
+
+/// Give every row its place in the film, counting the scenes waiting for a
+/// picture (D-193).
+///
+/// Both lists arrive in film order. A waiting scene's id is always a number;
+/// it goes before the first finished scene whose number is larger. A finished
+/// scene whose name is not a number keeps its place among the others.
+fn number_rows(scenes: &mut [SceneView], waiting: &mut [WaitingView]) {
+    let number = |id: &str| id.parse::<usize>().ok();
+    let (mut s, mut w, mut position) = (0, 0, 1);
+    while s < scenes.len() || w < waiting.len() {
+        let take_waiting = match (scenes.get(s), waiting.get(w)) {
+            (None, Some(_)) => true,
+            (Some(_), None) => false,
+            (Some(scene), Some(line)) => match (number(&scene.id), number(&line.id)) {
+                (Some(a), Some(b)) => b < a,
+                _ => false,
+            },
+            (None, None) => break,
+        };
+        if take_waiting {
+            waiting[w].position = position;
+            w += 1;
+        } else {
+            scenes[s].position = position;
+            s += 1;
+        }
+        position += 1;
+    }
 }
 
 /// The five fields a `.txt` can move, read off the scene's own spec.
@@ -1135,7 +1224,9 @@ async fn add_media_inner(
                 with: match (report.narration_for(image), report.script_for(image)) {
                     (Some(audio), _) => file_name(&audio.source),
                     (None, Some(script)) => format!("{} (spoken)", file_name(&script.source)),
-                    (None, None) => "silent".to_owned(),
+                    (None, None) => report
+                        .filled_for(image)
+                        .map_or_else(|| "silent".to_owned(), |w| format!("{w} (waiting)")),
                 },
             })
             .collect();
@@ -1153,6 +1244,118 @@ async fn add_media_inner(
     })
     .await
     .map_err(|e| format!("the copy failed: {e}"))?
+}
+
+/// One cut, as the Import chapter screen shows it (D-193).
+#[derive(Debug, Clone, Serialize)]
+struct CutView {
+    text: String,
+    /// Estimated from the text; the real length is measured when spoken.
+    seconds: f64,
+}
+
+/// A chapter's cuts, with the one line that sums them up.
+#[derive(Debug, Clone, Serialize)]
+struct ChapterView {
+    cuts: Vec<CutView>,
+    summary: String,
+}
+
+fn chapter_view(cuts: Vec<spoonstill_core::chapter::Cut>) -> ChapterView {
+    let total: f64 = cuts.iter().map(|c| c.seconds).sum();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let whole = total.round() as u64;
+    let length = if whole < 60 {
+        format!("{whole} s")
+    } else {
+        format!("{} min {} s", whole / 60, whole % 60)
+    };
+    let n = cuts.len();
+    ChapterView {
+        summary: format!(
+            "{n} scene{} · about {length}",
+            if n == 1 { "" } else { "s" }
+        ),
+        cuts: cuts
+            .into_iter()
+            .map(|c| CutView {
+                text: c.text,
+                seconds: c.seconds,
+            })
+            .collect(),
+    }
+}
+
+/// Cut a chapter into scenes (D-193). Pure: nothing is read or written.
+#[tauri::command]
+fn chapter_cut(text: String, min: f64, max: f64) -> ChapterView {
+    chapter_view(spoonstill_app::chapter::plan(&text, min, max))
+}
+
+/// Re-measure cuts the operator has edited by hand, without cutting again.
+/// Pure, for the same reason: the estimate is Rust's, not the page's (D-010).
+#[tauri::command]
+fn chapter_review(pieces: Vec<String>) -> ChapterView {
+    chapter_view(
+        pieces
+            .into_iter()
+            .map(|text| spoonstill_core::chapter::Cut {
+                seconds: spoonstill_app::chapter::estimate(&text),
+                text,
+            })
+            .collect(),
+    )
+}
+
+/// Read a chapter file the operator chose (D-193), measured before it is read.
+#[tauri::command]
+async fn chapter_read(path: String) -> Result<String, String> {
+    let named = PathBuf::from(&path);
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        spoonstill_app::chapter::read(std::path::Path::new(&path)).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("the read failed: {e}"))
+    .and_then(|r| r);
+    journalled("chapter_read", Some(&named), outcome)
+}
+
+/// Add the cuts to the open project as scenes waiting for pictures (D-193).
+#[tauri::command]
+async fn import_chapter(
+    session: State<'_, Session>,
+    root: String,
+    pieces: Vec<String>,
+) -> Result<ImportedView, String> {
+    let named = PathBuf::from(&root);
+    let outcome = import_chapter_inner(&session, root, pieces).await;
+    journalled("import_chapter", Some(&named), outcome)
+}
+
+/// What an import did: the sentence, and the first scene it added, which is
+/// where the operator is about to start work — the grid scrolls there.
+#[derive(Debug, Clone, Serialize)]
+struct ImportedView {
+    summary: String,
+    first: String,
+}
+
+async fn import_chapter_inner(
+    session: &Session,
+    root: String,
+    pieces: Vec<String>,
+) -> Result<ImportedView, String> {
+    let root = project_root(session, &root)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        spoonstill_app::chapter::import(&root, &pieces)
+            .map(|done| ImportedView {
+                summary: done.summary(),
+                first: done.scenes.first().cloned().unwrap_or_default(),
+            })
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("the import failed: {e}"))?
 }
 
 /// Take a scene out of the project (D-100).
@@ -1935,6 +2138,10 @@ fn main() {
             ffmpeg_status,
             create_project,
             add_media,
+            chapter_cut,
+            chapter_review,
+            chapter_read,
+            import_chapter,
             voices,
             preview_voice,
             resolve_output,
