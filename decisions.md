@@ -9368,3 +9368,25 @@ again, rather than blaming the words.
 an ordinary English sentence — the behaviour being reversed — and now asserts
 it for `... !!! --`; `silence_for_an_ordinary_sentence_is_asked_again_and_speaks`
 is its counterpart through the stand-in.
+
+**Stress-tested on the author's own project, 2026-10-03, macOS arm64.** The
+431-scene folder is a pre-release asset (`stress-fixture`, 292 MB: photographs,
+lines and `project.yaml` only) and `scripts/stress.sh DIR [TIMES]` fetches and
+renders it on any machine.
+
+| run | result |
+|---|---|
+| 1x cold, speech cache empty, 720p, captions | **431 lines spoken fresh, 0 refusals**, ~49 lines a minute, exit 0, 8 min 50 s, film 1867.99 s |
+| 40x: 17 240 scenes, every still a distinct file | `still validate` **48 s**; exit 0, **0 errors**, 17 240 segments encoded, joined into a **74 718.69 s (20 h 45 min), 18.2 GB** film that passed D-041 |
+
+The 40x film is 0.83 s shorter than forty times the 1x film — 48 µs per join,
+frame rounding across 17 240 seams. The CLI's own peak footprint was 83 MB;
+encoding ran at ~113 scenes a minute while the machine was awake. The 40x run
+took 11 hours of wall time because **the laptop slept** through most of it
+(`pmset` log: `Dark Wake Thermal Emergency`, lid closed on AC); `caffeinate
+-w` held it awake once noticed. Not run on Windows.
+
+What 40x does **not** test is forty times the speech: its lines are the same
+431, served from the cache. 17 240 fresh lines at a pace that does not trip
+the throttle is about six hours of continuous requests, and making them to
+prove the throttle is not tripped would be the abuse being avoided.

@@ -274,6 +274,32 @@ be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
 
+### State as of 2026-10-03 — "after 321 it pauses and crashes" was the voice service refusing us (D-195), `v0.1.17`
+
+**Not a crash, and not the pictures.** The author's `runs.csv`: a 431-scene
+render sent **335 lines in 3½ minutes**, eight at a time, then every
+connection to `speech.platform.bing.com` was refused (`Connect call failed`)
+for ~54 minutes; eleven renders failed at scene 353. **Read D-195 before
+touching `spoonstill_tts::pace`, `Gate`, `Pace`, `is_refusal`, `turned_away`,
+`worth_asking_again`, `NO_AUDIO_AGAIN`, or `network_hint`'s order.** Every
+Edge request goes through one process-wide gate: 2 in flight, starts 1.2 s
+apart, and a refused connection starts a cool-down (15 s doubling to 120 s)
+everyone waits out. Second fix from the same log: `NoAudioReceived` on an
+ordinary sentence was permanent and stopped the render; twelve such lines all
+spoke on the next try, so it is retried now.
+
+**Stress fixture for any machine:** the `stress-fixture` pre-release holds the
+author's 431 scenes (also on their Google Drive:
+https://drive.google.com/drive/folders/1VyQtUatDEViZPsw4how5NfOh2kseaUua).
+`scripts/stress.sh DIR [TIMES]` fetches and renders it; **a cold run speaks
+431 lines, so do not loop it.** Measured: 1x cold, 431 lines, 0 refusals,
+8m50s; 40x (17 240 scenes) exit 0, 0 errors, 20h45m film. **A laptop with its
+lid closed sleeps through a long render** — use `caffeinate -w PID`.
+
+`make gates` 39/39, `cargo test --workspace` 752 / 0 / 11, `make lint` green,
+D-132 cross-check and `cargo audit` clean, CI green on both platforms.
+**Not run on Windows.**
+
 ### State as of 2026-09-30, later — pictures go on the row they were put on (D-194), `v0.1.16`
 
 **Read D-194 before touching `spoonstill_app::picture`, `RememberedProbe`,
