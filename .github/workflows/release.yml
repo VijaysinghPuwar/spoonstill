@@ -344,7 +344,13 @@ jobs:
         # time, so two tags cut a week apart could bundle with two different
         # CLIs and nothing would record which. 2.11.4 is the current stable and
         # matches the `tauri` crate `Cargo.lock` pins at 2.11.5.
-        run: cargo binstall --no-confirm tauri-cli --version '=2.11.4'
+        #
+        # `--locked` because binstall falls back to compiling from source when
+        # it cannot fetch a prebuilt binary, and without it that build takes
+        # whatever versions of tauri-cli's dependencies resolved that day:
+        # v0.1.18's macOS leg failed with `missing field bundle_vc_runtime in
+        # WindowsSettings` an hour after v0.1.17's built (D-197).
+        run: cargo binstall --no-confirm --locked tauri-cli --version '=2.11.4'
 
       - name: Bundle
         # `--locked` for the same reason the CLI job has it: a release is built

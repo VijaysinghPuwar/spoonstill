@@ -9477,3 +9477,22 @@ minutes, exit 0, 0 errors, 0 refusals** from the voice service, 477 lines
 spoken fresh and 1 903 from the cache. The cut estimated **9 308 s**; the film
 measures **9 342 s** — 0.4%, which is the recalibrated 16.3 confirmed on text
 it was not measured on. Not run on Windows.
+
+### D-197 — A tool the release installs is installed from its own lock file · Accepted
+
+**v0.1.18's macOS app leg failed** an hour after v0.1.17's had built from the
+same workflow: `error[E0063]: missing field bundle_vc_runtime in initializer of
+WindowsSettings`, compiling `tauri-cli v2.11.4`. `cargo binstall` fetches a
+prebuilt binary when it can and **compiles from source when it cannot**, and
+that source build resolved tauri-cli's dependencies fresh — a newer
+`tauri-utils` than 2.11.4 was written against. The Windows legs got the
+prebuilt binary and passed, which is why only one leg failed. D-125 pinned the
+CLI's *version* and gave our own build `--locked`; the tool's own dependencies
+were the one thing still resolved on the day.
+
+`cargo binstall --locked`: tauri-cli 2.11.4's published crate ships its
+`Cargo.lock` (`tauri-bundler 2.9.4`, `tauri-utils 2.9.3`), checked by
+downloading it, and binstall v1.22.0 — the pinned action — takes the flag. The
+failed v0.1.18 was a draft, never published; it was deleted and the tag moved
+to the commit carrying this fix, which is D-102's rule (a tag holds the commit
+that builds) rather than an exception to it.
