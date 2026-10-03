@@ -9290,3 +9290,81 @@ author's 580-scene project; then — once the author was using the same desktop 
 the real `app.js` in a Chrome tab behind a stand-in backend that records every
 command, so a test could assert not only that the right change was sent but
 that **no other** was.
+
+### D-195 — The voice service is asked at a pace it will keep answering · Accepted
+
+**Reported 2026-10-03 by the author, on v0.1.16:** *"after 321 it pauses and
+crashes"*, with `runs.csv`. It is not a crash and not the pictures. The first
+render of a 431-scene 4K project sent **335 lines to `edge-tts` in three and a
+half minutes** — eight at a time, 77/93/103/62 a minute — and then every
+connection to `speech.platform.bing.com` was refused: `ClientConnectorError …
+[Connect call failed ('150.171.27.10', 443)]`, and in the next run the same
+from `150.171.28.10`. **Eleven renders over the next fifty-four minutes failed
+at scene 353 within forty seconds of starting**, each speaking nothing; the run
+at 06:31 spoke one line. DNS resolved throughout and two of one company's
+addresses refused alike, so the reading is a throttle on this machine's
+requests. That is an inference — Microsoft documents no limit for this
+service — and it is labelled as one.
+
+**Nothing was lost**, which is D-075 working: the 335 lines are in the speech
+cache and every later run asked for only the remaining 73. What was wrong is
+that the program provoked the refusal and then, with D-094's three attempts
+0.5 s and 1.5 s apart across eight workers, kept knocking on the door it had
+just been turned away from, and told the operator to check their internet.
+
+**`spoonstill_tts::pace`**, one gate for the whole process — the throttle is
+per machine, so it is not per render and not per `Edge` value:
+
+- at most **two requests in flight**, whatever `--audio-jobs` says (the audio
+  pool still sizes the waiting, the normalization and the cache work);
+- request starts at least **1.2 s apart**, so at most fifty a minute, about
+  half the rate that was refused. The real threshold is unknown; this number
+  is a margin, not a measurement;
+- a **refused connection** (`Connect call failed`, `ConnectionRefusedError`,
+  a `429`) starts a cool-down **every** request waits out — 15 s, doubling to a
+  120 s ceiling while refusals continue, reset by the first line spoken. A DNS
+  failure is deliberately *not* a refusal: an offline machine is told so in
+  seconds, not after cool-downs meant for a throttle.
+
+The wait is cancellable at D-186's poll interval, so Stop is obeyed during a
+two-minute cool-down. And `network_hint` checks for a refusal **before** the
+no-route bucket, which also matches `ClientConnector`: the message now says the
+service stopped taking connections after many lines, that every spoken line is
+kept, and to wait and render again.
+
+**What it costs.** At 4K a segment takes far longer than a line (the author's
+233-scene render: 33 minutes, ~7 segments a minute), so under D-146's overlap
+speech at fifty a minute is never the stage being waited on and the cost is
+zero. At 1080p with short lines it can be: 500 new lines take at least ten
+minutes to speak. That is the trade, taken against an hour locked out.
+
+**The size of the pictures plays no part.** 500 scenes with distinct 1K or 2K
+stills cost the same speech as 500 scenes with one photograph; what is paced
+is the number of *distinct lines not already in the cache*.
+
+`Pace::unpaced()` exists for tests against a stand-in tool and nothing else.
+`edge_retry.rs`'s `a_refused_connection_waits_out_the_cool_down_before_trying_again`
+drives the log's exact stderr through a stand-in and fails (retried after
+168 ms inside a 600 ms cool-down) with the `gate.refused` call removed.
+
+**And silence for an ordinary sentence is asked again.** The same log holds
+**twelve** renders stopped by `NoAudioReceived` — *"the service accepted the
+request … and returned no audio. A line with no speakable words in it — only
+punctuation, digits or symbols — does this"* — over lines like *"Marcus
+doesn't ask a single question, just pulls…"*. Every one of the twelve spoke on
+the operator's next render, unchanged. D-094 filed `NoAudioReceived` on a
+short line as permanent, which is right for `...` and wrong for a sentence:
+here it was the service's momentary answer, and calling it the line's fault
+sent the operator to their text. `worth_asking_again` — the line has letters,
+in a script the voice reads (D-158's `wrong_script` is `None`) — makes it
+transient, in both places silence is detected (the exception and the
+exit-zero, zero-byte answer). A line with no words, or Hindi handed to an
+English voice, is still refused on the first attempt with the same sentence
+as before, and a long line keeps its own transient reason. Giving up after
+three attempts now says the service answered with silence and to render
+again, rather than blaming the words.
+
+`a_permanent_failure_costs_one_attempt_and_not_three` asserted one attempt for
+an ordinary English sentence — the behaviour being reversed — and now asserts
+it for `... !!! --`; `silence_for_an_ordinary_sentence_is_asked_again_and_speaks`
+is its counterpart through the stand-in.

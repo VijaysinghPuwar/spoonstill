@@ -1,0 +1,313 @@
+//! How fast this machine asks a voice service for speech (D-195).
+//!
+//! Measured in the author's own `runs.csv` on 2026-10-03: a 431-scene project
+//! sent **335 lines in three and a half minutes**, eight at a time — about a
+//! hundred a minute — and then every connection to `speech.platform.bing.com`
+//! was refused (`Connect call failed ('150.171.27.10', 443)`, and the same from
+//! a second address). Eleven renders over the next fifty-four minutes failed
+//! at the same scene within forty seconds of starting. A machine that can
+//! reach nothing does not usually get refused by two of one company's
+//! addresses and nobody else's, so the reading is a throttle, and the cure is
+//! not to provoke it.
+//!
+//! Three rules, process-wide because the throttle is per machine, not per
+//! render and not per `Edge` value:
+//!
+//! - at most [`Pace::in_flight`] requests at once, however wide the audio pool;
+//! - request starts at least [`Pace::gap`] apart;
+//! - once the service **refuses a connection**, every request waits out a
+//!   cool-down that doubles while refusals continue and resets on the first
+//!   line spoken — so a throttled machine stops hammering the door instead of
+//!   eight workers retrying at it twice a second.
+//!
+//! The threshold the service applies is **not known**; the default is about
+//! half the rate that tripped it. At 4K a segment takes far longer to encode
+//! than a line takes to speak, so under D-146's overlap the pacing costs a
+//! render no wall time at all; at 1080p with no captions it can.
+//!
+//! The arithmetic is [`Schedule`], which takes the clock as an argument so it
+//! is tested without sleeping. [`Gate`] is the blocking shell around it.
+
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use spoonstill_media::command::Cancel;
+
+/// How a provider spaces its requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pace {
+    /// Requests allowed at once.
+    pub in_flight: usize,
+    /// The least time between two request starts.
+    pub gap: Duration,
+    /// The first cool-down after a refused connection; doubled for each one
+    /// after, up to [`Pace::max_cooldown`].
+    pub cooldown: Duration,
+    /// The longest a single cool-down grows.
+    pub max_cooldown: Duration,
+}
+
+impl Pace {
+    /// What the Edge service is asked at: two at a time, starts 1.2 s apart —
+    /// at most fifty a minute against the hundred that was refused.
+    #[must_use]
+    pub const fn service() -> Self {
+        Pace {
+            in_flight: 2,
+            gap: Duration::from_millis(1200),
+            cooldown: Duration::from_secs(15),
+            max_cooldown: Duration::from_secs(120),
+        }
+    }
+
+    /// No pacing at all — what a test against a stand-in tool asks for.
+    #[must_use]
+    pub const fn unpaced() -> Self {
+        Pace {
+            in_flight: usize::MAX,
+            gap: Duration::ZERO,
+            cooldown: Duration::ZERO,
+            max_cooldown: Duration::ZERO,
+        }
+    }
+
+    fn is_unpaced(self) -> bool {
+        self.in_flight == usize::MAX && self.gap.is_zero() && self.cooldown.is_zero()
+    }
+}
+
+/// The pure state of the gate. Every method takes `now`.
+#[derive(Debug, Default)]
+pub struct Schedule {
+    in_flight: usize,
+    next_start: Option<Instant>,
+    cool_until: Option<Instant>,
+    /// Consecutive refusals since the last line spoken.
+    refusals: u32,
+}
+
+impl Schedule {
+    /// Take a slot now, or say how long until one could be free.
+    ///
+    /// `Ok(())` means the request may start. `Err(wait)` means ask again after
+    /// at most `wait`; a full house answers with a short poll, because a slot
+    /// frees when another request ends, not at a time this can predict.
+    pub fn try_start(&mut self, pace: Pace, now: Instant) -> Result<(), Duration> {
+        let earliest = [self.next_start, self.cool_until]
+            .into_iter()
+            .flatten()
+            .max();
+        if let Some(earliest) = earliest
+            && earliest > now
+        {
+            return Err(earliest - now);
+        }
+        if self.in_flight >= pace.in_flight {
+            return Err(Duration::from_millis(100));
+        }
+        self.in_flight += 1;
+        self.next_start = Some(now + pace.gap);
+        Ok(())
+    }
+
+    /// A request that started has ended.
+    pub fn finish(&mut self) {
+        self.in_flight = self.in_flight.saturating_sub(1);
+    }
+
+    /// The service refused a connection: everyone waits, longer each time.
+    pub fn refused(&mut self, pace: Pace, now: Instant) -> Duration {
+        let wait = pace
+            .cooldown
+            .checked_mul(2u32.saturating_pow(self.refusals))
+            .unwrap_or(pace.max_cooldown)
+            .min(pace.max_cooldown);
+        self.refusals = self.refusals.saturating_add(1);
+        let until = now + wait;
+        self.cool_until = Some(self.cool_until.map_or(until, |current| current.max(until)));
+        wait
+    }
+
+    /// A line was spoken: the service is answering again.
+    pub fn spoke(&mut self) {
+        self.refusals = 0;
+    }
+}
+
+/// The process-wide gate every Edge request goes through.
+pub struct Gate {
+    schedule: Mutex<Schedule>,
+    changed: Condvar,
+}
+
+/// One request's slot; ending it frees the slot, however the request ended.
+pub struct Slot<'a> {
+    gate: &'a Gate,
+    pace: Pace,
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        if self.pace.is_unpaced() {
+            return;
+        }
+        if let Ok(mut schedule) = self.gate.schedule.lock() {
+            schedule.finish();
+        }
+        self.gate.changed.notify_all();
+    }
+}
+
+impl Gate {
+    /// The one gate for this process.
+    pub fn shared() -> &'static Gate {
+        static GATE: OnceLock<Gate> = OnceLock::new();
+        GATE.get_or_init(|| Gate {
+            schedule: Mutex::new(Schedule::default()),
+            changed: Condvar::new(),
+        })
+    }
+
+    /// Wait for a slot. `None` when the run was cancelled while waiting.
+    pub fn enter(&self, pace: Pace, cancel: &Cancel) -> Option<Slot<'_>> {
+        if pace.is_unpaced() {
+            return Some(Slot { gate: self, pace });
+        }
+        let mut schedule = self.schedule.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if cancel.is_requested() {
+                return None;
+            }
+            match schedule.try_start(pace, Instant::now()) {
+                Ok(()) => return Some(Slot { gate: self, pace }),
+                // Never sleep longer than a cancellation poll, so Stop is
+                // obeyed during a two-minute cool-down (D-186).
+                Err(wait) => {
+                    schedule = self
+                        .changed
+                        .wait_timeout(schedule, wait.min(Duration::from_millis(100)))
+                        .map_or_else(|e| e.into_inner().0, |(guard, _)| guard);
+                }
+            }
+        }
+    }
+
+    /// Record a refused connection; returns the cool-down it started.
+    pub fn refused(&self, pace: Pace) -> Duration {
+        if pace.is_unpaced() {
+            return Duration::ZERO;
+        }
+        let wait = self
+            .schedule
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .refused(pace, Instant::now());
+        self.changed.notify_all();
+        wait
+    }
+
+    /// Record a line spoken.
+    pub fn spoke(&self, pace: Pace) {
+        if pace.is_unpaced() {
+            return;
+        }
+        self.schedule
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .spoke();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PACE: Pace = Pace {
+        in_flight: 2,
+        gap: Duration::from_millis(1200),
+        cooldown: Duration::from_secs(15),
+        max_cooldown: Duration::from_secs(120),
+    };
+
+    #[test]
+    fn starts_are_spaced_by_the_gap() {
+        let t0 = Instant::now();
+        let mut s = Schedule::default();
+        assert_eq!(s.try_start(PACE, t0), Ok(()));
+        assert_eq!(
+            s.try_start(PACE, t0 + Duration::from_millis(200)),
+            Err(Duration::from_millis(1000))
+        );
+        assert_eq!(s.try_start(PACE, t0 + Duration::from_millis(1200)), Ok(()));
+    }
+
+    #[test]
+    fn no_more_than_in_flight_run_at_once() {
+        let t0 = Instant::now();
+        let mut s = Schedule::default();
+        let mut t = t0;
+        assert_eq!(s.try_start(PACE, t), Ok(()));
+        t += PACE.gap;
+        assert_eq!(s.try_start(PACE, t), Ok(()));
+        t += PACE.gap;
+        assert!(
+            s.try_start(PACE, t).is_err(),
+            "a third would be over the cap"
+        );
+        s.finish();
+        assert_eq!(s.try_start(PACE, t), Ok(()));
+    }
+
+    /// The defect in the log, as arithmetic: a hundred lines in a minute is
+    /// what was refused, and no sequence of starts gets past fifty.
+    #[test]
+    fn a_minute_holds_at_most_fifty_starts() {
+        let t0 = Instant::now();
+        let mut s = Schedule::default();
+        let mut started = 0;
+        let mut t = t0;
+        while t < t0 + Duration::from_secs(60) {
+            if s.try_start(PACE, t).is_ok() {
+                started += 1;
+                s.finish();
+            }
+            t += Duration::from_millis(10);
+        }
+        assert!(started <= 50, "{started} starts in one minute");
+        assert!(
+            started >= 49,
+            "pacing should not be stricter than stated: {started}"
+        );
+    }
+
+    #[test]
+    fn a_refusal_holds_everyone_and_doubles_until_a_line_is_spoken() {
+        let t0 = Instant::now();
+        let mut s = Schedule::default();
+        assert_eq!(s.refused(PACE, t0), Duration::from_secs(15));
+        assert_eq!(
+            s.try_start(PACE, t0 + Duration::from_secs(5)),
+            Err(Duration::from_secs(10))
+        );
+        assert_eq!(s.refused(PACE, t0), Duration::from_secs(30));
+        assert_eq!(s.refused(PACE, t0), Duration::from_secs(60));
+        assert_eq!(s.refused(PACE, t0), Duration::from_secs(120));
+        assert_eq!(s.refused(PACE, t0), Duration::from_secs(120), "capped");
+        s.spoke();
+        assert_eq!(s.refused(PACE, t0), Duration::from_secs(15), "reset");
+    }
+
+    #[test]
+    fn a_cancelled_wait_returns_promptly() {
+        let gate = Gate {
+            schedule: Mutex::new(Schedule::default()),
+            changed: Condvar::new(),
+        };
+        gate.refused(PACE);
+        let cancel = Cancel::new();
+        cancel.request();
+        let started = Instant::now();
+        assert!(gate.enter(PACE, &cancel).is_none());
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+}

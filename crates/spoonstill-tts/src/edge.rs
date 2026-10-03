@@ -67,6 +67,7 @@ use spoonstill_media::atomic;
 use spoonstill_media::command::{Cancel, FfmpegCommand};
 use spoonstill_media::tools::{describe_failure, locate};
 
+use crate::pace::{Gate, Pace};
 use crate::{Availability, Provider, Remedy, Request, Spoken, TtsError, Voice, opening};
 
 /// How long to let a package manager run. Installing pulls a dependency tree
@@ -747,6 +748,37 @@ fn classify(stderr: &str) -> Fault {
     Fault::Permanent
 }
 
+/// What a retry loop remembers when the service answered with silence for a
+/// line that has words in it (D-195).
+const NO_AUDIO_AGAIN: &str = "the service returned no audio for a line with words in it";
+
+/// Whether an empty answer could be the service's momentary fault rather than
+/// the line's: it has letters, and they are in a script the voice reads.
+fn worth_asking_again(text: &str, voice: &str) -> bool {
+    text.chars().any(char::is_alphabetic) && wrong_script(text, voice).is_none()
+}
+
+/// Whether the service turned the connection away, as opposed to the machine
+/// having no route at all (D-195).
+///
+/// `Connect call failed` with an address in it means DNS answered and the
+/// address would not take the connection — what the author's log shows after
+/// 335 lines in three and a half minutes. A DNS failure is deliberately not a
+/// refusal: an offline machine should be told so in seconds, not after
+/// cool-downs meant for a throttle.
+fn is_refusal(reason: &str) -> bool {
+    turned_away(reason) || reason.contains("429")
+}
+
+/// The service's address would not take the connection. Not a DNS failure
+/// (no address at all) and not a proxy that is down (the operator's own
+/// network, which `ClientProxyConnectionError` names and D-141's test pins).
+fn turned_away(reason: &str) -> bool {
+    !reason.contains("ClientConnectorDNSError")
+        && !reason.contains("ClientProxyConnectionError")
+        && (reason.contains("Connect call failed") || reason.contains("ConnectionRefusedError"))
+}
+
 /// A sentence an operator can act on, for the reason `classify` already
 /// decided was worth retrying (D-141).
 ///
@@ -804,7 +836,15 @@ fn network_hint(reason: &str) -> &'static str {
         "UnknownResponse",
     ];
 
-    if NO_ROUTE.iter().any(|marker| reason.contains(marker)) {
+    // Checked first: a refusal also carries `ClientConnector`, and sending
+    // the operator to their Wi-Fi over a throttle is the wrong instruction
+    // (D-195).
+    if turned_away(reason) {
+        "Microsoft's voice service stopped accepting connections from this \
+         machine, which it does after many lines in a short time. Every line \
+         already spoken is kept — wait a while (it has taken up to an hour) \
+         and render again"
+    } else if NO_ROUTE.iter().any(|marker| reason.contains(marker)) {
         "this machine could not reach Microsoft's voice service — check your \
          internet connection, then any VPN or firewall, and try again"
     } else if DROPPED.iter().any(|marker| reason.contains(marker)) {
@@ -813,6 +853,10 @@ fn network_hint(reason: &str) -> &'static str {
     } else if SLOW.iter().any(|marker| reason.contains(marker)) {
         "the voice service did not answer in time — check your internet \
          connection and try again"
+    } else if reason.contains(NO_AUDIO_AGAIN) {
+        "the voice service answered with silence for this line several times \
+         in a row — it has always spoken such a line on a later try, so render \
+         again; every line already spoken is kept"
     } else if BUSY.iter().any(|marker| reason.contains(marker)) {
         "the voice service turned this request down for now — waiting a \
          moment and trying again usually clears this"
@@ -870,7 +914,14 @@ fn interpret(error: spoonstill_media::MediaError, voice: &str, text: &str) -> Fa
                 // what the service does when a payload does not suit it, and a
                 // second request can succeed where the first did not.
                 Fault::Permanent if said.contains("NoAudioReceived") => {
-                    if text.chars().count() <= EXAMINABLE_CHARS {
+                    // D-195: an ordinary sentence the voice can read is not
+                    // the line's fault. Twelve of these in the author's log
+                    // all spoke on the next render, unchanged — so it is
+                    // asked again, and only a line with no words in it, or
+                    // in a script the voice cannot read, is refused at once.
+                    if text.chars().count() <= EXAMINABLE_CHARS && worth_asking_again(text, voice) {
+                        Failure::Transient(NO_AUDIO_AGAIN.to_owned())
+                    } else if text.chars().count() <= EXAMINABLE_CHARS {
                         Failure::Permanent(TtsError::NoAudio {
                             provider: ID.to_owned(),
                             text: opening(text),
@@ -939,6 +990,7 @@ fn looks_like_audio(head: &[u8]) -> bool {
 pub struct Edge {
     program: PathBuf,
     retry: Retry,
+    pace: Pace,
 }
 
 impl Edge {
@@ -958,6 +1010,7 @@ impl Edge {
         Edge {
             program: std::env::var_os(EDGE_TTS_ENV).map_or_else(|| locate(PROGRAM), PathBuf::from),
             retry: Retry::default(),
+            pace: Pace::service(),
         }
     }
 
@@ -968,6 +1021,7 @@ impl Edge {
         Edge {
             program: program.into(),
             retry: Retry::default(),
+            pace: Pace::service(),
         }
     }
 
@@ -975,6 +1029,14 @@ impl Edge {
     #[must_use]
     pub const fn with_retry(mut self, retry: Retry) -> Self {
         self.retry = retry;
+        self
+    }
+
+    /// Change how this provider spaces its requests (D-195). A test against
+    /// a stand-in tool asks for [`Pace::unpaced`]; nothing else should.
+    #[must_use]
+    pub const fn with_pace(mut self, pace: Pace) -> Self {
+        self.pace = pace;
         self
     }
 
@@ -1039,6 +1101,9 @@ impl Edge {
         let bytes = std::fs::metadata(audio).map(|m| m.len()).unwrap_or(0);
         if bytes == 0 {
             let _ = std::fs::remove_file(audio);
+            if worth_asking_again(text, voice) {
+                return Err(Failure::Transient(NO_AUDIO_AGAIN.to_owned()));
+            }
             return Err(Failure::Permanent(TtsError::NoAudio {
                 provider: ID.to_owned(),
                 text: opening(text),
@@ -1097,7 +1162,25 @@ impl Edge {
                         provider: ID.to_owned(),
                     }));
                 }
-                self.attempt_speak(voice, text, knobs, &script, audio, cancel)
+                // Every request waits its turn on the machine-wide gate
+                // (D-195): a throttled service is one this whole process
+                // shares, not one render's.
+                let gate = Gate::shared();
+                let Some(slot) = gate.enter(self.pace, cancel) else {
+                    return Err(Failure::Permanent(TtsError::Cancelled {
+                        provider: ID.to_owned(),
+                    }));
+                };
+                let outcome = self.attempt_speak(voice, text, knobs, &script, audio, cancel);
+                drop(slot);
+                match &outcome {
+                    Ok(_) => gate.spoke(self.pace),
+                    Err(Failure::Transient(reason)) if is_refusal(reason) => {
+                        gate.refused(self.pace);
+                    }
+                    Err(_) => {}
+                }
+                outcome
             },
             |pause| cancel.sleep(pause),
         );
@@ -1633,6 +1716,47 @@ fn parse_voices(table: &str) -> Vec<Voice> {
 mod tests {
     use super::*;
 
+    /// D-195: silence for an ordinary English sentence is asked again; a line
+    /// of punctuation, or Hindi to an English voice, is still refused at once.
+    #[test]
+    fn silence_for_a_real_sentence_is_worth_asking_again() {
+        assert!(worth_asking_again(
+            "Marcus doesn't ask a single question, just pulls the file.",
+            "en-US-AndrewMultilingualNeural"
+        ));
+        assert!(!worth_asking_again("... !!! 42", "en-US-AvaNeural"));
+        assert!(!worth_asking_again("नमस्ते दुनिया", "en-GB-RyanNeural"));
+        assert!(network_hint(NO_AUDIO_AGAIN).contains("render again"));
+    }
+
+    /// D-195: what the author's log said when the service stopped taking
+    /// connections is a refusal; a machine with no DNS is not.
+    #[test]
+    fn a_turned_away_connection_is_told_apart_from_no_network() {
+        assert!(is_refusal(
+            "aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host \
+             speech.platform.bing.com:443 ssl:<ssl.SSLContext object at 0x10ad30e40> \
+             [Connect call failed ('150.171.27.10', 443)]"
+        ));
+        assert!(!is_refusal(
+            "aiohttp.client_exceptions.ClientConnectorDNSError: Cannot connect to host \
+             speech.platform.bing.com:443 ssl:default [nodename nor servname provided, or not known]"
+        ));
+        assert!(!is_refusal("ServerDisconnected"));
+        assert!(
+            !is_refusal(NO_NETWORK),
+            "a dead local proxy is the operator's network"
+        );
+        assert!(
+            network_hint(
+                "aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host \
+                 speech.platform.bing.com:443 [Connect call failed ('150.171.27.10', 443)]"
+            )
+            .contains("stopped accepting connections"),
+            "a throttle must not send the operator to their Wi-Fi"
+        );
+    }
+
     /// The real output of `edge-tts --list-voices` on this machine, 2026-08-26,
     /// `edge-tts 7.2.8` — 322 voices, captured rather than typed. plan.md §M2
     /// asks for a recorded fixture from the first commit, and the reason is
@@ -1767,7 +1891,7 @@ en-GB-RyanNeural                   Male      General                Friendly, Po
     fn an_empty_line_is_refused_without_spawning_anything() {
         // The program name is deliberately nonsense: reaching the process
         // boundary at all would fail this test rather than pass it slowly.
-        let edge = Edge::at("/nonexistent/edge-tts");
+        let edge = Edge::at("/nonexistent/edge-tts").with_pace(Pace::unpaced());
         let error = edge
             .speak(
                 &Request {
@@ -1795,6 +1919,7 @@ en-GB-RyanNeural                   Male      General                Friendly, Po
 
         let settings = vec![("rate".to_owned(), "quickly".to_owned())];
         let error = Edge::at("/nonexistent/edge-tts")
+            .with_pace(Pace::unpaced())
             .speak(
                 &Request {
                     text: "A line worth saying.",
@@ -1823,7 +1948,7 @@ en-GB-RyanNeural                   Male      General                Friendly, Po
     /// the message that made D-105 necessary — so it asserts the opposite now.
     #[test]
     fn a_missing_binary_reports_a_remedy_and_not_a_command_line() {
-        let edge = Edge::at("/nonexistent/edge-tts");
+        let edge = Edge::at("/nonexistent/edge-tts").with_pace(Pace::unpaced());
         match edge.availability() {
             Availability::Missing(remedy) => {
                 assert_eq!(
@@ -1868,6 +1993,7 @@ en-GB-RyanNeural                   Male      General                Friendly, Po
 
         let started = std::time::Instant::now();
         let error = Edge::at("/nonexistent/edge-tts")
+            .with_pace(Pace::unpaced())
             .speak(
                 &Request {
                     text: "A line worth saying.",
@@ -2200,6 +2326,7 @@ aiohttp.client_exceptions.ClientConnectorDNSError: Cannot connect to host speech
 
         let started = std::time::Instant::now();
         let error = Edge::at("/nonexistent/edge-tts")
+            .with_pace(Pace::unpaced())
             .speak(
                 &Request {
                     text: &far_too_long,

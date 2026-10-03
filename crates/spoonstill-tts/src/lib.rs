@@ -30,6 +30,7 @@
 #![warn(missing_docs)]
 
 pub mod edge;
+pub mod pace;
 
 use std::path::Path;
 

@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use spoonstill_tts::edge::{Edge, Retry};
+use spoonstill_tts::pace::Pace;
 use spoonstill_tts::{Cancel, Provider, Request, TtsError};
 
 /// The bytes a real `edge-tts` writes first: an MPEG frame sync, from a file
@@ -123,9 +124,17 @@ fn long_line(parts: usize) -> String {
 }
 
 fn say(edge: &Edge, destination: &Path) -> Result<u64, TtsError> {
+    say_text(
+        edge,
+        destination,
+        "The harbour was empty by the time we arrived.",
+    )
+}
+
+fn say_text(edge: &Edge, destination: &Path, text: &str) -> Result<u64, TtsError> {
     edge.speak(
         &Request {
-            text: "The harbour was empty by the time we arrived.",
+            text,
             voice: "en-US-AvaNeural",
             settings: &[],
         },
@@ -143,7 +152,7 @@ fn say(edge: &Edge, destination: &Path) -> Result<u64, TtsError> {
 fn the_voice_reported_is_the_one_that_spoke_not_the_one_asked_for() {
     let directory = scratch("resolved-voice");
     let script = fake_edge_tts(&directory, "plain", 0, "");
-    let edge = Edge::at(&script);
+    let edge = Edge::at(&script).with_pace(Pace::unpaced());
 
     let asked = edge
         .speak(
@@ -191,8 +200,13 @@ fn two_dropped_connections_and_the_third_attempt_delivers_the_line() {
     );
     let destination = directory.join("line.mp3");
 
-    let bytes =
-        say(&Edge::at(&script).with_retry(brisk()), &destination).expect("the third attempt works");
+    let bytes = say(
+        &Edge::at(&script)
+            .with_pace(Pace::unpaced())
+            .with_retry(brisk()),
+        &destination,
+    )
+    .expect("the third attempt works");
 
     assert_eq!(bytes, MP3_HEAD.len() as u64);
     assert_eq!(runs(&directory, "flaky"), 3, "it kept trying");
@@ -217,7 +231,9 @@ fn a_service_that_never_comes_back_is_reported_after_the_last_attempt() {
     );
 
     let error = say(
-        &Edge::at(&script).with_retry(brisk()),
+        &Edge::at(&script)
+            .with_pace(Pace::unpaced())
+            .with_retry(brisk()),
         &directory.join("line.mp3"),
     )
     .expect_err("the network never returns");
@@ -256,9 +272,13 @@ fn a_permanent_failure_costs_one_attempt_and_not_three() {
         "edge_tts.exceptions.NoAudioReceived: No audio was received.",
     );
 
-    let error = say(
-        &Edge::at(&script).with_retry(brisk()),
+    // A line with no words in it: D-195 asks again only when there are some.
+    let error = say_text(
+        &Edge::at(&script)
+            .with_pace(Pace::unpaced())
+            .with_retry(brisk()),
         &directory.join("line.mp3"),
+        "... !!! --",
     )
     .expect_err("nothing speakable");
 
@@ -311,6 +331,7 @@ exit 0
     let line = line.as_str();
     let destination = directory.join("line.mp3");
     let spoken = Edge::at(&script)
+        .with_pace(Pace::unpaced())
         .with_retry(brisk())
         .speak(
             &Request {
@@ -388,6 +409,7 @@ exit 0
     let line = line.as_str();
     let destination = directory.join("line.mp3");
     let error = Edge::at(&script)
+        .with_pace(Pace::unpaced())
         .with_retry(brisk())
         .speak(
             &Request {
@@ -431,8 +453,13 @@ fn something_that_is_not_audio_is_not_accepted_as_audio() {
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 
     let destination = directory.join("line.mp3");
-    let error =
-        say(&Edge::at(&script).with_retry(brisk()), &destination).expect_err("that is not an mp3");
+    let error = say(
+        &Edge::at(&script)
+            .with_pace(Pace::unpaced())
+            .with_retry(brisk()),
+        &destination,
+    )
+    .expect_err("that is not an mp3");
 
     assert!(error.to_string().contains("not an audio file"), "{error}");
     assert!(!destination.exists(), "and it is not left on disk");
@@ -455,6 +482,7 @@ fn a_stopped_run_does_not_speak_the_line() {
     let cancel = Cancel::new();
     cancel.request();
     let error = Edge::at(&script)
+        .with_pace(Pace::unpaced())
         .with_retry(brisk())
         .speak(
             &Request {
@@ -522,6 +550,7 @@ fn a_stopped_run_does_not_try_again() {
 
     let started = std::time::Instant::now();
     let error = Edge::at(&script)
+        .with_pace(Pace::unpaced())
         .with_retry(Retry {
             attempts: 3,
             // **Five seconds on purpose.** The run count alone does not
@@ -625,6 +654,7 @@ fn a_request_already_in_flight_is_stopped() {
 
     let started = std::time::Instant::now();
     let error = Edge::at(&script)
+        .with_pace(Pace::unpaced())
         .with_retry(Retry {
             attempts: 1,
             backoff: Duration::ZERO,
@@ -657,5 +687,65 @@ fn a_request_already_in_flight_is_stopped() {
     );
     assert!(!destination.exists(), "and nothing was left on disk");
 
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// D-195 through the real process boundary: a refused connection — the exact
+/// last line from the author's log — holds the next attempt for the
+/// cool-down, where a dropped socket is retried after the ordinary backoff.
+///
+/// The only paced test in this binary, because the gate is process-wide and a
+/// second one would share its cool-down.
+#[test]
+fn a_refused_connection_waits_out_the_cool_down_before_trying_again() {
+    let directory = scratch("refused");
+    let script = fake_edge_tts(
+        &directory,
+        "refused",
+        1,
+        "aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host \
+         speech.platform.bing.com:443 ssl:<ssl.SSLContext object at 0x10ad30e40> \
+         [Connect call failed ('150.171.27.10', 443)]",
+    );
+    let cooldown = Duration::from_millis(600);
+    let pace = Pace {
+        in_flight: 2,
+        gap: Duration::ZERO,
+        cooldown,
+        max_cooldown: cooldown,
+    };
+    let started = std::time::Instant::now();
+    say(
+        &Edge::at(&script).with_pace(pace).with_retry(brisk()),
+        &directory.join("line.mp3"),
+    )
+    .expect("the second attempt works");
+    assert!(
+        started.elapsed() >= cooldown,
+        "retried after {:?}, inside the {cooldown:?} cool-down",
+        started.elapsed()
+    );
+}
+
+/// D-195: twelve times in the author's log an ordinary sentence came back as
+/// `NoAudioReceived`, stopped the render, and spoke on the next one unchanged.
+/// So silence for a line with words in it is asked again.
+#[test]
+fn silence_for_an_ordinary_sentence_is_asked_again_and_speaks() {
+    let directory = scratch("silent-once");
+    let script = fake_edge_tts(
+        &directory,
+        "silent-once",
+        1,
+        "edge_tts.exceptions.NoAudioReceived: No audio was received.",
+    );
+    say(
+        &Edge::at(&script)
+            .with_pace(Pace::unpaced())
+            .with_retry(brisk()),
+        &directory.join("line.mp3"),
+    )
+    .expect("the second attempt speaks");
+    assert_eq!(runs(&directory, "silent-once"), 2);
     let _ = std::fs::remove_dir_all(&directory);
 }
