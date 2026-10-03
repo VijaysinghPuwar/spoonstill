@@ -274,6 +274,21 @@ be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
 
+### State as of 2026-10-03, later — the chapter cut, checked against the author's own scenes (D-196), `v0.1.18`
+
+**Read D-196 before touching `spoonstill_core::chapter`'s `cut`, `cut_words`,
+`Straddle`, `paragraph_is_whole`, `join_cost`, `PARAGRAPH_JOIN`, `length_cost`
+or `CHARS_PER_SECOND`.** Measured against the author's 431 scenes in their own
+voice: only 47% were 3–5 s, twenty under two seconds (every one a short line of
+dialogue, because a blank line was an absolute cut), and one scene was `√`.
+Now a blank line is a free cut that a too-short paragraph may cross by whole
+sentences; a paragraph with no letters is dropped; a paragraph with no sentence
+end (a heading, a bare number) never joins a neighbour — found by this
+decision's own stress test; the estimate is 16.3 chars/s from 431 lines, and a
+2 380-scene film came in 0.4% from its estimate. **The author's original
+chapter file is on their other machine** — the measurements are on a stand-in
+rebuilt from the 431 lines; ask for the file before re-deriving any of it.
+
 ### State as of 2026-10-03 — "after 321 it pauses and crashes" was the voice service refusing us (D-195), `v0.1.17`
 
 **Not a crash, and not the pictures.** The author's `runs.csv`: a 431-scene

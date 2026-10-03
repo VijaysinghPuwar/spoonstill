@@ -9390,3 +9390,90 @@ What 40x does **not** test is forty times the speech: its lines are the same
 431, served from the cache. 17 240 fresh lines at a pace that does not trip
 the throttle is about six hours of continuous requests, and making them to
 prove the throttle is not tripped would be the abuse being avoided.
+
+### D-196 — A short line shares a picture, a section mark is not a scene, and the estimate is the author's voice · Accepted
+
+**Asked by the author, 2026-10-03:** *"what do you think of the cutting … I
+think there is a problem"*, then *"fix it"* with the three open questions
+handed back — D-193's own pattern. Checked first against their 431-scene
+chapter, every scene's real spoken length taken from a render in their voice:
+only **204 of 431 (47%)** were inside the 3–5 s they asked for; **20 were under
+two seconds** — `"Okay!"` and `"Let's do it."` at 0.77 s, `"Mr. Cole?"` at
+0.90 — and scene 291 was `√`, spoken as a second of the voice reading a symbol
+under a picture of its own.
+
+**The cause of the flashes is one rule: a blank line was an absolute cut.** In
+a novel every line of dialogue is its own paragraph, so a two-word reply could
+never share a picture with anything. A paragraph end is now the cheapest cut
+there is (cost 0) and is **crossable**: at [`PARAGRAPH_JOIN`] = 3, only by whole
+sentences (the straddle rule treats a paragraph end as a sentence end, so no
+piece carries half a sentence across a blank line), and stacked on the
+existing narration/quote cost of 4 — so two paragraphs share a picture only to
+avoid a flash. And a piece below two thirds of the minimum pays a steeper
+price, `4 × (flash − s)` on top of D-193's `2 × (min − s)`.
+
+**A paragraph with no letter or digit is a section mark** (`√`, `***`, `---`,
+`🙂`) and is left out, in both cut modes. `cut`'s promise is now "every word of
+every paragraph that has words", and the 1 500-chapter random test asserts that
+form; it is what found the emoji case.
+
+**`CHARS_PER_SECOND` is 16.3, from 431 lines, not 15.0 from ten.** 30 391
+characters over 1 868 s of spoken scene. At 15.0 every estimate ran 8% long, so
+a piece the cutter believed was 3.0 s was 2.76 s and the whole cut aimed short.
+
+**What the author's question 2 is answered with:** the maximum stays soft. A
+whole sentence is kept whole rather than broken mid-phrase, and the price of
+running over is unchanged, so the longest pieces are a short sentence joined to
+a long one rather than left to flash — measured at most 7.3 s.
+
+**Measured on a stand-in.** The original chapter file is on the author's other
+machine; the stand-in is their 431 lines rejoined, a new paragraph at each line
+of dialogue the way the novel is laid out (163 paragraphs). Estimates below are
+at the measured 16.3:
+
+| | cuts | under 2 s | under 3 s | 3–5 s | over 6 s | longest | no-word scenes |
+|---|---|---|---|---|---|---|---|
+| before | 544 | 47 | 195 | 310 (57%) | 2 | 6.1 s | 1 (`√`) |
+| after | 476 | **12** | **106** | 280 (59%) | 15 | 7.3 s | **0** |
+
+The twelve flashes left sit between a closing quote and an opening one —
+`"That's sick," his buddy said.` — where both join costs apply and a beat is
+what the text is. The current build does **not** reproduce the author's scene
+004 (a 2.5 s sentence glued to a 5.5 s one, 7.9 s): on the same words it cuts
+them apart, so that scene came from a different paragraph layout or a later
+edit, which the stand-in cannot tell.
+
+**The search is now over the whole chapter, so it was made cheaper.** Walking
+each candidate's words to check the straddle rule cost `O(n·w²)`, and once a
+search crosses paragraphs that took the 1 MB test from 16 s toward its 20 s
+limit. `Straddle` answers from running totals in constant time: that test is
+**2.4 s**, a 155 000-character chapter (the author's 1 907-cut one) cuts in
+**0.14 s** release, and the random test asserts the totals equal the walk on
+every chosen piece and on sampled spans the search never picked.
+
+Mutation-tested: `PARAGRAPH_JOIN` set to 1000 (the old absolute cut) fails
+exactly `a_line_of_dialogue_too_short_to_hold_a_picture_joins_a_neighbour`;
+keeping no-word paragraphs fails exactly
+`a_paragraph_with_no_words_is_a_mark_and_is_left_out`.
+
+**Found by this decision's own stress test, and fixed in it.** With the blank
+line crossable, `Chapter 24` joined the first sentence — *"Chapter 24 The fall
+air had a little bite to it."*, one breath to the voice and one line to the
+caption — and a bare `2024` joined the line before it. A paragraph with no
+sentence end has no pause in it but the blank lines around it, so it is never
+joined to either neighbour (`paragraph_is_whole`, crossing costs 1000). The
+stand-in chapter has no such paragraph and cuts identically with and without
+this rule; `a_heading_or_a_bare_number_is_never_joined_to_the_next_paragraph`
+holds it. Probed and correct: a file of only marks is refused (*"has no words
+in it"*) and writes nothing; CRLF endings and whitespace-only lines cut
+normally; `He said:` keeps its own scene — cautious, never a run-on.
+
+**Stress-tested end to end, 2026-10-03.** The stand-in chapter five times over
+— 154 935 characters, the size of the author's 1 907-cut chapter — cut into
+**2 380 scenes in 0.4 s** (`still import-chapter --apply`), filled by `still
+add` with 2 380 distinct photographs in 14 s, every one landing on its waiting
+line; `still validate` clean in 6 s; rendered at 720p with captions in **25
+minutes, exit 0, 0 errors, 0 refusals** from the voice service, 477 lines
+spoken fresh and 1 903 from the cache. The cut estimated **9 308 s**; the film
+measures **9 342 s** — 0.4%, which is the recalibrated 16.3 confirmed on text
+it was not measured on. Not run on Windows.

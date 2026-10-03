@@ -47,28 +47,39 @@
 //! path over word positions, so a paragraph of `n` words costs `O(n·w)` where
 //! `w` is the most words a piece can hold — microseconds for a chapter.
 //!
-//! **A paragraph break is always a cut.** A blank line is the author saying
-//! "new thought", and no piece carries words across it.
+//! **A paragraph break is the most natural cut there is**, and costs nothing.
+//! It is crossed only when a paragraph is too short to hold a picture alone —
+//! in a novel that is a line of dialogue, `"Let's do it."`, which held a
+//! picture for 0.77 s in the author's chapter — and then only by whole
+//! sentences, at a cost, so two paragraphs share a picture only to avoid a
+//! flash (D-196). It used to be an absolute cut, and the author's 431-scene
+//! chapter had twenty scenes under two seconds because of it.
+//!
+//! A paragraph with no letters or digits — `√`, `***`, `---` — is a mark
+//! between sections and is left out rather than spoken (D-196).
 //!
 //! ## What the seconds are
 //!
-//! An **estimate** from the character count. Measured on the author's own ten
-//! lines in their own voice on 2026-09-30: 15.1 characters a second, spread
-//! 12.8–17.0 — a full stop is a pause, so clipped prose reads slower than
-//! flowing prose (see `edge.rs`'s `SPEECH_CHARS_PER_SECOND`, which is the fast
-//! end on purpose, for a different job). The real length of a scene is only
-//! known once its narration is spoken and measured (D-021), and every surface
-//! that shows these numbers says so.
+//! An **estimate** from the character count: 16.3 characters a second,
+//! measured on 2026-10-03 over the author's 431 lines in their own voice —
+//! 30 391 characters, 1 868 s of spoken scene (D-196). The first measurement,
+//! ten lines on 2026-09-30, said 15.1; at that rate every estimate ran 8% long
+//! and the cut aimed short. Clipped prose reads slower than flowing prose, so
+//! this is a typical value, not the renderer's `SPEECH_CHARS_PER_SECOND`
+//! (`edge.rs`), which is the fast end on purpose, for a different job. The real
+//! length of a scene is only known once its narration is spoken and measured
+//! (D-021), and every surface that shows these numbers says so.
 
 /// Characters per second of speech, for estimating how long a piece will take
 /// to say.
 ///
-/// Measured, not chosen: ten real lines, `en-US-AndrewMultilingualNeural`,
-/// 965 characters over 63.9 s of audio. Not the renderer's
+/// Measured, not chosen: the author's 431 real lines,
+/// `en-US-AndrewMultilingualNeural`, 30 391 characters over 1 868 s (D-196).
+/// Not the renderer's
 /// `SPEECH_CHARS_PER_SECOND` (17.3), which is the *fastest* observed rate and
 /// is used to refuse a line no scene could hold — a ceiling, where this is a
 /// typical value.
-pub const CHARS_PER_SECOND: f64 = 15.0;
+pub const CHARS_PER_SECOND: f64 = 16.3;
 
 /// How long each piece should take to say.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -224,22 +235,41 @@ pub fn estimate(text: &str) -> f64 {
 /// Cut a chapter into pieces of about `pacing`'s length.
 ///
 /// Blank text gives no pieces. Every word of the input appears in exactly one
-/// piece, in order — nothing is dropped, reordered or rewritten except
-/// whitespace, which is collapsed.
+/// piece, in order — nothing is reordered or rewritten except whitespace,
+/// which is collapsed, and nothing is dropped except a paragraph with no
+/// letters or digits in it, which is a section mark (D-196).
+///
+/// A blank line is the most natural place to cut, and is crossed only when a
+/// paragraph is too short to hold a picture alone — one line of dialogue —
+/// and then only by whole sentences (D-196).
 #[must_use]
 pub fn cut(chapter: &str, pacing: Pacing) -> Vec<Cut> {
-    let mut out = Vec::new();
-    for paragraph in paragraphs(chapter) {
-        let words: Vec<&str> = paragraph.split_whitespace().collect();
-        for piece in cut_paragraph(&words, pacing) {
-            let seconds = estimate(&piece);
-            out.push(Cut {
-                text: piece,
-                seconds,
-            });
+    let paragraphs = paragraphs(chapter);
+    let (words, breaks) = split_chapter(&paragraphs);
+    cut_words(&words, &breaks, pacing)
+        .into_iter()
+        .map(|piece| Cut {
+            seconds: estimate(&piece),
+            text: piece,
+        })
+        .collect()
+}
+
+/// Every word of the chapter, and for each whether it ends a paragraph.
+fn split_chapter(paragraphs: &[String]) -> (Vec<&str>, Vec<bool>) {
+    let mut words: Vec<&str> = Vec::new();
+    let mut breaks: Vec<bool> = Vec::new();
+    for paragraph in paragraphs {
+        let start = words.len();
+        words.extend(paragraph.split_whitespace());
+        if words.len() > start {
+            breaks.resize(words.len(), false);
+            if let Some(last) = breaks.last_mut() {
+                *last = true;
+            }
         }
     }
-    out
+    (words, breaks)
 }
 
 /// A chapter's paragraphs: runs of lines separated by at least one blank line.
@@ -248,7 +278,18 @@ pub fn cut(chapter: &str, pacing: Pacing) -> Vec<Cut> {
 /// a PDF arrives hard-wrapped at whatever width it was displayed at, and
 /// cutting there would put a picture change wherever the author's word
 /// processor happened to wrap.
+///
+/// A paragraph with nothing in it to say — `√`, `***`, `---`, a row of dots —
+/// is a mark the author put between sections, not a line, and is left out
+/// (D-196). Spoken, `√` was a second of the voice reading a symbol under a
+/// picture of its own.
 fn paragraphs(chapter: &str) -> Vec<String> {
+    let mut out = raw_paragraphs(chapter);
+    out.retain(|p| p.chars().any(char::is_alphanumeric));
+    out
+}
+
+fn raw_paragraphs(chapter: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
     for line in chapter.lines() {
@@ -268,9 +309,13 @@ fn paragraphs(chapter: &str) -> Vec<String> {
     out
 }
 
-/// The cost of a cut placed immediately after `words[i]`.
-fn gap_cost(words: &[&str], i: usize) -> f64 {
+/// The cost of a cut placed immediately after `words[i]`. The end of a
+/// paragraph is the most natural place there is.
+fn gap_cost(words: &[&str], breaks: &[bool], i: usize) -> f64 {
     let word = words[i];
+    if breaks[i] {
+        return 0.0;
+    }
     let mut cost = if ends_sentence(word) {
         0.0
     } else if ends_clause(word) {
@@ -295,7 +340,11 @@ fn length_cost(chars: usize, pacing: Pacing) -> f64 {
     #[allow(clippy::cast_precision_loss)]
     let seconds = chars as f64 / CHARS_PER_SECOND;
     if seconds < pacing.min_seconds {
-        2.0 * (pacing.min_seconds - seconds)
+        // And steeply below two thirds of the minimum: a picture on screen
+        // for under two seconds is a flash, and the author's 431-scene chapter
+        // had twenty of them, every one a short line of dialogue (D-196).
+        let flash = pacing.min_seconds * 2.0 / 3.0;
+        2.0 * (pacing.min_seconds - seconds) + 4.0 * (flash - seconds).max(0.0)
     } else if seconds > pacing.max_seconds {
         // Gently for the first two and a half seconds over — a whole sentence
         // is worth that — and steeply after, so text with no punctuation at
@@ -312,26 +361,126 @@ fn length_cost(chars: usize, pacing: Pacing) -> f64 {
 /// full stop inside it is fine only when the piece is whole sentences — it
 /// starts where a sentence starts and ends where one ends (see the module
 /// note).
-fn straddle_cost(words: &[&str], a: usize, b: usize) -> f64 {
-    let inside = (a..b.saturating_sub(1)).any(|i| ends_sentence(words[i]));
+///
+/// The end of a paragraph counts as the end of a sentence here, whatever its
+/// punctuation: a heading with no full stop is still whole. Crossing one costs
+/// [`PARAGRAPH_JOIN`], so two paragraphs share a picture only when one of them
+/// is too short to hold one alone (D-196).
+#[cfg(test)]
+fn straddle_cost(words: &[&str], breaks: &[bool], a: usize, b: usize) -> f64 {
+    Straddle::new(words, breaks).cost(a, b)
+}
+
+/// [`straddle_cost`] in constant time per piece, from running totals — the
+/// search asks it for every candidate, and walking each candidate's words
+/// made a chapter cost `O(n·w²)` (D-196).
+struct Straddle {
+    n: usize,
+    /// `stop[i]`: how many of `words[..i]` end a sentence or a paragraph.
+    stop: Vec<usize>,
+    /// `paid[i]`: what crossing each of those stops costs, summed.
+    paid: Vec<f64>,
+}
+
+/// For each word, whether its paragraph ends a sentence. One that does not —
+/// `Chapter 24`, a date, a name on its own line — has no pause in it but the
+/// blank lines around it, and joining it to either neighbour reads it as part
+/// of one breath: "Chapter 24 The fall air…", "She stopped. 2024" (D-196).
+fn paragraph_is_whole(words: &[&str], breaks: &[bool]) -> Vec<bool> {
+    let mut whole = vec![true; words.len()];
+    let mut current = true;
+    for i in (0..words.len()).rev() {
+        if breaks[i] {
+            current = ends_sentence(words[i]);
+        }
+        whole[i] = current;
+    }
+    whole
+}
+
+/// What crossing the blank line after `words[i]` costs.
+fn join_cost(whole: &[bool], i: usize) -> f64 {
+    if whole[i] && whole.get(i + 1).copied().unwrap_or(true) {
+        PARAGRAPH_JOIN
+    } else {
+        1000.0
+    }
+}
+
+impl Straddle {
+    fn new(words: &[&str], breaks: &[bool]) -> Straddle {
+        let n = words.len();
+        let whole = paragraph_is_whole(words, breaks);
+        let mut stop = vec![0usize; n + 1];
+        let mut paid = vec![0.0; n + 1];
+        for i in 0..n {
+            let stops = breaks[i] || ends_sentence(words[i]);
+            let mut cost = 0.0;
+            if stops {
+                if breaks[i] {
+                    cost += join_cost(&whole, i);
+                }
+                if words.get(i + 1).is_some_and(|next| opens_quote(next)) || closes_quote(words[i])
+                {
+                    cost += 4.0;
+                }
+            }
+            stop[i + 1] = stop[i] + usize::from(stops);
+            paid[i + 1] = paid[i] + cost;
+        }
+        Straddle { n, stop, paid }
+    }
+
+    fn stops(&self, i: usize) -> bool {
+        self.stop[i + 1] > self.stop[i]
+    }
+
+    fn cost(&self, a: usize, b: usize) -> f64 {
+        if b < a + 2 || self.stop[b - 1] == self.stop[a] {
+            return 0.0;
+        }
+        let starts_whole = a == 0 || self.stops(a - 1);
+        let ends_whole = b == self.n || self.stops(b - 1);
+        if !(starts_whole && ends_whole) {
+            return 1000.0;
+        }
+        self.paid[b - 1] - self.paid[a]
+    }
+}
+
+#[cfg(test)]
+fn straddle_cost_slow(words: &[&str], breaks: &[bool], a: usize, b: usize) -> f64 {
+    let stops = |i: usize| breaks[i] || ends_sentence(words[i]);
+    let whole = paragraph_is_whole(words, breaks);
+    let inside = (a..b.saturating_sub(1)).any(stops);
     if !inside {
         return 0.0;
     }
-    let starts_whole = a == 0 || ends_sentence(words[a - 1]);
-    let ends_whole = b == words.len() || ends_sentence(words[b - 1]);
+    let starts_whole = a == 0 || stops(a - 1);
+    let ends_whole = b == words.len() || stops(b - 1);
     if !(starts_whole && ends_whole) {
         return 1000.0;
     }
     // Whole sentences may share a picture — but narration and a character's
-    // speech prefer their own.
+    // speech prefer their own, and so do two paragraphs.
     let mut cost = 0.0;
     for i in a..b - 1 {
-        if ends_sentence(words[i]) && (opens_quote(words[i + 1]) || closes_quote(words[i])) {
+        if !stops(i) {
+            continue;
+        }
+        if breaks[i] {
+            cost += join_cost(&whole, i);
+        }
+        if opens_quote(words[i + 1]) || closes_quote(words[i]) {
             cost += 4.0;
         }
     }
     cost
 }
+
+/// What it costs a piece to carry words across a blank line (D-196). Less
+/// than a two-second flash costs, more than a quote boundary saves.
+const PARAGRAPH_JOIN: f64 = 3.0;
 
 fn opens_quote(word: &str) -> bool {
     word.starts_with(['"', '“', '«', '‘'])
@@ -341,8 +490,9 @@ fn closes_quote(word: &str) -> bool {
     word.ends_with(['"', '”', '»', '’'])
 }
 
-/// The cheapest way to cut one paragraph (see the module note).
-fn cut_paragraph(words: &[&str], pacing: Pacing) -> Vec<String> {
+/// The cheapest way to cut a run of words (see the module note). `breaks[i]`
+/// says `words[i]` ends a paragraph.
+fn cut_words(words: &[&str], breaks: &[bool], pacing: Pacing) -> Vec<String> {
     let n = words.len();
     if n == 0 {
         return Vec::new();
@@ -362,6 +512,7 @@ fn cut_paragraph(words: &[&str], pacing: Pacing) -> Vec<String> {
 
     // best[b] = cheapest cost of cutting words[..b]; from[b] = where the last
     // piece of that answer starts.
+    let straddle = Straddle::new(words, breaks);
     let mut best = vec![f64::INFINITY; n + 1];
     let mut from = vec![0usize; n + 1];
     best[0] = 0.0;
@@ -376,10 +527,14 @@ fn cut_paragraph(words: &[&str], pacing: Pacing) -> Vec<String> {
             if !best[a].is_finite() {
                 continue;
             }
-            // The paragraph's end is a free cut; every other end pays for
-            // where it falls.
-            let gap = if b == n { 0.0 } else { gap_cost(words, b - 1) };
-            let cost = best[a] + length_cost(chars, pacing) + gap + straddle_cost(words, a, b);
+            // The chapter's end is a free cut; every other end pays for where
+            // it falls.
+            let gap = if b == n {
+                0.0
+            } else {
+                gap_cost(words, breaks, b - 1)
+            };
+            let cost = best[a] + length_cost(chars, pacing) + gap + straddle.cost(a, b);
             // `<` rather than `<=`: between equal answers the longer last
             // piece wins, which means fewer pictures to make.
             if cost < best[b] {
@@ -499,8 +654,9 @@ eyes again, he had crossed over.";
         assert_eq!(joined, normalize(OPENING));
     }
 
+    /// D-196: a paragraph long enough to hold a picture keeps its own.
     #[test]
-    fn a_paragraph_break_is_always_a_cut() {
+    fn a_paragraph_that_can_stand_alone_keeps_its_own_picture() {
         let cuts = cut(OPENING, Pacing::DEFAULT);
         assert!(
             cuts.iter()
@@ -687,6 +843,80 @@ eyes again, he had crossed over.";
         assert_eq!(CutBy::parse("banana", p), None);
     }
 
+    /// D-196, from the author's 431-scene chapter: every line of dialogue is
+    /// its own paragraph, and "Let's do it." held a picture for 0.77 s.
+    #[test]
+    fn a_line_of_dialogue_too_short_to_hold_a_picture_joins_a_neighbour() {
+        let text = "\"You ready?\" Chloe asked with a smile.\n\n\"Let's do it.\"\n\n\
+                    Ryan knew how these battles worked. It was all about whose whales \
+                    spent more.";
+        let cuts = cut(text, Pacing::DEFAULT);
+        assert!(
+            !cuts.iter().any(|c| c.text == "\"Let's do it.\""),
+            "a 0.7 s flash: {:#?}",
+            texts(&cuts)
+        );
+        assert!(
+            cuts.iter()
+                .any(|c| c.text.contains("smile. \"Let's do it.\"")
+                    || c.text.starts_with("\"Let's do it.\" Ryan"))
+        );
+        assert_eq!(texts(&cuts).join(" "), normalize(text));
+    }
+
+    /// D-196, found by its own stress test: a heading has no pause but the
+    /// blank line after it, so joining it read "Chapter 24 The fall air…" as
+    /// one breath. A paragraph that does not end a sentence keeps its own.
+    #[test]
+    fn a_heading_or_a_bare_number_is_never_joined_to_the_next_paragraph() {
+        let text = "Chapter 24\n\nThe fall air had a little bite to it. Ryan pulled his \
+                    jacket tighter.\n\n\"Wait.\"\n\n2024\n\n\"No,\" he said.";
+        let cuts = cut(text, Pacing::DEFAULT);
+        assert_eq!(cuts[0].text, "Chapter 24", "{:#?}", texts(&cuts));
+        assert!(cuts.iter().any(|c| c.text == "2024"), "{:#?}", texts(&cuts));
+        assert_eq!(texts(&cuts).join(" "), normalize(text));
+    }
+
+    /// D-196: a blank line is crossed only by whole sentences — never by half
+    /// of one, whatever the lengths.
+    #[test]
+    fn a_blank_line_is_never_crossed_mid_sentence() {
+        let text = "\"Okay!\"\n\nUpstairs, in her little studio, Mia had tried on five \
+                    different outfits and hated every one of them, so she sat down";
+        for c in cut(text, Pacing::DEFAULT) {
+            if c.text.contains("Okay!") {
+                assert!(
+                    c.text == "\"Okay!\"" || c.text.ends_with("sat down"),
+                    "{:?}",
+                    c.text
+                );
+            }
+        }
+    }
+
+    /// D-196: `√` between two sections was spoken as a scene of its own.
+    #[test]
+    fn a_paragraph_with_no_words_is_a_mark_and_is_left_out() {
+        let text = "The guy had dropped three hundred million dollars.\n\n√\n\n\
+                    Some of them were worth a few hundred million themselves.\n\n***\n\n---";
+        let cuts = cut(text, Pacing::DEFAULT);
+        for mark in ["√", "***", "---"] {
+            assert!(
+                !texts(&cuts).join(" ").contains(mark),
+                "{:#?}",
+                texts(&cuts)
+            );
+        }
+        assert!(
+            texts(&cuts).join(" ").contains("dollars. Some")
+                || texts(&cuts).iter().any(|c| c.ends_with("dollars."))
+        );
+        for c in cut_sentences(text, 1) {
+            assert!(c.text.chars().any(char::is_alphanumeric), "{:?}", c.text);
+        }
+        assert!(cut("√\n\n***", Pacing::DEFAULT).is_empty());
+    }
+
     #[test]
     fn short_sentences_are_joined_rather_than_flashed() {
         let cuts = cut(
@@ -864,13 +1094,12 @@ mod stress {
             };
             let cuts = cut(&text, pacing);
 
-            // Nothing lost, nothing added, nothing reordered.
+            // Nothing lost, nothing added, nothing reordered — except a
+            // paragraph with no words in it, which is a mark and not a line
+            // (D-196).
+            let spoken = normalize(&paragraphs(&text).join(" "));
             let joined: Vec<String> = cuts.iter().map(|c| c.text.clone()).collect();
-            assert_eq!(
-                joined.join(" "),
-                normalize(&text),
-                "round {round}: {text:?}"
-            );
+            assert_eq!(joined.join(" "), spoken, "round {round}: {text:?}");
 
             // The same for every sentence count.
             let by = 1 + (round as usize % 3);
@@ -878,11 +1107,7 @@ mod stress {
                 .into_iter()
                 .map(|c| c.text)
                 .collect();
-            assert_eq!(
-                sentences.join(" "),
-                normalize(&text),
-                "round {round} by {by}"
-            );
+            assert_eq!(sentences.join(" "), spoken, "round {round} by {by}");
             assert!(sentences.iter().all(|p| !p.is_empty()), "round {round}");
 
             for c in &cuts {
@@ -890,23 +1115,43 @@ mod stress {
                 assert!(c.seconds.is_finite() && c.seconds > 0.0, "round {round}");
             }
 
-            // Per paragraph, so "the piece ends where its paragraph ends" is
-            // known exactly: a piece holding a full stop inside it must start
-            // at a sentence start and end at a sentence end or the paragraph's.
-            for paragraph in paragraphs(&text) {
-                let words: Vec<&str> = paragraph.split_whitespace().collect();
-                let pieces = cut_paragraph(&words, pacing);
-                let mut at = 0;
-                for piece in &pieces {
-                    let n = piece.split(' ').count();
-                    let (a, b) = (at, at + n);
+            // Over the whole chapter, so "the piece ends where its paragraph
+            // ends" is known exactly: a piece holding a full stop or a blank
+            // line inside it must start and end whole (D-196).
+            let paragraphs = paragraphs(&text);
+            let (words, breaks) = split_chapter(&paragraphs);
+            let pieces = cut_words(&words, &breaks, pacing);
+            let mut at = 0;
+            for piece in &pieces {
+                let n = piece.split(' ').count();
+                let (a, b) = (at, at + n);
+                assert!(
+                    straddle_cost(&words, &breaks, a, b) < 1000.0,
+                    "round {round}: straddles: {piece:?}"
+                );
+                assert!(
+                    (straddle_cost(&words, &breaks, a, b)
+                        - straddle_cost_slow(&words, &breaks, a, b))
+                    .abs()
+                        < 1e-9,
+                    "round {round}: the running totals disagree with the walk"
+                );
+                at = b;
+            }
+            assert_eq!(at, words.len(), "round {round}");
+            // And on spans the search never picked, which is where a running
+            // total that is off by one would hide.
+            let sampled = if round.is_multiple_of(10) { 30 } else { 0 };
+            for a in 0..words.len().min(sampled) {
+                for b in a + 1..=words.len().min(a + 30) {
                     assert!(
-                        straddle_cost(&words, a, b) < 1000.0,
-                        "round {round}: straddles: {piece:?}"
+                        (straddle_cost(&words, &breaks, a, b)
+                            - straddle_cost_slow(&words, &breaks, a, b))
+                        .abs()
+                            < 1e-9,
+                        "round {round}: {a}..{b}"
                     );
-                    at = b;
                 }
-                assert_eq!(at, words.len(), "round {round}");
             }
         }
     }

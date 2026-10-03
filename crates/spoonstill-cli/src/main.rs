@@ -106,7 +106,8 @@ struct ImportChapterArgs {
     project: PathBuf,
 
     /// The chapter, as a plain text file. A blank line between paragraphs is
-    /// always a cut.
+    /// a cut, unless a paragraph is too short to hold a picture alone — a
+    /// line of dialogue — when it shares one with a neighbour (D-196).
     #[arg(value_name = "CHAPTER")]
     chapter: PathBuf,
 
