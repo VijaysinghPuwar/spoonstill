@@ -9496,3 +9496,104 @@ downloading it, and binstall v1.22.0 — the pinned action — takes the flag. T
 failed v0.1.18 was a draft, never published; it was deleted and the tag moved
 to the commit carrying this fix, which is D-102's rule (a tag holds the commit
 that builds) rather than an exception to it.
+
+### D-198 — The encoder's share is a property of the CPU, and two of the three things this platform reported were wrong · Accepted
+
+**Run on Linux for the first time, on a 12th-gen Core i3-1215U** — 6 cores, 8
+threads, 15 W, Intel UHD graphics, 23 GB. D-071 puts macOS and Windows in
+scope and that is unchanged; what this machine is good for is being **slow**,
+which is the machine class the author was asking about and the one no number
+here had ever been taken on.
+
+**`cargo test --workspace` failed on arrival**, and the failing test was the
+one built to catch exactly this. `every_candidate_has_quality_flags_of_its_own`
+(D-162) asserts that every entry in `CANDIDATES` has an arm in `quality_args`,
+because a missing arm falls through to the empty vector and encodes at
+whatever the driver's default is — "a quality regression with no error and no
+log line". The `#[cfg(not(any(macos, windows)))]` list shipped **`h264_vaapi`**
+and `quality_args` has no VAAPI arm. The guard worked; nothing had ever run it.
+
+**The fix is removal, not a new arm, and that is measured rather than argued.**
+VAAPI wants frames already on the GPU, and D-030 through D-037 all run on the
+CPU. Fed the software frames this pipeline actually produces, on a machine with
+`renderD128` present and `i915` loaded: `Could not open encoder before EOF`,
+`-22`. That is the *same* measured reason the Windows list above it excludes
+`h264_vaapi`, `h264_d3d12va` and `h264_vulkan` — so adding an arm would have
+bought a line of `Unusable` noise under a heading about the operator's
+graphics card. `h264_qsv` replaces it, because it is the one that works and it
+already has an arm: one line, no new mapping.
+
+**`subdirectories` was dead code here**, which is D-128's asymmetry exactly —
+that decision gave `windows_quote` a `dead_code` exemption and never wrote the
+symmetric one. Every call site sits inside a macOS or Windows block, so the gate
+is `#[cfg(any(target_os = "macos", target_os = "windows", test))]`, which is
+the shape `python_org_dirs` four functions below already had.
+
+**Both changes are inside non-target `cfg` blocks and doc comments. macOS and
+Windows compile byte-identically**, which is the condition the work was done
+under: this platform is a place to find defects, not a platform to trade the
+other two for.
+
+#### The number that was wrong
+
+`still doctor` said, every time, under the list of usable encoders:
+
+> The encoder is at most a fifth of a 4K render, so hardware would not make one
+> much faster (D-159).
+
+14% on macOS (D-144) and 22.7% on the Windows desktop (D-159). **Both are
+real, and both were taken on a fast CPU** — which is the half the sentence left
+out. The encoder's *share* is a property of how slow everything else is, so on a
+slow machine the same encoder is a bigger fraction of the same render.
+
+Measured here, 24 of the author's own 431 scenes at 720p, audio cache warm so
+nothing crosses a network, each run from an empty segment directory:
+
+| encoder | `--jobs 4` | `--jobs 2` |
+|---|---|---|
+| `libx264` (D-036's default) | **279.1 s** | 302.9 s |
+| `h264_qsv` (`--encoder auto`) | **167.4 s** | **161.4 s** |
+
+**1.67x at the same job count, 1.73x at the one hardware prefers** — against
+1.19–1.23x on an RTX 3060. So the sentence talked an operator out of the flag
+on precisely the machine where it pays, which is D-151's class of defect: the
+product asserting a number that is not true where it is being read.
+
+**Not a default change, and deliberately not.** D-036 chose libx264 on quality
+grounds and this measurement does not overturn it — the cost is real: SSIM
+**0.985** (Y 0.9846) against the software render and 12% more bitrate at the
+same `crf`. Changing the default would also move every segment key and cost
+every project on every disk a full re-render, which D-107 and D-118 each did
+once deliberately. What changed is the *sentence*, which now names both ends of
+the range, the flag, and what the flag costs.
+
+**What the hardware run proves beyond the clock:** the QSV segment probes as
+`h264 / High / level 40 / yuv420p / bt709 / SAR 1:1 / timebase 1/90000` — an
+exact match for `SegmentProfile`, so D-041's assertion passes and a hardware
+segment joins a software one legally, and the film's duration is
+`104.454667 s` either way. That is D-162's own load-bearing measurement
+reproduced on a third vendor.
+
+#### D-076's cap was checked here and is right
+
+The pool cap of four was derived on a 10-core Mac and confirmed on a 16-core
+Windows machine. A 15 W 8-thread laptop is where one would expect it to be
+wrong. It is not — same 24 scenes, warm audio, segments deleted each time:
+
+| `--jobs` | 1 | 2 | 3 | 4 | 6 | 8 |
+|---|---|---|---|---|---|---|
+| wall | 484.2 s | 302.9 s | **277.9 s** | 279.1 s | 282.8 s | 283.4 s |
+
+It flattens at **three** and regresses by about 1.5% past four — the same shape
+as §10's macOS curve and §13's Windows one. `default_jobs()` returns 4 here and
+that is within noise of the optimum, so **nothing is changed.** Worth recording
+because a measurement that confirms a setting is as useful as one that moves it,
+and because the alternative was guessing that a slow machine wants a smaller
+pool. A single `libx264` child already drives this machine's load average to
+10, which is why more workers buy so little.
+
+**Not claimed:** no Linux release, no Linux CI leg, and `README.md` still says
+the gates are macOS-only. VideoToolbox remains unverified by measurement (D-162
+said so and still does). The 40x stress project was not rendered to completion
+here — at the measured throughput that is roughly 75 hours, so the at-scale
+check was run against orchestration rather than against 17 240 encodes.

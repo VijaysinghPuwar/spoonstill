@@ -309,9 +309,11 @@ struct RenderArgs {
     /// `h264_videotoolbox` — asks for exactly that one. `still doctor` lists
     /// what this machine has.
     ///
-    /// A draft mode, not a better default: it is worth about 1.23x here
-    /// (D-159), it saves no memory, and hardware H.264 bands on the slow pans
-    /// across smooth gradients that this content is made of.
+    /// A draft mode, not a better default. What it is worth depends on how
+    /// slow the CPU is: about 1.2x on a desktop GPU (D-159) and 1.67x on a 15W
+    /// laptop (D-198). It saves no memory — that is the prescale canvas, not
+    /// the encoder — and hardware H.264 bands on the slow pans across smooth
+    /// gradients that this content is made of, measured at SSIM 0.985.
     #[arg(long, value_name = "ENCODER")]
     encoder: Option<String>,
 }
@@ -412,9 +414,11 @@ struct RenderSceneArgs {
     /// `h264_videotoolbox` — asks for exactly that one. `still doctor` lists
     /// what this machine has.
     ///
-    /// A draft mode, not a better default: it is worth about 1.23x here
-    /// (D-159), it saves no memory, and hardware H.264 bands on the slow pans
-    /// across smooth gradients that this content is made of.
+    /// A draft mode, not a better default. What it is worth depends on how
+    /// slow the CPU is: about 1.2x on a desktop GPU (D-159) and 1.67x on a 15W
+    /// laptop (D-198). It saves no memory — that is the prescale canvas, not
+    /// the encoder — and hardware H.264 bands on the slow pans across smooth
+    /// gradients that this content is made of, measured at SSIM 0.985.
     #[arg(long, value_name = "ENCODER")]
     encoder: Option<String>,
 
@@ -958,13 +962,22 @@ fn report_graphics() {
     }
 
     // Said every time, because the list above invites exactly one wrong
-    // conclusion. D-036 chose libx264 on quality grounds for this content, and
-    // the encoder is a fifth of a 4K render at most — 14% measured on macOS
-    // (D-144) and 22.7% here, with NVENC itself worth 1.23x (D-159). So a
-    // usable line above is a fact about the machine, not a setting somebody has
-    // failed to turn on.
-    println!("    Films render on the CPU with libx264 (D-036). The encoder is at most a");
-    println!("    fifth of a 4K render, so hardware would not make one much faster (D-159).");
+    // conclusion. D-036 chose libx264 on quality grounds for this content.
+    //
+    // What this used to say was "the encoder is at most a fifth of a 4K render,
+    // so hardware would not make one much faster" — 14% on macOS (D-144) and
+    // 22.7% on a desktop Windows machine (D-159). Both numbers are real and
+    // both were taken on a fast CPU, which is the half the sentence left out:
+    // the encoder's *share* is a property of how slow the rest is. Measured on
+    // a 15W Core i3-1215U, 24 scenes at 720p, warm audio cache: libx264 279.1 s
+    // against Quick Sync 167.4 s, which is 1.67x and puts the encoder near 40%
+    // (D-198). So the old sentence talked an operator out of the flag on
+    // exactly the machine where it pays, and the honest answer names both ends
+    // of the range and the quality it costs.
+    println!("    Films render on the CPU with libx264 (D-036) — the better picture on slow");
+    println!("    pans across smooth gradients. What hardware buys depends on how slow the");
+    println!("    CPU is: about 1.2x on a desktop GPU (D-159), 1.67x on a 15W laptop");
+    println!("    (D-198). `--encoder auto` is a draft mode and costs quality: SSIM 0.985.");
 }
 
 /// Turn a `--encoder` value into the encoder a render will actually use

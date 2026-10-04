@@ -177,6 +177,22 @@ const CANDIDATES: &[Candidate] = &[
 ];
 
 /// Neither platform this project targets (D-071), but the module still builds.
+///
+/// `h264_vaapi` was here and is deliberately gone. It has no arm in
+/// [`VideoEncoder::quality_args`], so `every_candidate_has_quality_flags_of_its_own`
+/// failed outright on this platform — and the fix is removal rather than a new
+/// arm because VAAPI wants frames already on the GPU. Measured on an Intel
+/// i3-1215U with `renderD128` present: feeding it the software frames this
+/// pipeline produces (D-030..D-037 all run on the CPU) fails with
+/// `Could not open encoder before EOF`, `-22`. That is the same measured reason
+/// the Windows list above excludes it, so listing it could only add a line of
+/// `Unusable` noise under a heading about the operator's graphics card.
+///
+/// `h264_qsv` is here for the opposite reason: it is the one that *works*.
+/// Measured on that same machine, 720p software frames encode at 3.96x — and
+/// Quick Sync is what a low-power Intel laptop actually has, which is the
+/// machine class where offloading the encoder matters most. It already has a
+/// `quality_args` arm, so this costs one line and no new mapping.
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const CANDIDATES: &[Candidate] = &[
     Candidate {
@@ -184,8 +200,8 @@ const CANDIDATES: &[Candidate] = &[
         vendor: "NVIDIA (NVENC)",
     },
     Candidate {
-        encoder: "h264_vaapi",
-        vendor: "VA-API",
+        encoder: "h264_qsv",
+        vendor: "Intel (Quick Sync)",
     },
 ];
 

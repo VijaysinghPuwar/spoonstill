@@ -1156,21 +1156,69 @@ mod stress {
         }
     }
 
+    /// `cut` grows with the chapter, not with its square.
+    ///
+    /// This asserted `took.as_secs() < 20` for one 1 MB chapter, and its own
+    /// comment said what it was for: "the point is linear, not quadratic".
+    /// A wall clock does not say that. It says how fast the machine is — so on
+    /// a 15 W Core i3 it **failed**, having passed on the same tree minutes
+    /// earlier on an idle one (D-198). Raising the bound is the wrong repair:
+    /// a 19-second quadratic cut would pass a 20-second bound just as happily,
+    /// which is D-116's trap — a green assertion that asserts nothing.
+    ///
+    /// So it measures the *ratio* instead. Both sizes are cut on the same
+    /// machine under the same load, which is what makes the comparison a
+    /// property of the algorithm rather than of the hardware: at 4x the input,
+    /// linear is about 4x the time and quadratic is about 16x. The bound is 8x
+    /// — comfortably above linear's 4 and comfortably below quadratic's 16.
+    ///
+    /// Fixed overhead only ever makes the ratio *smaller*, so it cannot make
+    /// this pass for a bad reason; and the small run is sized to take long
+    /// enough to measure, since a ratio against nearly zero is noise. The
+    /// absolute backstop is kept, but loose enough to mean "hung" rather than
+    /// "slow laptop".
     #[test]
-    fn a_long_chapter_cuts_in_well_under_a_second() {
-        let mut rng = Rng(42);
-        let mut text = String::new();
-        while text.len() < 1_000_000 {
-            text.push_str(&chapter(&mut rng));
-            text.push_str("\n\n");
+    fn a_long_chapter_cuts_linearly_not_quadratically() {
+        fn text_of(at_least: usize) -> String {
+            let mut rng = Rng(42);
+            let mut text = String::new();
+            while text.len() < at_least {
+                text.push_str(&chapter(&mut rng));
+                text.push_str("\n\n");
+            }
+            text
         }
-        let started = std::time::Instant::now();
-        let cuts = cut(&text, Pacing::DEFAULT);
-        let took = started.elapsed();
-        assert!(!cuts.is_empty());
-        // Generous, because a debug build on a shared machine is slow; the
-        // point is linear, not quadratic — a quadratic cut of 2 MB takes
-        // minutes.
-        assert!(took.as_secs() < 20, "{took:?} for {} bytes", text.len());
+        fn time_to_cut(text: &str) -> std::time::Duration {
+            let started = std::time::Instant::now();
+            let cuts = cut(text, Pacing::DEFAULT);
+            let took = started.elapsed();
+            assert!(!cuts.is_empty(), "cut {} bytes into nothing", text.len());
+            took
+        }
+
+        let small = text_of(250_000);
+        let large = text_of(small.len() * 4);
+        // Warm the path once so neither timing pays first-call costs.
+        let _ = time_to_cut(&small);
+
+        let small_took = time_to_cut(&small);
+        let large_took = time_to_cut(&large);
+
+        let grew = large.len() as f64 / small.len() as f64;
+        let slowed = large_took.as_secs_f64() / small_took.as_secs_f64().max(1e-6);
+        assert!(
+            slowed < 8.0,
+            "{grew:.1}x the text took {slowed:.1}x the time \
+             ({small_took:?} for {} bytes, {large_took:?} for {} bytes) — \
+             linear would be about {grew:.0}x, quadratic about {:.0}x",
+            small.len(),
+            large.len(),
+            grew * grew,
+        );
+        assert!(
+            large_took.as_secs() < 120,
+            "{large_took:?} for {} bytes is a hang, not a slow machine",
+            large.len()
+        );
     }
 }

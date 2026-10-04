@@ -190,6 +190,98 @@ cargo build --release -p spoonstill-cli
 cargo run --release -p spoonstill-desktop
 ```
 
+### If you are the Linux session — the gates are green here, and two things were not
+
+**`make gates` is 39 of 39 on Linux**, first run on this platform: M0 8/8, M1
+8/8, M2 23/23, no failures and **no skips**. `cargo test --workspace` green,
+`cargo clippy --workspace -- -D warnings` clean (the Tauri crate builds —
+`webkit2gtk-4.1` and GTK3 are present), `cargo fmt --check` clean. D-176 made
+the harness Windows-safe and it turns out to be Linux-safe too; nothing in
+`scripts/` needed a third branch.
+
+**Two defects were waiting here, and both are D-128's shape** — a rule applied
+to one platform and not its sibling (D-198):
+
+| | |
+|---|---|
+| `every_candidate_has_quality_flags_of_its_own` **failed** | the `cfg(not(macos, windows))` list shipped `h264_vaapi`, which has no `quality_args` arm — the exact silent quality regression D-162 wrote that test to catch. Replaced with `h264_qsv`, which works and already had an arm. |
+| `subdirectories` was dead code | every call site is macOS- or Windows-gated; it now carries `python_org_dirs`' own `#[cfg(any(macos, windows, test))]`. |
+
+**Both live inside non-target `cfg` blocks and doc comments, and both cross-checks
+pass with `-D warnings`** — `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`.
+That was the condition the work was done under and it is the condition to keep:
+**this platform is a place to find defects, not a platform to trade the other
+two for.**
+
+**The number `still doctor` printed was wrong on a slow machine**, which is the
+finding worth carrying. It said *"the encoder is at most a fifth of a 4K render,
+so hardware would not make one much faster"* — 14% on macOS (D-144), 22.7% on
+the Windows desktop (D-159), **both taken on a fast CPU**. The encoder's share
+is a property of how slow the rest is. Measured on a 15 W Core i3-1215U, 24 of
+the author's own scenes at 720p, audio cache warm, segments deleted each run:
+
+| encoder | `--jobs 4` | `--jobs 2` |
+|---|---|---|
+| `libx264` | **279.1 s** | 302.9 s |
+| `h264_qsv` | **167.4 s** | **161.4 s** |
+
+**1.67x, against 1.19–1.23x on an RTX 3060.** So the sentence talked an operator
+out of the flag on exactly the machine where it pays. **The default is
+unchanged** — SSIM 0.985 and 12% more bitrate is a real cost, and moving it
+would re-render every project on every disk (D-107, D-118). What changed is the
+sentence, which now names both ends of the range and what the flag costs. The
+QSV segment probes as an exact `SegmentProfile` match, so D-041 passes and the
+film's duration is `104.454667 s` either way.
+
+**D-076's cap of four was checked here and is right.** Same 24 scenes, warm
+audio:
+
+| `--jobs` | 1 | 2 | 3 | 4 | 6 | 8 |
+|---|---|---|---|---|---|---|
+| wall | 484.2 s | 302.9 s | **277.9 s** | 279.1 s | 282.8 s | 283.4 s |
+
+Flattens at three, regresses ~1.5% past four — the same shape as macOS's and
+Windows' curves. **Nothing changed.** A single `libx264` child alone drives this
+machine's load average to 10, which is why more workers buy so little; at
+`--jobs 4` the machine runs at load ~30 with ~170 FFmpeg threads on 8 logical
+cores and still gets no faster.
+
+**A wall-clock test was flaky here and is now a ratio.**
+`a_long_chapter_cuts_in_well_under_a_second` asserted `took.as_secs() < 20` in a
+debug build; it passed idle and **failed under load** on this machine. Its own
+comment said what it was for — *"the point is linear, not quadratic"* — which a
+clock does not say. Raising the bound is D-116's trap: a 19-second quadratic cut
+would pass just as happily. It is
+`a_long_chapter_cuts_linearly_not_quadratically` now and measures the **ratio**
+at 1x and 4x the text on the same machine under the same load: linear is ~4x,
+quadratic ~16x, the bound is 8. Mutation-tested — it reports **4.0x for 4.0x the
+text**, so the margin is 2x on each side.
+
+**At scale, nothing is wrong.** The author's 431-scene fixture, repeated forty
+times, is **17 240 scenes**:
+
+| | 431 | 17 240 |
+|---|---|---|
+| `still validate` | 9.94 s | **418 s** |
+| per scene | 24.2 ms | **24.2 ms** |
+| peak RSS | 151 MB | **243 MB** |
+
+**Linear in time and nearly flat in memory** — 40x the scenes for 1.6x the
+resident set, so there is no per-scene accumulation to find. During the render's
+planning phase the process holds **30 MB** at 17 240 scenes and only reaches
+**1494 MB** once four workers start, against D-144's model's 1908 MB: the model
+sits 28% above the measurement, the safe direction, exactly as it claims to.
+Memory is a function of the pool and the geometry and **not of the project
+size**.
+
+**What is deliberately not claimed.** The 40x project was **not rendered to
+completion**: at the measured throughput that is about 75 hours, so the
+at-scale check is orchestration, not 17 240 encodes. There is **no Linux
+release and no Linux CI leg**, and `README.md` still says the gates are
+macOS-only. VideoToolbox is still unverified by measurement. And `/tmp` on this
+machine is a **12 GB tmpfs** — building the 40x project there fills RAM and
+fails at scene 12 399, which is the harness's problem and not the product's.
+
 ### If you are the Windows session — read this before "optimising for Windows"
 
 **Most of that question already has a measured answer, and it was measured on

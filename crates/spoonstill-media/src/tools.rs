@@ -530,6 +530,12 @@ fn home_dir() -> Option<PathBuf> {
 /// entries back, and so the *newest* Python's directory is searched last
 /// rather than arbitrarily — a machine with two of them has two `edge-tts`
 /// shims and either runs.
+///
+/// Gated like [`python_org_dirs`]: every call site is inside a macOS or
+/// Windows block, so a build for anything else compiles this to dead code and
+/// `-D warnings` fails on a platform D-071 does not ship but a contributor may
+/// well be sitting at. The `test` arm keeps the unit tests on every platform.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn subdirectories(parent: &Path, leaf: &str) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(parent) else {
         return Vec::new();
