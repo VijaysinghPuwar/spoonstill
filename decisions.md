@@ -9771,3 +9771,135 @@ How it is built:
 - **The switch is in both places**: the window's Settings → *Graphics card*,
   and `still doctor --graphics on|off`, which also prints what renders will
   use.
+
+### D-200 — Undo checks the scene's content, and recovery checks the picture slot · Accepted
+
+**Reproduced in the review of v0.1.18, fixed 2026-10-04.** Replacing scene
+001's picture, moving that complete scene to position 002, then undoing the
+replacement put the old picture onto the *other* narration at 001 and said
+"Undone". `Placed` remembered a filename and Undo checked only that it still
+existed. The window retained that history across renumbering. The same weakness
+reached removed pictures and swaps, and a different picture written under the
+same filename also passed the check.
+
+**Each picture change carries evidence of its affected scenes.** Before any
+file moves, their filenames and streamed content hashes are captured, including
+narration and recordings, and the expected result is derived from the change.
+Undo verifies that result, the project root and any picture kept in `removed/`
+before moving anything. A bulk fill checks every affected scene first. A stale
+record refuses without changing files; it does not guess which renumbered scene
+the operator meant. The existing window reports the reason and pops that record
+as before. A narration edit also invalidates that scene's older picture record;
+this is the conservative reading of D-194's refusal when the scene changed.
+
+Evidence is content, not a timestamp: undoing successive replacements in order
+restores the bytes an older record expects and allows that older undo. The
+existing bounded, streamed hash reader is reused. Only affected scenes are
+hashed, with one directory walk for an entire bulk Undo; no whole-project media
+probe or persistent index is added. This checks stale state before an operation;
+it does not lock out an external editor modifying files concurrently.
+
+**A second reproduction stopped a swap after its first rename.** With
+`001.jpg` parked for `002` while `002.png` was still in place, D-121 recovery
+saw `002.jpg` free and moved the first picture there. The result was a missing
+picture at 001 and two at 002. `still validate` refused the project.
+
+Recovery now treats *any picture extension on the target scene* as an occupied
+picture slot. If the first park is all that happened, it rolls back; if both
+pictures were parked, it completes the swap. The rollback slot is checked by the
+same rule so a different-format replacement there is not joined by an old
+picture. Occupied picture stems are collected only when pictures are parked,
+and updated as recovery proceeds; healthy reads do no additional file probes.
+Existing parked names remain readable; no new journal format or migration is
+needed.
+
+**The shared recovery path needed its own check.** A whole-scene renumber may
+park a picture and its narration while the destination still has a silent
+picture of another format. Rolling back only the parked picture would send its
+words onto that other scene. Parked companions with the same source and
+destination now take one recovery direction together. The picture is restored
+last, preserving the evidence for that direction if recovery itself stops.
+Conflicting parked copies are left for validation rather than overwritten.
+Groups with no parked picture retain D-121's existing recovery behavior.
+
+**Regression evidence.** Seven new assertions failed against the unfixed code:
+placed/removed/swapped Undo after a scene reorder, same-name replacement,
+changed backup, preflight of every picture in a bulk Undo, and recovery after
+each rename of a mixed-extension swap. The companion test of successive Undo
+already passed and continues to protect that behavior. Recovery is checked at
+all five stopping points with same and different extensions and must leave one
+complete pair, unchanged narration, no parked files and an idempotent second
+recovery. An additional regression failed against the first recovery fix and
+checks that a parked narration rolls back with its picture, including a stop
+after the narration has returned. No Windows runtime claim is made here.
+
+**Final verification, 2026-10-05.** On macOS, `cargo test --workspace` passed
+765 / failed 0 / ignored 11; `make gates` passed 39/39; `make lint` and
+`cargo audit --deny warnings` passed. D-132's Windows cross-check passed with
+warnings denied. The full workspace output was kept.
+
+**One timing failure was captured rather than discarded.** An earlier full
+suite running concurrently with the gates failed the unchanged
+`edge_retry::a_stopped_run_does_not_try_again`: 2.415564916 s against its 2 s
+ceiling. It returned cancellation and made only one attempt; the timing
+assertion failed. The isolated test, a subsequent sequential full workspace
+run and the final gates all passed. The failed output is retained in
+`/tmp/spoonstill-picture-workspace-tests.log`; the passing full run is
+`/tmp/spoonstill-picture-workspace-final.log`. This identifies this failure,
+not the unnamed failure recorded on 2026-09-20.
+
+
+### D-201 — Which pass stopped is written down, not inferred one file at a time · Accepted
+
+**Found 2026-10-07 by killing `still move` and `still picture --to` at random
+on the author's 431 scenes**, every fifth picture a `.png` so D-200's mixed
+extensions were in play. Round 15 of the first 400 left
+`.arranging-206-to-207.jpg` and its `.txt` parked with both 206 and 207
+taken, and from then on **every arrange command refused the project**, naming
+the parked file as *"not a numbered scene"*. The one surface that repairs the
+folder turned it away, which is D-121's original failure by another road.
+
+**The cause is D-121's rule, not D-200's change to it.** `renumber` parks every
+file in film order (pass one) and then places them (pass two), and recovery
+decided each parked file alone: destination free means finish, otherwise roll
+back. In pass one a destination is often free only because *its owner was
+parked a moment earlier*. Moving 295 to 115 shifts 115..294 up by one; killed
+after old 205 and old 206 were parked and before old 207 was, recovery moved
+old 205 forward onto 206, found old 206's destination (207) still in place and
+its origin (206) just filled, and left it parked for good. D-121's 2000-scene
+kill test removed a scene, which shifts files *down*, and processing parked
+names in ascending order happens to resolve a downward shift. An upward shift
+is the ordinary case for "move this to the front".
+
+**The phase is decided once, before anything moves.** `renumber` writes
+`.arranging` (`PLACING_MARKER`) when pass one is complete and removes it after
+pass two; the picture swap writes it between its parks and its renames. With
+the marker, recovery finishes, which is D-121's rule. Without it, recovery
+rolls back, and that is exact: pass one only vacates names, so every parked
+file's origin is free. One more signal covers folders written by earlier
+builds and has no false positive in pass one: **any parked file whose origin
+is already taken** means something was placed, so that recovery finishes too.
+The marker is not named `.arranging-…`, which `still validate` counts as a
+file part-way through a rename, and recovery removes a stale one once nothing
+is parked.
+
+**What it gives up, stated.** A folder from an earlier build, killed in pass
+two where no placed file had landed on a parked file's origin, now rolls those
+files back rather than forward. Every file is visible and every scene keeps its
+pair, which is the property D-121 exists for; the order is a mix of before and
+after, and one more `still move` puts it where the operator wanted.
+
+**Evidence.** `a_renumber_stopped_in_pass_one_rolls_back_whatever_is_free`
+builds the stuck state on five scenes and fails against the previous rule with
+the files still parked. Two existing tests simulated pass two by hand without
+a marker and now write one; `an_unmarked_renumber_with_both_names_free_goes_back`
+and `a_swap_stopped_before_its_marker_is_undone` pin the other reading. The
+kill harness, `scripts/kill-stress.py` (not a gate: it needs the 431-scene
+fixture that `scripts/stress.sh` fetches), checks after every round that no
+picture or narration was lost, duplicated or separated from its partner, that
+a second recovery changes nothing, and that `still validate` passes: before the
+fix it stuck at round 15; after it, **1 200 rounds, 1 033 killed mid-run, 0
+failures** across three seeds. The render stress, run on the same tree before
+the fix, was unaffected by it: 431 scenes cold in 8 m 49 s, 431 lines spoken
+with no refusal, 1867.855 s against 1867.833 s expected. **Not run on
+Windows.**

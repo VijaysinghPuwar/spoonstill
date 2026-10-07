@@ -367,6 +367,33 @@ be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
 
+### State as of 2026-10-07, later — Undo checks content (D-200), and a killed move no longer locks the project (D-201), `v0.1.21`
+
+**D-200 is the author's own work**, written locally as "D-198" while upstream
+took D-198 and D-199 for something else; renumbered on merge, code citations
+included. Read **D-200 and D-201 before touching `picture::UndoState`,
+`undo`, `arrange::recover`, `renumber`, `PLACING_MARKER`, `slot_taken`, or
+the picture swap in `picture::move_to`.**
+
+**D-201 was found by a kill harness, not a render.** `still move` /
+`still picture --to` killed at random on the 431 scenes stuck at round 15:
+recovery decided each parked file alone, finished one onto a name that was free
+only because its owner had been parked, and stranded the owner — after which
+every arrange command refused the project. `renumber` and the picture swap now
+write `.arranging` between their passes; no marker means roll back (exact in
+pass one), the marker or any re-occupied origin means finish. Measured after:
+1 200 rounds, 1 033 mid-run kills, 0 failures. Re-run it with
+`python3 -I scripts/kill-stress.py target/release/still DIR/stress-431 WORK 400`
+after `scripts/stress.sh DIR` has fetched the fixture; it speaks nothing and
+is safe to loop. **`still validate` only reports
+an interrupted rename; an arrange command repairs it** — a harness that checks
+with `validate` alone reports the harness's own cascade, which is how the first
+run of this one misled for a minute.
+
+Render stress on the 431 scenes, cold: 8 m 49 s, no refusals, 1867.855 s
+against 1867.833 s, VideoToolbox (D-199's default). **Not run on Windows.**
+
+
 ### State as of 2026-10-07 — voices that went missing, and a graphics card nobody asked (D-199), `v0.1.20`
 
 **Run on Windows 11, the author's machine (RTX 3060).** Reported: *"some of

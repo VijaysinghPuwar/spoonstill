@@ -45,6 +45,7 @@
 //!   alone would silently unpair the narration — a scene that still renders,
 //!   with the wrong voice on it.
 
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -438,6 +439,16 @@ fn renumber(root: &Path, order: &[Scene]) -> Result<(), ArrangeError> {
         }
     }
 
+    // Pass one is complete, and that is written down before anything is placed
+    // (D-201): from here an interrupted run is finished, before it rolled back.
+    // If this write fails, nothing has been placed and rolling back is right.
+    let marker = root.join(PLACING_MARKER);
+    fs::write(&marker, b"").map_err(|source| ArrangeError::Io {
+        doing: "marking a renumber half done",
+        path: marker.clone(),
+        source,
+    })?;
+
     // Pass two: into place. The check above makes an occupied destination
     // unreachable; this is the net under it, because the one thing this module
     // must never do is write over a photograph. A parked file is recoverable
@@ -449,6 +460,8 @@ fn renumber(root: &Path, order: &[Scene]) -> Result<(), ArrangeError> {
         }
         rename(&parked, &destination)?;
     }
+    // Left behind only by a run that stops here, and `recover` removes it then.
+    let _ = fs::remove_file(&marker);
     Ok(())
 }
 
@@ -590,6 +603,19 @@ pub(crate) fn parked_name(from: &str, wanted: &str, extension: &str) -> String {
     format!(".arranging-{from}-to-{wanted}.{extension}")
 }
 
+/// Present while [`renumber`]'s pass two is placing files (D-201).
+///
+/// A parked name says where a file came from and where it was going, but not
+/// which pass stopped. In pass one a destination is often free only because
+/// its owner was parked a moment earlier, and finishing onto it strands that
+/// owner with both of its names taken. So the phase is written down: no marker
+/// means nothing was placed and every origin is still free, so recovery rolls
+/// back; the marker means pass two had begun, so recovery finishes.
+///
+/// A dot so the folder scan ignores it, and not `.arranging-`, which
+/// `still validate` counts as a file part-way through a rename.
+pub(crate) const PLACING_MARKER: &str = ".arranging";
+
 /// What a parked file says about itself: where it came from, where it was
 /// going, and its extension.
 fn parked_parts(name: &str) -> Option<(String, String, String)> {
@@ -618,7 +644,9 @@ fn parked_parts(name: &str) -> Option<(String, String, String)> {
 /// never *shown* to anybody in the half-renamed state. The rule is one line and
 /// it is decidable from the disk alone:
 ///
-/// - **If the file's destination is free, put it there.** That is pass two
+/// - **If the file's destination is free, put it there.** For a picture,
+///   another image extension on that scene also occupies the slot (D-200).
+///   That is pass two
 ///   resuming. After pass one every numbered name has been vacated, so this is
 ///   always the branch taken when the interruption happened during pass two.
 /// - **Otherwise put it back where it came from.** Its old name must be free,
@@ -672,23 +700,140 @@ pub fn recover(root: &Path) -> Result<usize, ArrangeError> {
         restored += 1;
     }
 
-    for (path, from, wanted, extension) in parked {
-        let destination = root.join(format!("{wanted}.{extension}"));
-        let target = if destination.exists() {
-            // Occupied: pass one had not finished, so this is a rollback.
-            root.join(format!("{from}.{extension}"))
-        } else {
-            destination
-        };
-        // If even that is taken there is nothing safe to do; leaving the file
-        // parked is better than overwriting one of the operator's photographs.
-        if target.exists() {
-            continue;
+    // D-200: recovery asks whether the scene has a picture, not whether it
+    // has this exact extension. Only scan for occupied slots when a picture
+    // actually needs recovering: healthy reads pay no extra metadata probes.
+    let mut picture_slots = HashSet::new();
+    if parked
+        .iter()
+        .any(|(path, ..)| has_extension(path, &IMAGE_EXTENSIONS))
+    {
+        let entries = fs::read_dir(root).map_err(|source| ArrangeError::Io {
+            doing: "reading picture slots for recovery",
+            path: root.to_path_buf(),
+            source,
+        })?;
+        for entry in entries {
+            let path = entry
+                .map_err(|source| ArrangeError::Io {
+                    doing: "reading a picture slot for recovery",
+                    path: root.to_path_buf(),
+                    source,
+                })?
+                .path();
+            if has_extension(&path, &IMAGE_EXTENSIONS)
+                && path.is_file()
+                && let Some(stem) = path.file_stem().and_then(OsStr::to_str)
+                && stem.parse::<usize>().is_ok()
+            {
+                picture_slots.insert(stem.to_owned());
+            }
         }
-        rename(&path, &target)?;
-        restored += 1;
+    }
+
+    let mut groups: BTreeMap<_, Vec<_>> = BTreeMap::new();
+    for (path, from, wanted, extension) in parked {
+        groups
+            .entry((from, wanted))
+            .or_default()
+            .push((path, extension));
+    }
+    // D-201: which pass stopped decides the direction for every file, so it is
+    // decided once, before anything moves. Pass one only vacates names, so
+    // while it runs every parked file's origin is free; an origin already
+    // filled means a file was placed there. The marker says the same for a
+    // renumber that wrote one. Deciding file by file finished onto names that
+    // were free only because their owners had been parked.
+    let marked = root.join(PLACING_MARKER);
+    let placing = marked.exists()
+        || groups
+            .iter()
+            .any(|((from, _), files)| slot_taken(root, from, files, &picture_slots));
+    for ((from, wanted), mut files) in groups {
+        let pictures = files
+            .iter()
+            .filter(|(path, _)| has_extension(path, &IMAGE_EXTENSIONS))
+            .count();
+        // Finish when pass two had begun; otherwise go back. The other name is
+        // the fallback, for a file whose first choice is taken.
+        let (first, second) = if placing {
+            (&wanted, &from)
+        } else {
+            (&from, &wanted)
+        };
+        let together = if pictures > 0 {
+            // A whole-scene renumber uses this journal too. Its narration
+            // must follow its picture, even when the destination is silent.
+            let occupied = |id: &String| slot_taken(root, id, &files, &picture_slots);
+            let target_id = if occupied(first) { second } else { first };
+            // Conflicting parked copies cannot both occupy one scene. Leave
+            // them visible to validation instead of overwriting either one.
+            let extensions: HashSet<_> = files
+                .iter()
+                .map(|(_, ext)| ext.to_ascii_lowercase())
+                .collect();
+            if pictures > 1 || extensions.len() != files.len() || occupied(target_id) {
+                continue;
+            }
+            Some(target_id)
+        } else {
+            None
+        };
+        // Keep the picture parked until its companions are restored. If
+        // recovery itself stops, the next call can still decide their route.
+        files.sort_by_key(|(path, _)| has_extension(path, &IMAGE_EXTENSIONS));
+        for (path, extension) in files {
+            let target_id = together.unwrap_or_else(|| {
+                if root.join(format!("{first}.{extension}")).exists() {
+                    second
+                } else {
+                    first
+                }
+            });
+            let target = root.join(format!("{target_id}.{extension}"));
+            let picture = has_extension(&path, &IMAGE_EXTENSIONS);
+            // Recheck before each rename; never overwrite a picture.
+            if target.exists() || (picture && picture_slots.contains(target_id)) {
+                continue;
+            }
+            rename(&path, &target)?;
+            if picture {
+                picture_slots.insert(target_id.clone());
+            }
+            restored += 1;
+        }
+    }
+
+    // The marker outlives pass two only if a run stopped before removing it.
+    // Once nothing is parked it describes nothing; while something still is,
+    // it keeps telling the next recovery which way that file was going.
+    if marked.exists() && !has_parked(root) {
+        let _ = fs::remove_file(&marked);
     }
     Ok(restored)
+}
+
+/// Whether scene `id` already holds a file these parked files would land on:
+/// the same name, or for a picture any picture on that scene (D-200).
+fn slot_taken(
+    root: &Path,
+    id: &str,
+    files: &[(PathBuf, String)],
+    picture_slots: &HashSet<String>,
+) -> bool {
+    files.iter().any(|(path, extension)| {
+        root.join(format!("{id}.{extension}")).exists()
+            || (has_extension(path, &IMAGE_EXTENSIONS) && picture_slots.contains(id))
+    })
+}
+
+/// Whether any file in the folder is still parked by a renumber.
+fn has_parked(root: &Path) -> bool {
+    fs::read_dir(root).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|entry| entry.file_name().to_str().and_then(parked_parts).is_some())
+    })
 }
 
 /// A path nothing is using yet.
@@ -1106,12 +1251,14 @@ mod tests {
     fn an_interrupted_renumber_is_finished_when_its_destination_is_free() {
         // Pass two was under way: everything has been parked, so every
         // numbered name is vacant and the parked file can simply be placed.
+        // The marker is what says pass two had begun (D-201).
         let project = Project::new("resume", &[]);
         fs::write(
             project.0.join(parked_name("003", "002", "jpg")),
             "the third photograph",
         )
         .expect("park");
+        fs::write(project.0.join(PLACING_MARKER), "").expect("mark");
 
         let restored = recover(&project.0).expect("recovers");
 
@@ -1122,6 +1269,26 @@ mod tests {
             "the file should have gone on to where it was headed"
         );
         assert!(parked(&project.0).is_empty());
+        assert!(!project.0.join(PLACING_MARKER).exists());
+    }
+
+    #[test]
+    fn an_unmarked_renumber_with_both_names_free_goes_back() {
+        // No marker and nothing in either name: pass one may not have ended,
+        // so the only reading that is right in both cases is "put it back"
+        // (D-201). Either way the photograph is visible again.
+        let project = Project::new("unmarked", &[]);
+        fs::write(
+            project.0.join(parked_name("003", "002", "jpg")),
+            "the third photograph",
+        )
+        .expect("park");
+
+        assert_eq!(recover(&project.0).expect("recovers"), 1);
+        assert_eq!(
+            fs::read_to_string(project.0.join("003.jpg")).expect("read"),
+            "the third photograph"
+        );
     }
 
     #[test]
@@ -1150,6 +1317,124 @@ mod tests {
             "the parked file must go back to its own name"
         );
         assert!(parked(&project.0).is_empty());
+    }
+
+    /// Found by killing `still move` at random on the author's 431 scenes
+    /// (D-201). Moving 005 to the front parks 005→001, 001→002, 002→003 … in
+    /// film order. Stopped after the third park, 001 and 002 are free because
+    /// their owners were parked, not because pass two had begun. Deciding each
+    /// file alone, recovery moved 001 forward onto 002 and then found 002's own
+    /// file with both of its names taken: parked for ever, and every arrange
+    /// command refused the project.
+    #[test]
+    fn a_renumber_stopped_in_pass_one_rolls_back_whatever_is_free() {
+        let project = Project::new(
+            "pass-one-shift",
+            &[("003", &["jpg", "txt"]), ("004", &["jpg", "txt"])],
+        );
+        for (from, wanted) in [("005", "001"), ("001", "002"), ("002", "003")] {
+            for extension in ["jpg", "txt"] {
+                fs::write(
+                    project.0.join(parked_name(from, wanted, extension)),
+                    format!("{from}.{extension}"),
+                )
+                .unwrap();
+            }
+        }
+
+        recover(project.path()).unwrap();
+
+        assert!(parked(project.path()).is_empty(), "{:?}", project.listing());
+        for stem in ["001", "002", "003", "004", "005"] {
+            for extension in ["jpg", "txt"] {
+                assert_eq!(
+                    fs::read_to_string(project.0.join(format!("{stem}.{extension}"))).unwrap(),
+                    format!("{stem}.{extension}"),
+                    "{stem}.{extension} is not where it started"
+                );
+            }
+        }
+    }
+
+    /// Pass two is marked, so once anything has been placed recovery finishes
+    /// rather than rolling back over a file that pass two put there.
+    #[test]
+    fn a_renumber_stopped_in_pass_two_is_finished() {
+        // Order [005, 001, 002, 003, 004]; pass two has placed 005 at 001.
+        let project = Project::new("pass-two-shift", &[]);
+        fs::write(project.0.join("001.jpg"), "005.jpg").unwrap();
+        fs::write(project.0.join("001.txt"), "005.txt").unwrap();
+        fs::write(project.0.join(PLACING_MARKER), "").unwrap();
+        for (from, wanted) in [
+            ("001", "002"),
+            ("002", "003"),
+            ("003", "004"),
+            ("004", "005"),
+        ] {
+            for extension in ["jpg", "txt"] {
+                fs::write(
+                    project.0.join(parked_name(from, wanted, extension)),
+                    format!("{from}.{extension}"),
+                )
+                .unwrap();
+            }
+        }
+
+        recover(project.path()).unwrap();
+
+        assert!(parked(project.path()).is_empty(), "{:?}", project.listing());
+        assert!(!project.0.join(PLACING_MARKER).exists());
+        for (stem, was) in [
+            ("001", "005"),
+            ("002", "001"),
+            ("003", "002"),
+            ("004", "003"),
+            ("005", "004"),
+        ] {
+            for extension in ["jpg", "txt"] {
+                assert_eq!(
+                    fs::read_to_string(project.0.join(format!("{stem}.{extension}"))).unwrap(),
+                    format!("{was}.{extension}")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_parked_picture_keeps_its_narration_when_recovery_rolls_back() {
+        // A whole-scene renumber uses the same journal as a picture swap.
+        // The destination can be a silent scene with another image format:
+        // its free .txt name must not draw this picture's narration away.
+        for already_restored in [false, true] {
+            let project = Project::new(
+                &format!("paired-rollback-{already_restored}"),
+                &[("002", &["png"])],
+            );
+            fs::write(project.0.join(parked_name("001", "002", "jpg")), "FIRST").unwrap();
+            let narration = if already_restored {
+                "001.txt".to_owned()
+            } else {
+                parked_name("001", "002", "txt")
+            };
+            fs::write(project.0.join(narration), "FIRST NARRATION").unwrap();
+
+            recover(project.path()).unwrap();
+
+            assert_eq!(
+                fs::read_to_string(project.0.join("001.jpg")).unwrap(),
+                "FIRST"
+            );
+            assert_eq!(
+                fs::read_to_string(project.0.join("001.txt")).unwrap(),
+                "FIRST NARRATION"
+            );
+            assert_eq!(
+                fs::read_to_string(project.0.join("002.png")).unwrap(),
+                "002.png"
+            );
+            assert!(!project.0.join("002.txt").exists());
+            assert!(parked(project.path()).is_empty());
+        }
     }
 
     /// A folder damaged by the build that shipped this bug has to be repairable

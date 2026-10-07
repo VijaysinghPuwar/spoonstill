@@ -21,12 +21,13 @@
 //! - **Only where scenes are numbered**, which is `arrange`'s rule: the scene
 //!   *is* its number, so a picture is put on a scene by naming it after one.
 
-use std::ffi::OsStr;
+use std::collections::{BTreeMap, HashMap};
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::arrange::{self, ArrangeError, REMOVED_DIR, Scene};
-use crate::import::rows::IMAGE_EXTENSIONS;
+use crate::import::rows::{AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, TEXT_EXTENSIONS};
 use crate::import::{MediaCheck, Role};
 
 /// Why a picture could not be placed, removed or moved.
@@ -163,6 +164,108 @@ fn to_bin(root: &Path, file: &Path) -> Result<PathBuf, PictureError> {
     Ok(destination)
 }
 
+/// The files an affected scene must still contain before Undo is safe (D-200).
+///
+/// Names identify positions, not persistent scenes. Content evidence includes
+/// the narration as well as the picture, so a renumber cannot substitute a
+/// different scene at the same name. Only affected files are hashed, streamed
+/// through the same bounded reader used for render cache keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndoState {
+    root: PathBuf,
+    scene: String,
+    files: BTreeMap<OsString, String>,
+}
+
+fn file_hash(path: &Path) -> Result<String, PictureError> {
+    spoonstill_media::scene::hash_file(path).map_err(|e| PictureError::Io {
+        doing: format!("checking {} before a picture change", path.display()),
+        detail: e.to_string(),
+    })
+}
+
+fn real_root(root: &Path) -> Result<PathBuf, PictureError> {
+    fs::canonicalize(root).map_err(|e| PictureError::Io {
+        doing: "reading the project folder".to_owned(),
+        detail: e.to_string(),
+    })
+}
+
+impl UndoState {
+    fn capture(root: &Path, scene: &Scene) -> Result<Self, PictureError> {
+        let files = scene
+            .files
+            .iter()
+            .map(|path| {
+                let name = path.file_name().unwrap_or(path.as_os_str()).to_os_string();
+                file_hash(path).map(|hash| (name, hash))
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            root: real_root(root)?,
+            scene: scene.id.clone(),
+            files,
+        })
+    }
+
+    fn take(&mut self, path: &Path) -> Result<String, PictureError> {
+        self.files
+            .remove(path.file_name().unwrap_or(path.as_os_str()))
+            .ok_or_else(|| PictureError::Io {
+                doing: "checking the scene before a picture change".to_owned(),
+                detail: "its files changed while they were being read — try again".to_owned(),
+            })
+    }
+
+    fn matches(
+        &self,
+        root: &Path,
+        files: &HashMap<OsString, Vec<PathBuf>>,
+    ) -> Result<bool, PictureError> {
+        if self.root != root {
+            return Ok(false);
+        }
+        let actual = files
+            .get(OsStr::new(&self.scene))
+            .map_or(&[][..], Vec::as_slice);
+        if actual.len() != self.files.len() {
+            return Ok(false);
+        }
+        for path in actual {
+            let name = path.file_name().unwrap_or(path.as_os_str());
+            let Some(expected) = self.files.get(name) else {
+                return Ok(false);
+            };
+            if file_hash(path)? != *expected {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// One directory walk per Undo, even for a five-hundred-picture fill. Files
+/// are hashed only when a saved state checks its affected scene below.
+fn current_files(root: &Path) -> Result<HashMap<OsString, Vec<PathBuf>>, PictureError> {
+    let read_error = |e: std::io::Error| PictureError::Io {
+        doing: "reading the project before Undo".to_owned(),
+        detail: e.to_string(),
+    };
+    let mut files: HashMap<OsString, Vec<PathBuf>> = HashMap::new();
+    for entry in fs::read_dir(root).map_err(read_error)? {
+        let path = entry.map_err(read_error)?.path();
+        if (arrange::has_extension(&path, &IMAGE_EXTENSIONS)
+            || arrange::has_extension(&path, &AUDIO_EXTENSIONS)
+            || arrange::has_extension(&path, &TEXT_EXTENSIONS))
+            && path.is_file()
+            && let Some(stem) = path.file_stem()
+        {
+            files.entry(stem.to_os_string()).or_default().push(path);
+        }
+    }
+    Ok(files)
+}
+
 /// What putting a picture on a scene did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Placed {
@@ -174,6 +277,8 @@ pub struct Placed {
     pub replaced: Option<PathBuf>,
     /// The name the replaced picture had in the project, so it can go back.
     pub replaced_name: Option<String>,
+    after: UndoState,
+    replaced_hash: Option<String>,
 }
 
 impl Placed {
@@ -218,6 +323,11 @@ pub fn set(
     let all = arrange::scenes(root)?;
     let scene = &all[find(&all, id)?];
 
+    // Capture the evidence before moving anything: an unreadable source or
+    // narration must fail without leaving a successful change with no Undo.
+    let mut after = UndoState::capture(root, scene)?;
+    let incoming_hash = file_hash(source)?;
+    let replaced_hash = picture_of(scene).map(|old| after.take(old)).transpose()?;
     let replaced = match picture_of(scene) {
         Some(old) => Some((old.clone(), to_bin(root, old)?)),
         None => None,
@@ -244,7 +354,12 @@ pub fn set(
                     detail,
                 });
             }
+            after
+                .files
+                .insert(OsString::from(&copied.name), incoming_hash);
             Ok(Placed {
+                after,
+                replaced_hash,
                 scene: scene.id.clone(),
                 file: copied.name,
                 replaced: replaced.map(|(_, binned)| binned),
@@ -372,11 +487,15 @@ pub fn remove(root: &Path, id: &str) -> Result<Change, PictureError> {
         .and_then(OsStr::to_str)
         .unwrap_or_default()
         .to_owned();
+    let mut after = UndoState::capture(root, scene)?;
+    let binned_hash = after.take(picture)?;
     let binned = to_bin(root, picture)?;
     Ok(Change::Removed {
         scene: scene.id.clone(),
         binned,
         name,
+        after,
+        binned_hash,
     })
 }
 
@@ -397,6 +516,10 @@ pub enum Change {
         binned: PathBuf,
         /// The name it had.
         name: String,
+        /// What the affected scene must still contain.
+        after: UndoState,
+        /// Content evidence for the picture kept in `removed/`.
+        binned_hash: String,
     },
     /// A picture moved, or two swapped.
     Moved(Moved),
@@ -416,14 +539,19 @@ pub fn undo(root: &Path, change: &Change) -> Result<String, PictureError> {
         doing: "undoing".to_owned(),
         detail: format!("{what} changed since, so nothing was undone"),
     };
+    let canonical = real_root(root)?;
+    let files = current_files(root)?;
     match change {
         Change::Placed(placed) => {
             for one in placed {
-                if !root.join(&one.file).is_file() {
+                if !one.after.matches(&canonical, &files)? {
                     return Err(changed(format!("scene {}'s picture", one.scene)));
                 }
                 if let Some(name) = &one.replaced_name
-                    && one.replaced.as_ref().is_none_or(|b| !b.is_file())
+                    && !match (&one.replaced, &one.replaced_hash) {
+                        (Some(path), Some(hash)) => path.is_file() && file_hash(path)? == *hash,
+                        _ => false,
+                    }
                 {
                     return Err(changed(format!("the old picture {name}")));
                 }
@@ -446,9 +574,15 @@ pub fn undo(root: &Path, change: &Change) -> Result<String, PictureError> {
             scene,
             binned,
             name,
+            after,
+            binned_hash,
         } => {
             let back = root.join(name);
-            if !binned.is_file() || back.exists() {
+            if !after.matches(&canonical, &files)?
+                || !binned.is_file()
+                || back.exists()
+                || file_hash(binned)? != *binned_hash
+            {
                 return Err(changed(format!("scene {scene}")));
             }
             fs::rename(binned, &back).map_err(|e| PictureError::Io {
@@ -458,6 +592,11 @@ pub fn undo(root: &Path, change: &Change) -> Result<String, PictureError> {
             Ok(format!("Undone — scene {scene} has its picture back."))
         }
         Change::Moved(moved) => {
+            for after in &moved.after {
+                if !after.matches(&canonical, &files)? {
+                    return Err(changed(format!("scene {}", after.scene)));
+                }
+            }
             move_to(root, &moved.to, &moved.from)?;
             Ok(format!(
                 "Undone — the picture is back on scene {}.",
@@ -476,6 +615,7 @@ pub struct Moved {
     pub to: String,
     /// Whether the scene it went to had a picture, which went the other way.
     pub swapped: bool,
+    after: [UndoState; 2],
 }
 
 impl Moved {
@@ -530,9 +670,24 @@ pub fn move_to(root: &Path, from: &str, to: &str) -> Result<Moved, PictureError>
         })
     };
 
-    // Parked first, under names that say where each is going (D-121), then
-    // into place. An interruption anywhere in here is finished by `recover`.
     let ours = extension(&moving);
+    let mut after_source = UndoState::capture(root, source)?;
+    let mut after_target = UndoState::capture(root, target)?;
+    let moving_hash = after_source.take(&moving)?;
+    if let Some(theirs) = &other {
+        let other_hash = after_target.take(theirs)?;
+        after_source.files.insert(
+            OsString::from(format!("{}.{}", source.id, extension(theirs))),
+            other_hash,
+        );
+    }
+    after_target
+        .files
+        .insert(OsString::from(format!("{}.{ours}", target.id)), moving_hash);
+
+    // Parked first, under names that say where each is going (D-121), then
+    // into place. D-200 makes recovery treat another image extension as an
+    // occupied picture slot too, so an interrupted first park rolls back.
     let parked_ours =
         arrange::unique(root.join(arrange::parked_name(&source.id, &target.id, &ours)));
     rename(&moving, &parked_ours)?;
@@ -546,15 +701,24 @@ pub fn move_to(root: &Path, from: &str, to: &str) -> Result<Moved, PictureError>
         }
         None => None,
     };
+    // Both parked: from here an interruption is finished rather than undone,
+    // and the disk alone cannot say so once neither name is taken (D-201).
+    let marker = root.join(arrange::PLACING_MARKER);
+    fs::write(&marker, b"").map_err(|e| PictureError::Io {
+        doing: format!("marking {} half done", marker.display()),
+        detail: e.to_string(),
+    })?;
     rename(&parked_ours, &root.join(format!("{}.{ours}", target.id)))?;
     if let Some((parked, ext)) = &parked_theirs {
         rename(parked, &root.join(format!("{}.{ext}", source.id)))?;
     }
+    let _ = fs::remove_file(&marker);
 
     Ok(Moved {
         from: source.id.clone(),
         to: target.id.clone(),
         swapped: other.is_some(),
+        after: [after_source, after_target],
     })
 }
 
@@ -768,6 +932,140 @@ mod tests {
     }
 
     #[test]
+    fn undo_refuses_a_placed_picture_after_scene_reordering() {
+        let s = project("undo-reordered");
+        fs::write(s.root().join("002.jpeg"), "SECOND").unwrap();
+        let placed = set(&s.root(), "001", &s.0.join("in/flow-image.jpeg"), &Looks).unwrap();
+        arrange::move_to(&s.root(), "001", 2).unwrap();
+        assert!(undo(&s.root(), &Change::Placed(vec![placed])).is_err());
+        assert_eq!(s.read("001.jpeg"), "SECOND");
+        assert_eq!(s.read("001.txt"), "two");
+        assert_eq!(s.read("002.jpeg"), "FLOW");
+        assert_eq!(s.read("002.txt"), "one");
+        assert_eq!(s.read("removed/001.jpeg"), "PIC-1");
+    }
+
+    #[test]
+    fn undo_refuses_a_removed_picture_after_scene_reordering() {
+        let s = project("undo-removed-reordered");
+        let removed = remove(&s.root(), "001").unwrap();
+        arrange::move_to(&s.root(), "001", 2).unwrap();
+        assert!(undo(&s.root(), &removed).is_err());
+        assert!(!s.root().join("001.jpeg").exists());
+        assert_eq!(s.read("001.txt"), "two");
+        assert_eq!(s.read("removed/001.jpeg"), "PIC-1");
+    }
+
+    #[test]
+    fn undo_refuses_a_swap_after_scene_reordering() {
+        let s = project("undo-swap-reordered");
+        let moved = move_to(&s.root(), "001", "004").unwrap();
+        arrange::move_to(&s.root(), "001", 4).unwrap();
+        assert!(undo(&s.root(), &Change::Moved(moved)).is_err());
+        assert_eq!(s.read("004.png"), "PIC-4");
+        assert_eq!(s.read("004.txt"), "one");
+        assert_eq!(s.read("003.jpeg"), "PIC-1");
+        assert_eq!(s.read("003.txt"), "four");
+        assert!(!s.root().join("001.png").exists());
+    }
+
+    #[test]
+    fn undo_refuses_a_picture_replaced_under_the_same_name() {
+        let s = project("undo-same-name");
+        let placed = set(&s.root(), "001", &s.0.join("in/flow-image.jpeg"), &Looks).unwrap();
+        fs::write(s.root().join("001.jpeg"), "EDIT").unwrap();
+        assert!(undo(&s.root(), &Change::Placed(vec![placed])).is_err());
+        assert_eq!(s.read("001.jpeg"), "EDIT");
+        assert_eq!(s.read("removed/001.jpeg"), "PIC-1");
+    }
+
+    #[test]
+    fn undo_refuses_a_changed_backup_before_touching_the_current_picture() {
+        let s = project("undo-backup-edited");
+        let placed = set(&s.root(), "001", &s.0.join("in/flow-image.jpeg"), &Looks).unwrap();
+        fs::write(placed.replaced.as_ref().unwrap(), "EDITED BACKUP").unwrap();
+        assert!(undo(&s.root(), &Change::Placed(vec![placed])).is_err());
+        assert_eq!(s.read("001.jpeg"), "FLOW");
+        assert_eq!(s.read("removed/001.jpeg"), "EDITED BACKUP");
+    }
+
+    #[test]
+    fn undo_checks_every_picture_in_a_fill_before_changing_any() {
+        let s = project("undo-fill-edited");
+        let sources = [
+            s.0.join("in/flow-image.jpeg"),
+            s.0.join("in/flow-image.jpeg"),
+        ];
+        let filled = fill(&s.root(), "002", &sources, &Looks).unwrap();
+        fs::write(s.root().join("002.jpeg"), "EDIT").unwrap();
+        assert!(undo(&s.root(), &Change::Placed(filled.placed)).is_err());
+        assert_eq!(s.read("002.jpeg"), "EDIT");
+        assert_eq!(s.read("003.jpeg"), "FLOW");
+    }
+
+    #[test]
+    fn successive_replacements_can_still_be_undone_in_order() {
+        let s = project("undo-chain");
+        let first = set(&s.root(), "001", &s.0.join("in/flow-image.jpeg"), &Looks).unwrap();
+        fs::write(s.0.join("in/next.png"), "NEXT").unwrap();
+        let second = set(&s.root(), "001", &s.0.join("in/next.png"), &Looks).unwrap();
+        undo(&s.root(), &Change::Placed(vec![second])).unwrap();
+        assert_eq!(s.read("001.jpeg"), "FLOW");
+        undo(&s.root(), &Change::Placed(vec![first])).unwrap();
+        assert_eq!(s.read("001.jpeg"), "PIC-1");
+    }
+
+    #[test]
+    fn every_swap_interruption_recovers_one_complete_pair() {
+        for ext in ["jpeg", "png"] {
+            for stop in 0..=4 {
+                let s = project(&format!("swap-every-step-{ext}-{stop}"));
+                if ext == "jpeg" {
+                    fs::rename(s.root().join("004.png"), s.root().join("004.jpeg")).unwrap();
+                }
+                let ours = arrange::parked_name("001", "004", "jpeg");
+                let theirs = arrange::parked_name("004", "001", ext);
+                let steps = [
+                    ("001.jpeg".to_owned(), ours.clone()),
+                    (format!("004.{ext}"), theirs.clone()),
+                    (ours, "004.jpeg".to_owned()),
+                    (theirs, format!("001.{ext}")),
+                ];
+                for (from, to) in steps.iter().take(stop) {
+                    fs::rename(s.root().join(from), s.root().join(to)).unwrap();
+                }
+                arrange::recover(&s.root()).unwrap();
+                let first: Vec<_> = s
+                    .listing()
+                    .into_iter()
+                    .filter(|n| n.starts_with("001.") && !n.ends_with(".txt"))
+                    .collect();
+                let last: Vec<_> = s
+                    .listing()
+                    .into_iter()
+                    .filter(|n| n.starts_with("004.") && !n.ends_with(".txt"))
+                    .collect();
+                assert_eq!(first.len(), 1, "{ext}, stop {stop}: {:?}", s.listing());
+                assert_eq!(last.len(), 1, "{ext}, stop {stop}: {:?}", s.listing());
+                let pair = (s.read(&first[0]), s.read(&last[0]));
+                assert!(
+                    pair == ("PIC-1".into(), "PIC-4".into())
+                        || pair == ("PIC-4".into(), "PIC-1".into()),
+                    "{ext}, stop {stop}: {pair:?}"
+                );
+                assert_eq!(s.read("001.txt"), "one");
+                assert_eq!(s.read("004.txt"), "four");
+                assert!(!s.listing().iter().any(|n| n.starts_with('.')));
+                assert_eq!(
+                    arrange::recover(&s.root()).unwrap(),
+                    0,
+                    "recovery is idempotent"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_change_can_be_taken_back_and_nothing_is_deleted() {
         let s = project("undo");
         let original = s.listing();
@@ -876,7 +1174,31 @@ mod tests {
     fn a_swap_interrupted_half_way_is_finished_the_next_time_anyone_looks() {
         let s = project("swap-interrupted");
         // What a process killed between the two parks and the two renames
-        // leaves: both pictures parked, neither in place.
+        // leaves: both pictures parked, neither in place, and the marker that
+        // says the parks were finished (D-201).
+        fs::rename(
+            s.root().join("001.jpeg"),
+            s.root().join(arrange::parked_name("001", "004", "jpeg")),
+        )
+        .expect("park");
+        fs::rename(
+            s.root().join("004.png"),
+            s.root().join(arrange::parked_name("004", "001", "png")),
+        )
+        .expect("park");
+        fs::write(s.root().join(arrange::PLACING_MARKER), "").expect("mark");
+
+        arrange::scenes(&s.root()).expect("reads, and recovers");
+        assert_eq!(s.read("004.jpeg"), "PIC-1");
+        assert_eq!(s.read("001.png"), "PIC-4");
+        assert!(!s.root().join(arrange::PLACING_MARKER).exists());
+    }
+
+    #[test]
+    fn a_swap_stopped_before_its_marker_is_undone() {
+        let s = project("swap-unmarked");
+        // Killed after both parks and before the marker: nothing was placed,
+        // so both pictures go back where they were (D-201).
         fs::rename(
             s.root().join("001.jpeg"),
             s.root().join(arrange::parked_name("001", "004", "jpeg")),
@@ -889,8 +1211,8 @@ mod tests {
         .expect("park");
 
         arrange::scenes(&s.root()).expect("reads, and recovers");
-        assert_eq!(s.read("004.jpeg"), "PIC-1");
-        assert_eq!(s.read("001.png"), "PIC-4");
+        assert_eq!(s.read("001.jpeg"), "PIC-1");
+        assert_eq!(s.read("004.png"), "PIC-4");
     }
 
     #[test]
