@@ -116,19 +116,23 @@ From a terminal, one command checks everything and offers to fetch what is
 missing:
 
 ```bash
-still doctor              # what is here, what is not
-still doctor --install    # fetch whatever is missing
+still doctor                  # what is here, what is not
+still doctor --install        # fetch whatever is missing
+still doctor --graphics off   # render on the processor instead of the graphics card
 ```
 
 ```
   ok       ffmpeg — turning your photos into video
-           9.0.1
+           9.0.1-full_build-www.gyan.dev
   ok       edge — reading your written lines aloud
 
   graphics — hardware encoders this machine can run
-    usable               Apple (VideoToolbox) (h264_videotoolbox)
-    Films render on the CPU with libx264 (D-036). The encoder is at most a
-    fifth of a 4K render, so hardware would not make one much faster (D-159).
+    usable               NVIDIA (NVENC) (h264_nvenc)
+    usable               AMD (AMF) (h264_amf)
+    no                   Intel (Quick Sync) (h264_qsv)
+    usable               Windows (Media Foundation) (h264_mf)
+
+    Renders use the graphics card, NVIDIA (NVENC) unless told otherwise.
 ```
 
 Or install them yourself, once:
@@ -537,6 +541,7 @@ bad row. It names the file, the scene and what to do:
 | *N files are part-way through a rename that did not finish* | A `move`/`remove` was killed. Run `still remove` or `still move` on that project and it puts them back. |
 | *…characters no bundled font can draw…* | The caption would render as empty boxes. Bengali, Tamil, Arabic, Chinese and emoji are not drawn yet. |
 | *`edge-tts` is not on this machine…* | `still doctor --install`, or press **Install it for me** in the window. |
+| *Microsoft's voice service has stopped answering for now…* | A **warning** during a render, not a failure. The free voice service stops answering after a few hundred new lines; the render waits for it (up to an hour) and keeps encoding every scene already spoken. Nothing is lost if you stop — every spoken line is kept, and the next render asks only for the rest. |
 | *2 of 3 stills are smaller than the 1920x1080 frame…* | A **warning**, not an error — the film renders. It names a `--short-edge` that shows every scene at its own detail. |
 
 **If a render fails, nothing is left behind and nothing is hidden.** The film
@@ -602,7 +607,7 @@ makes sense.
 | `still voices [FILTER]` | List a provider's voices. `--install` fetches the provider's tooling first. `--use VOICE` makes one the fallback for every project on this machine, `--forget` clears it. |
 | `still subtitles` | The six themes and what each is for. |
 | `still resolutions` | Every size in every shape, with pixel dimensions. Alias: `formats`. |
-| `still doctor` | Every external program this needs, plus the hardware encoders this machine can actually run. `--install` fetches what is missing. |
+| `still doctor` | Every external program this needs, plus the hardware encoders this machine can actually run and which one renders use. `--install` fetches what is missing; `--graphics on\|off` chooses the graphics card or the processor. |
 | `still licences` | The licences of everything built into the binary. Alias: `licenses`. |
 | `still diagnostics export` | One sendable file describing what happened, credentials redacted. |
 | `still diagnostics where` | Where the logs are being written. |
@@ -621,32 +626,42 @@ makes sense.
 | `--resolution SIZE` | `720p`, `1080p`, `1440p`/`2k`, `2160p`/`4k`. |
 | `--short-edge PIXELS` | The same, as a number. Conflicts with `--resolution` on purpose. |
 | `--fps N` | Frame rate for this run. |
-| `--encoder auto\|off\|NAME` | Encode with the graphics card instead of the CPU. A draft mode — see below. |
+| `--encoder auto\|off\|NAME` | Which encoder makes the video, for this run. Left off, the graphics card when this machine has one that works — see below. |
 | `--keep-cache` | Keep every superseded segment instead of sweeping the oldest. |
 | `--force` | Kept for scripts. It cannot override a lock a *running* render holds. |
 
 Every one of these is **an override for one run**. `project.yaml` is an input;
 the renderer never writes to it.
 
-#### `--encoder`, and why it is off by default
+#### The graphics card, and when to turn it off
 
-`still doctor` lists the hardware encoders this machine can actually run — it
-proves each one by **encoding a frame with it**, because `ffmpeg -encoders`
-lists encoders that do not work here. `--encoder auto` then uses the best of
-them; `--encoder h264_nvenc` (or `h264_amf`, `h264_qsv`,
-`h264_videotoolbox`) asks for one by name, and is refused with the usable list
-if this machine cannot run it.
+**Renders use the graphics card by default** when this machine has one that
+works, and say so on their first line (`encoded on the graphics card, NVIDIA
+(NVENC)`). "Works" is proved, not assumed: `still doctor` **encodes a frame**
+with every candidate, because `ffmpeg -encoders` lists encoders that do not
+work here. A machine without one renders on the processor with libx264, and so
+does any single scene the card refuses — a driver limit or a game holding the
+card costs that scene some speed, never the film.
 
-It is **a draft mode, not a better default**, for three measured reasons:
+Turn it off in the window's **Settings → Graphics card**, or with
+`still doctor --graphics off`; `--encoder off` does it for one run, and
+`--encoder h264_nvenc` (or `h264_amf`, `h264_qsv`, `h264_videotoolbox`) asks
+for one by name. What it is worth, measured:
 
-- **It is worth about 1.23x.** On an RTX 3060, one 4K segment: the filter graph
-  alone is 4.53 s, shipped `libx264 -preset medium` is 5.86 s, `h264_nvenc` is
-  4.78 s. The encoder is under a quarter of the work; the rest is the Ken Burns
-  filter chain, which runs on the CPU either way.
-- **It saves no memory at all.** The memory is the prescale canvas — 11520×6480
-  at 4K — and that is held in the CPU filter graph, not on the card.
-- **Hardware H.264 bands** on slow pans across large smooth gradients, which is
-  exactly what a Ken Burns move over a photograph is.
+- **Speed: about 1.2x on a desktop GPU, 1.67x on a slow laptop.** On an RTX
+  3060, one 4K segment: the filter graph alone is 4.53 s, `libx264 -preset
+  medium` 5.86 s, `h264_nvenc` 4.78 s. Most of a render is the Ken Burns filter
+  chain, which runs on the processor either way — so the card helps most where
+  the processor is slow.
+- **Memory: no saving.** The memory is the prescale canvas — 11520×6480 at 4K —
+  held in the processor's filter graph, not on the card.
+- **Quality: slightly lower.** Hardware H.264 bands a little on slow pans across
+  large smooth gradients (SSIM 0.985 against libx264). If a film is for the
+  big screen, `off` is the sharper picture.
+
+Switching never loses work: each encoder keys its own segments, so switching
+back reuses every segment the other one made. The first render of a project
+made before v0.1.20 re-encodes its video once; its narration is reused.
 
 If a render feels slow, the far bigger lever is usually **rendering at the size
 your photographs actually are**. `still validate` and `still render` both say so
@@ -842,11 +857,11 @@ before it is called a test**.
 
 | | |
 |---|---|
-| Rust | **~48,600 lines** across 6 crates + a Tauri app · edition 2024, pinned to 1.94 |
+| Rust | **~50,100 lines** across 6 crates + a Tauri app · edition 2024, pinned to 1.94 |
 | UI | ~4,800 lines of hand-written HTML/CSS/JS — no framework, no build step |
-| Tests | **776 `#[test]` functions** — 47 unit-test modules, 17 integration suites |
+| Tests | **789 `#[test]` functions** — 47 unit-test modules, 17 integration suites |
 | Exit gates | **39** shell gates that render real media and assert real properties |
-| Decisions | **165 numbered decisions** in `decisions.md`, each Accepted / Open / Superseded |
+| Decisions | **166 numbered decisions** in `decisions.md`, each Accepted / Open / Superseded |
 | Direct dependencies | **12 third-party crates** at runtime (plus one build-time, one dev-only) — and `spoonstill-core` has **none** |
 | `unsafe` | forbidden at the workspace root |
 | CI jobs per push | 6 — advisories, macOS, Windows, both installers executed, and the gates |
@@ -860,7 +875,8 @@ measured here. A sample of what is in it, and what each number changed:
 
 | Question | Answer | What it decided |
 |---|---|---|
-| Is the encoder the bottleneck? | At 4K it is **14%** of the work on macOS, **22.7%** on Windows | GPU encoding is not the fix. NVENC measured at 1.23× and **zero** memory saved — the memory is the CPU prescale canvas. |
+| Is the encoder the bottleneck? | At 4K it is **14%** of the work on macOS, **22.7%** on Windows, ~40% on a 15 W laptop | The graphics card is the default since v0.1.20 and worth 1.2–1.67x, but saves **zero** memory — the memory is the CPU prescale canvas. |
+| Why do some lines fail after a few hundred? | The voice service cut off at **335–390 lines** whether asked at 100 a minute or 20 | It is a count, not a rate. Renders wait it out (up to an hour) instead of failing. |
 | How many workers? | The curve flattens at 3, regresses at 12, on both platforms | The pool caps at 4 — and then again at what RAM affords. |
 | What does a worker cost? | 768 MB at 1080p, **2630 MB at 4K** | A 4K render on 8 GB drops to two workers instead of freezing the machine. |
 | Does concat validate anything? | **No.** A mismatched segment joins with exit 0 | We assert the full segment profile ourselves, per field. |
@@ -1040,7 +1056,7 @@ Read in this order; later files never override earlier ones.
 
 | File | What it is |
 |---|---|
-| [`decisions.md`](decisions.md) | **Single source of truth.** 165 numbered decisions, each with the evidence that produced it. |
+| [`decisions.md`](decisions.md) | **Single source of truth.** 166 numbered decisions, each with the evidence that produced it. |
 | [`plan.md`](plan.md) | Milestones M0–M5, each with entry conditions, deliverables, and exit gates that are runnable commands. |
 | [`ffmpeg-findings.md`](ffmpeg-findings.md) | Benchmarks measured on real hardware, with reproduction commands. Evidence, not policy. |
 | [`PROCESS.md`](PROCESS.md) | How the work is actually done — reproduce, fix, prove the test fails without the fix. |

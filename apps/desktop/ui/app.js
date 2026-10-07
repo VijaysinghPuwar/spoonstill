@@ -220,6 +220,40 @@ async function openSettings() {
   await checkProvider();
   await loadFallbackVoice();
   await loadActivityLog();
+  await loadGraphics();
+}
+
+// Whether renders use the graphics card (D-199). Detection encodes a test
+// frame, so the first answer can take a second or two.
+function drawGraphics(view) {
+  el("app-graphics").value = view.on ? "on" : "off";
+  const said = el("app-graphics-said");
+  said.classList.remove("bad");
+  if (view.usable.length === 0) {
+    said.textContent = "No graphics card this machine can encode with — renders use the processor.";
+  } else {
+    said.textContent = `Renders use ${view.using}.`;
+  }
+}
+
+async function loadGraphics() {
+  try {
+    drawGraphics(await invoke("graphics_status"));
+  } catch (error) {
+    el("app-graphics-said").classList.add("bad");
+    el("app-graphics-said").textContent = String(error);
+  }
+}
+
+async function setGraphics(value) {
+  const said = el("app-graphics-said");
+  said.textContent = "Saving…";
+  try {
+    drawGraphics(await invoke("set_use_graphics", { on: value === "on" }));
+  } catch (error) {
+    said.classList.add("bad");
+    said.textContent = String(error);
+  }
 }
 
 // One CSV, every project, every event (D-093).
@@ -1645,6 +1679,9 @@ async function render() {
   progress.onmessage = (event) => {
     if (event.kind === "planned") {
       note(`${event.scenes} scenes, ${event.jobs} at a time, ${event.audio_jobs} narrations at a time`);
+      // Every render says what encodes it, so "is it using my graphics card"
+      // has an answer where the operator is looking (D-199).
+      note(`video encoded on ${event.encoder}`);
       // Why the pool is smaller than the machine's cores, said once, where the
       // operator is already looking (D-144).
       if (event.limited_by_memory) {
@@ -2611,6 +2648,7 @@ el("chapter-back").addEventListener("click", () => {
 el("chapter-add").addEventListener("click", () => guard(addChapter()));
 el("chapter-by").addEventListener("change", showSeconds);
 el("app-chapter-cut").addEventListener("change", (e) => guard(setCutDefault(e.target.value)));
+el("app-graphics").addEventListener("change", (e) => guard(setGraphics(e.target.value)));
 el("chapter-text").addEventListener("keydown", (event) => {
   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();

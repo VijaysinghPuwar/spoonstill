@@ -713,6 +713,8 @@ fn a_refused_connection_waits_out_the_cool_down_before_trying_again() {
         gap: Duration::ZERO,
         cooldown,
         max_cooldown: cooldown,
+        patience: Duration::ZERO,
+        patience_cold: Duration::ZERO,
     };
     let started = std::time::Instant::now();
     say(

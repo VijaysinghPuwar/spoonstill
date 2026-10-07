@@ -47,6 +47,20 @@ pub struct Machine {
     /// `time`, or `1`, `2`, `3` — sentences per scene. Absent means `time`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chapter_cut: Option<String>,
+    /// Whether a render with no encoder named uses the graphics card when this
+    /// machine has one that works (D-199). Absent means **yes**: asked for by
+    /// the author, who could not tell whether their RTX 3060 was used at all,
+    /// and it was not. `false` is D-036's libx264 on the processor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_graphics: Option<bool>,
+}
+
+impl Machine {
+    /// The answer [`Machine::use_graphics`] stands for when it is absent.
+    #[must_use]
+    pub fn uses_graphics(&self) -> bool {
+        self.use_graphics.unwrap_or(true)
+    }
 }
 
 /// Where the file is, whether or not it exists yet.
@@ -246,9 +260,46 @@ pub fn set_chapter_cut(by: Option<&str>) -> Result<Machine, String> {
     Ok(settings)
 }
 
+/// Turn the graphics card on or off for renders that name no encoder
+/// (D-199). On is the default and is stored as nothing, so the file only ever
+/// records a departure from it.
+///
+/// # Errors
+///
+/// As [`save`].
+pub fn set_use_graphics(on: bool) -> Result<Machine, String> {
+    let mut settings = load();
+    settings.use_graphics = (!on).then_some(false);
+    save(&settings)?;
+    Ok(settings)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_graphics_card_is_used_unless_the_file_says_otherwise() {
+        let absent: Machine = serde_yaml_ng::from_str(
+            "default_voice: en-GB-RyanNeural
+",
+        )
+        .expect("an old file still parses");
+        assert!(absent.uses_graphics(), "absent means yes (D-199)");
+        let off: Machine = serde_yaml_ng::from_str(
+            "use_graphics: false
+",
+        )
+        .expect("parses");
+        assert!(!off.uses_graphics());
+        // The default is never written down, so a file from before D-199 and
+        // a file after it with the default look the same.
+        assert!(
+            !serde_yaml_ng::to_string(&Machine::default())
+                .expect("serializes")
+                .contains("use_graphics")
+        );
+    }
 
     /// The one thing that must not drift: this file sits beside `runs.csv`, in
     /// the directory the CLI already uses, or the CLI cannot see it.
@@ -390,6 +441,7 @@ mod tests {
         let full = Machine {
             default_voice: Some("en-GB-RyanNeural".to_owned()),
             chapter_cut: Some("2".to_owned()),
+            use_graphics: Some(false),
         };
         let text = serde_yaml_ng::to_string(&full).expect("serialise");
         assert_eq!(

@@ -173,6 +173,72 @@ pub fn hardware() -> Vec<AccelReport> {
         .collect()
 }
 
+/// The environment variable that overrides the machine's graphics setting for
+/// one process: `off` (or `0`, `no`, `cpu`) renders on the processor, `on` asks
+/// the card. The gate scripts set `off`, because their byte-identity
+/// assertions describe libx264 and must not change with the machine running
+/// them (D-199).
+pub const GRAPHICS_ENV: &str = "SPOONSTILL_GRAPHICS";
+
+/// The encoder a render uses when nobody named one (D-199).
+///
+/// The graphics card, when the machine has one that **encoded a frame here**
+/// (D-159's proof, never a listing) and the operator has not turned it off in
+/// Settings, `still graphics off`, or [`GRAPHICS_ENV`]; otherwise D-036's
+/// libx264. Detection costs a few FFmpeg spawns, so it is done once per process
+/// and remembered — a window renders many times and asks once.
+///
+/// Called by the control surfaces, never by [`crate::film::render_project`]
+/// itself: a library call that names no encoder still means libx264, so every
+/// test that pins a film's bytes keeps describing the same film.
+#[must_use]
+pub fn default_encoder() -> spoonstill_media::hardware::VideoEncoder {
+    use spoonstill_media::hardware::VideoEncoder;
+    let wanted = match std::env::var(GRAPHICS_ENV)
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("off" | "0" | "no" | "false" | "cpu" | "software") => false,
+        Some("on" | "1" | "yes" | "true" | "gpu" | "auto") => true,
+        _ => crate::machine::load().uses_graphics(),
+    };
+    if !wanted {
+        return VideoEncoder::Software;
+    }
+    best_graphics().unwrap_or(VideoEncoder::Software)
+}
+
+/// The best hardware encoder this machine can run, found once per process.
+#[must_use]
+pub fn best_graphics() -> Option<spoonstill_media::hardware::VideoEncoder> {
+    static BEST: std::sync::OnceLock<Option<spoonstill_media::hardware::VideoEncoder>> =
+        std::sync::OnceLock::new();
+    BEST.get_or_init(|| {
+        let tools = spoonstill_media::Tools::from_env();
+        if !tools.ffmpeg().is_file() {
+            return None;
+        }
+        spoonstill_media::hardware::best_hardware(&spoonstill_media::hardware::detect(&tools))
+    })
+    .clone()
+}
+
+/// An encoder in the operator's terms: `NVIDIA (NVENC)`, or the processor.
+#[must_use]
+pub fn encoder_label(encoder: &spoonstill_media::hardware::VideoEncoder) -> String {
+    if encoder.is_software() {
+        return "the processor (libx264)".to_owned();
+    }
+    spoonstill_media::hardware::candidates()
+        .iter()
+        .find(|candidate| candidate.encoder == encoder.name())
+        .map_or_else(
+            || encoder.name().to_owned(),
+            |candidate| format!("the graphics card, {}", candidate.vendor),
+        )
+}
+
 /// Fetch one tool through this machine's own package manager.
 ///
 /// # Errors

@@ -25,6 +25,21 @@
 //! than a line takes to speak, so under D-146's overlap the pacing costs a
 //! render no wall time at all; at 1080p with no captions it can.
 //!
+//! **And a throttle is waited out, not reported (D-199).** The pace above did
+//! not prevent it: on 2026-10-06 the author's Windows machine, on v0.1.19,
+//! spoke about twenty lines a minute — well under the fifty allowed — and was
+//! still cut off after ~390 lines, the same count as the 335–396 of the two
+//! earlier refusals at five times the rate. So the limit is a **count**, not a
+//! rate, and no pace slow enough to be usable avoids it. What the service did
+//! this time was let connections time out (`ConnectionTimeoutError`) rather
+//! than refuse them, and D-195 knew only refusals, so each line used its three
+//! attempts in seconds and eight scenes failed the render. A refusal streak is
+//! now waited through for up to [`Pace::patience`] while the segment pool
+//! keeps encoding everything already spoken — or [`Pace::patience_cold`] when
+//! this process has not spoken a line yet, because a machine whose firewall
+//! drops the service from the first request should not wait half an hour to
+//! be told so.
+//!
 //! The arithmetic is [`Schedule`], which takes the clock as an argument so it
 //! is tested without sleeping. [`Gate`] is the blocking shell around it.
 
@@ -45,6 +60,12 @@ pub struct Pace {
     pub cooldown: Duration,
     /// The longest a single cool-down grows.
     pub max_cooldown: Duration,
+    /// How long one streak of refusals is waited through, once this process
+    /// has spoken a line, before a line gives up (D-199).
+    pub patience: Duration,
+    /// The same, before this process has spoken anything: a service that has
+    /// never answered is more likely a blocked network than a throttle.
+    pub patience_cold: Duration,
 }
 
 impl Pace {
@@ -57,6 +78,8 @@ impl Pace {
             gap: Duration::from_millis(1200),
             cooldown: Duration::from_secs(15),
             max_cooldown: Duration::from_secs(120),
+            patience: Duration::from_secs(60 * 60),
+            patience_cold: Duration::from_secs(3 * 60),
         }
     }
 
@@ -68,6 +91,8 @@ impl Pace {
             gap: Duration::ZERO,
             cooldown: Duration::ZERO,
             max_cooldown: Duration::ZERO,
+            patience: Duration::ZERO,
+            patience_cold: Duration::ZERO,
         }
     }
 
@@ -84,6 +109,16 @@ pub struct Schedule {
     cool_until: Option<Instant>,
     /// Consecutive refusals since the last line spoken.
     refusals: u32,
+    /// When the current streak of refusals began; `None` while answering.
+    streak_since: Option<Instant>,
+    /// Streaks begun in this process, so a watcher can tell a new one.
+    episodes: u64,
+    /// Whether this process has spoken a line at all.
+    spoken_any: bool,
+    /// What the service said the last time it turned this machine away, so
+    /// the log can say it while a render waits rather than only when a line
+    /// finally gives up (D-016).
+    said: String,
 }
 
 impl Schedule {
@@ -123,6 +158,10 @@ impl Schedule {
             .unwrap_or(pace.max_cooldown)
             .min(pace.max_cooldown);
         self.refusals = self.refusals.saturating_add(1);
+        if self.streak_since.is_none() {
+            self.streak_since = Some(now);
+            self.episodes += 1;
+        }
         let until = now + wait;
         self.cool_until = Some(self.cool_until.map_or(until, |current| current.max(until)));
         wait
@@ -131,7 +170,42 @@ impl Schedule {
     /// A line was spoken: the service is answering again.
     pub fn spoke(&mut self) {
         self.refusals = 0;
+        self.streak_since = None;
+        self.spoken_any = true;
     }
+
+    /// Whether a line turned away now should keep waiting rather than give up:
+    /// the current streak is younger than the patience that applies (D-199).
+    pub fn keep_waiting(&self, pace: Pace, now: Instant) -> bool {
+        let patience = if self.spoken_any {
+            pace.patience
+        } else {
+            pace.patience_cold
+        };
+        self.streak_since
+            .is_some_and(|since| now.saturating_duration_since(since) < patience)
+    }
+
+    /// The current streak, if the service is turning this machine away.
+    pub fn throttle(&self, now: Instant) -> Option<Throttle> {
+        self.streak_since.map(|since| Throttle {
+            episode: self.episodes,
+            for_how_long: now.saturating_duration_since(since),
+            said: self.said.clone(),
+        })
+    }
+}
+
+/// A streak of refusals in progress, as a watcher sees it (D-199).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Throttle {
+    /// Which streak this is in the life of the process; a new number is a new
+    /// episode worth telling the operator about.
+    pub episode: u64,
+    /// How long the service has been turning this machine away.
+    pub for_how_long: Duration,
+    /// What it said the last time, verbatim.
+    pub said: String,
 }
 
 /// The process-wide gate every Edge request goes through.
@@ -192,18 +266,38 @@ impl Gate {
         }
     }
 
-    /// Record a refused connection; returns the cool-down it started.
-    pub fn refused(&self, pace: Pace) -> Duration {
+    /// Record a refused connection and what the service said; returns the
+    /// cool-down it started.
+    pub fn refused(&self, pace: Pace, said: &str) -> Duration {
         if pace.is_unpaced() {
             return Duration::ZERO;
         }
-        let wait = self
-            .schedule
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .refused(pace, Instant::now());
+        let mut schedule = self.schedule.lock().unwrap_or_else(|e| e.into_inner());
+        said.clone_into(&mut schedule.said);
+        let wait = schedule.refused(pace, Instant::now());
+        drop(schedule);
         self.changed.notify_all();
         wait
+    }
+
+    /// Whether a line the service just turned away should keep waiting.
+    pub fn keep_waiting(&self, pace: Pace) -> bool {
+        if pace.is_unpaced() {
+            return false;
+        }
+        self.schedule
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keep_waiting(pace, Instant::now())
+    }
+
+    /// The streak in progress, if any: what a render polls to tell the
+    /// operator it is waiting rather than stuck.
+    pub fn throttle(&self) -> Option<Throttle> {
+        self.schedule
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .throttle(Instant::now())
     }
 
     /// Record a line spoken.
@@ -227,6 +321,8 @@ mod tests {
         gap: Duration::from_millis(1200),
         cooldown: Duration::from_secs(15),
         max_cooldown: Duration::from_secs(120),
+        patience: Duration::from_secs(60 * 60),
+        patience_cold: Duration::from_secs(3 * 60),
     };
 
     #[test]
@@ -297,13 +393,69 @@ mod tests {
         assert_eq!(s.refused(PACE, t0), Duration::from_secs(15), "reset");
     }
 
+    /// D-199: the throttle in the author's log lasted minutes, so a line keeps
+    /// waiting through it, for an hour once this process has spoken and
+    /// three minutes when it never has.
+    #[test]
+    fn a_streak_is_waited_through_for_the_patience_and_no_longer() {
+        let t0 = Instant::now();
+        let mut s = Schedule::default();
+        assert!(!s.keep_waiting(PACE, t0), "no streak, nothing to wait for");
+
+        // Never spoken: the short patience applies.
+        s.refused(PACE, t0);
+        assert!(s.keep_waiting(PACE, t0 + Duration::from_secs(170)));
+        assert!(!s.keep_waiting(PACE, t0 + Duration::from_secs(181)));
+
+        // Once a line has been spoken in this process, the long one does.
+        s.spoke();
+        assert!(s.throttle(t0).is_none(), "speaking ends the streak");
+        let t1 = t0 + Duration::from_secs(600);
+        s.refused(PACE, t1);
+        s.refused(PACE, t1 + Duration::from_secs(60));
+        assert!(
+            s.keep_waiting(PACE, t1 + Duration::from_secs(59 * 60)),
+            "the streak is timed from its first refusal, not its latest"
+        );
+        assert!(!s.keep_waiting(PACE, t1 + Duration::from_secs(61 * 60)));
+    }
+
+    #[test]
+    fn each_streak_is_a_new_episode_and_repeated_refusals_are_not() {
+        let t0 = Instant::now();
+        let mut s = Schedule::default();
+        s.refused(PACE, t0);
+        s.refused(PACE, t0);
+        assert_eq!(s.throttle(t0).map(|t| t.episode), Some(1));
+        s.spoke();
+        s.refused(PACE, t0 + Duration::from_secs(5));
+        let throttle = s.throttle(t0 + Duration::from_secs(65)).expect("a streak");
+        assert_eq!(throttle.episode, 2);
+        assert!(
+            throttle.said.is_empty(),
+            "the schedule alone is told nothing"
+        );
+        assert_eq!(throttle.for_how_long, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn an_unpaced_gate_never_waits() {
+        let gate = Gate {
+            schedule: Mutex::new(Schedule::default()),
+            changed: Condvar::new(),
+        };
+        gate.refused(Pace::unpaced(), "429");
+        assert!(!gate.keep_waiting(Pace::unpaced()));
+        assert!(gate.throttle().is_none());
+    }
+
     #[test]
     fn a_cancelled_wait_returns_promptly() {
         let gate = Gate {
             schedule: Mutex::new(Schedule::default()),
             changed: Condvar::new(),
         };
-        gate.refused(PACE);
+        gate.refused(PACE, "429");
         let cancel = Cancel::new();
         cancel.request();
         let started = Instant::now();

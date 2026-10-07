@@ -16,6 +16,7 @@ narration boundaries. It is **not a video editor** — no timeline, no scrubber.
   add`, D-080) and a **Tauri window** in `apps/desktop`. There is still **no
   state database** (M3) and **no ElevenLabs provider**; if a document describes
   those as existing, it is describing an intended system. Run `make gates` — 39 checks, M2 now 23.
+  **Since v0.1.20 a render uses the graphics card by default** (D-199).
 - **Rust 1.94.0 is installed**, pinned by `rust-toolchain.toml`. Homebrew's
   rustup keeps its shims in `/opt/homebrew/opt/rustup/bin`, **not**
   `~/.cargo/bin` — that path is on `PATH` via `~/.zshrc` and is re-exported by
@@ -365,6 +366,52 @@ whole suite would have refused to start. It tests what the directory must not
 be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
+
+### State as of 2026-10-07 — voices that went missing, and a graphics card nobody asked (D-199), `v0.1.20`
+
+**Run on Windows 11, the author's machine (RTX 3060).** Reported: *"some of
+the voices it's not generating, or only half of them"*, and *"does it use the
+GPU?"*. **Read D-199 before touching `Pace::patience`, `endure`,
+`still_worth_waiting`, `never_connected`, `Gate::throttle`,
+`watch_voice_service`, `worth_announcing`, `pool::pipeline_in`, the admission
+order in `resolve_and_render`, `tooling::default_encoder`,
+`with_processor_fallback`, `Machine::use_graphics`, or `SPOONSTILL_GRAPHICS`.**
+
+- **D-195's pacing did not stop the throttle — it is a count, not a rate.**
+  v0.1.19 at ~20 lines a minute was cut off at ~390 lines, as v0.1.16 was at
+  100 a minute. It arrived as `ConnectionTimeoutError`, which D-195 did not
+  recognise, so eight lines failed in seconds and the render stopped. Now a
+  timeout to connect is a refusal, and a refused line **waits the streak out
+  for up to an hour** (3 minutes if this process has never spoken) while every
+  ready scene keeps encoding. Reproduced live: throttled at line **338**,
+  resumed by itself ~35 minutes later, throttled again at 390, then trickled.
+- **Three defects found by watching that, all fixed:** a trickled line reset
+  the patience (each line now has its own clock), every trickled line repeated
+  the warning (once per streak, at most every ten minutes), and **at 40x the
+  eight audio workers all sat on throttled lines while 15 600 cached scenes
+  waited behind them** with the GPU idle — `pipeline_in` now admits ready
+  scenes first. And `still voices --use` refused to save when the catalogue
+  could not be fetched; it saves and says it could not check, like the
+  no-provider path. Gate 7i caught that one.
+- **"Half of them" was not truncated audio.** Every line in the author's
+  431-scene project speaks at 11–22 characters a second, median 15.9; a line
+  cut in half would read ~32. It was whole scenes failing.
+- **The window never used the GPU** — `--encoder` existed only on the CLI.
+  **The author chose the graphics card on by default** (reversing D-036's
+  default on their authority): Settings → *Graphics card*, `still doctor
+  --graphics on|off`, `SPOONSTILL_GRAPHICS`. Resolved by the control surfaces,
+  never inside `render_project`, so library tests still mean libx264; the gate
+  scripts export `SPOONSTILL_GRAPHICS=off`. A scene the card refuses is
+  encoded on the processor. Every render's first line says what encodes it.
+  **Existing projects re-encode their video once** after upgrading.
+
+**On this machine FFmpeg is not on Git Bash's `PATH`** (winget installs no
+shim): prefix `PATH` with
+`$LOCALAPPDATA/Microsoft/WinGet/Packages/Gyan.FFmpeg_*/ffmpeg-*/bin` before
+`bash scripts/m*-gates.sh`, or M0's fixture gate fails with `ffprobe: command
+not found`. **And a gate that speaks for real (gate 7) fails while the voice
+service is throttling this machine** — which a stress render here will cause.
+Wait it out; it is not a regression.
 
 ### State as of 2026-10-03, later — the chapter cut, checked against the author's own scenes (D-196), `v0.1.18`
 

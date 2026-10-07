@@ -232,6 +232,61 @@ where
     F: Fn(usize, &T) -> Result<A, E1> + Sync,
     G: Fn(usize, &T, &A) -> Result<B, E2> + Sync,
 {
+    let order: Vec<usize> = (0..items.len()).collect();
+    pipeline_in(
+        items,
+        &order,
+        first_jobs,
+        second_jobs,
+        cancel,
+        first,
+        second,
+    )
+}
+
+/// [`pipeline`], admitting stage one in `order` rather than input order
+/// (D-199). Every guarantee above holds, and both result vectors are still in
+/// **input** order; only *when* an item starts changes.
+///
+/// It exists because input order let a few slow items starve every fast one
+/// behind them. A film whose narrations are mostly in the cache, with a few
+/// lines the voice service is throttling, put all eight audio workers on those
+/// few — and the 15 600 scenes ready behind them could not start, so the
+/// graphics card sat idle for the whole throttle. Measured on the author's
+/// project at forty times, 2026-10-07. Admitting the ready ones first keeps
+/// the encoders busy while the slow ones wait.
+///
+/// `order` must hold every index of `items` exactly once; anything else is a
+/// caller's bug and is caught in debug builds.
+#[must_use]
+pub fn pipeline_in<T, A, B, E1, E2, F, G>(
+    items: &[T],
+    order: &[usize],
+    first_jobs: usize,
+    second_jobs: usize,
+    cancel: &Cancel,
+    first: F,
+    second: G,
+) -> (Staged<A, E1>, Staged<B, E2>)
+where
+    T: Sync,
+    A: Send,
+    B: Send,
+    E1: Send,
+    E2: Send,
+    F: Fn(usize, &T) -> Result<A, E1> + Sync,
+    G: Fn(usize, &T, &A) -> Result<B, E2> + Sync,
+{
+    debug_assert_eq!(order.len(), items.len(), "the order names every item");
+    debug_assert!(
+        {
+            let mut seen = vec![false; items.len()];
+            order
+                .iter()
+                .all(|&i| i < seen.len() && !std::mem::replace(&mut seen[i], true))
+        },
+        "the order names each item once"
+    );
     if items.is_empty() {
         return (Vec::new(), Vec::new());
     }
@@ -264,7 +319,9 @@ where
                     if cancel.is_requested() || first_failed.load(Ordering::SeqCst) {
                         break;
                     }
-                    let index = next.fetch_add(1, Ordering::SeqCst);
+                    let Some(&index) = order.get(next.fetch_add(1, Ordering::SeqCst)) else {
+                        break;
+                    };
                     let Some(item) = items.get(index) else { break };
 
                     match first(index, item) {
@@ -371,6 +428,53 @@ mod tests {
     /// order, whatever order the workers finished in. Segments concatenate by
     /// this ordering, so getting it wrong would scramble a film rather than
     /// slow it down.
+    /// D-199: stage one is admitted in the order given — the ready scenes
+    /// before the ones waiting on the voice service — while both result
+    /// vectors stay in input order, so the film is assembled exactly as before.
+    #[test]
+    fn an_admission_order_changes_when_and_not_what() {
+        let items: Vec<u32> = (0..6).collect();
+        let order = [3, 5, 0, 1, 2, 4];
+        let admitted = Mutex::new(Vec::new());
+        let (firsts, seconds) = pipeline_in(
+            &items,
+            &order,
+            1,
+            1,
+            &Cancel::new(),
+            |index, item| {
+                admitted.lock().unwrap().push(index);
+                Ok::<_, ()>(item * 10)
+            },
+            |_, _, value| Ok::<_, ()>(value + 1),
+        );
+        assert_eq!(
+            *admitted.lock().unwrap(),
+            order,
+            "admitted in the order given"
+        );
+        let firsts: Vec<u32> = firsts
+            .into_iter()
+            .map(|o| match o {
+                Outcome::Done(Ok(v)) => v,
+                _ => panic!("every item ran"),
+            })
+            .collect();
+        assert_eq!(
+            firsts,
+            vec![0, 10, 20, 30, 40, 50],
+            "results in input order"
+        );
+        let seconds: Vec<u32> = seconds
+            .into_iter()
+            .map(|o| match o {
+                Outcome::Done(Ok(v)) => v,
+                _ => panic!("every item ran"),
+            })
+            .collect();
+        assert_eq!(seconds, vec![1, 11, 21, 31, 41, 51]);
+    }
+
     #[test]
     fn results_come_back_in_input_order() {
         // Reverse-sleep, so completion order is the opposite of input order.

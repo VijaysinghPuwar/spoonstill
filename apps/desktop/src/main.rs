@@ -327,6 +327,59 @@ fn set_chapter_cut(by: Option<String>) -> Result<spoonstill_app::machine::Machin
     )
 }
 
+/// The graphics card, as Settings shows it (D-199).
+#[derive(Debug, Clone, Serialize)]
+struct GraphicsView {
+    /// Whether renders are set to use the card when there is one.
+    on: bool,
+    /// What the next render will actually encode with, worded for a person.
+    using: String,
+    /// Every card this machine proved it can encode with, by vendor.
+    usable: Vec<String>,
+}
+
+/// Which graphics card this machine can encode with, and whether renders use it.
+///
+/// Detection encodes a test frame per candidate (D-159), so it runs off the
+/// window's thread and once per process.
+#[tauri::command]
+async fn graphics_status() -> Result<GraphicsView, String> {
+    journalled(
+        "graphics_status",
+        None,
+        tauri::async_runtime::spawn_blocking(graphics_view)
+            .await
+            .map_err(|e| format!("the check failed: {e}")),
+    )
+}
+
+fn graphics_view() -> GraphicsView {
+    let using = spoonstill_app::tooling::default_encoder();
+    GraphicsView {
+        on: spoonstill_app::machine::load().uses_graphics(),
+        using: spoonstill_app::tooling::encoder_label(&using),
+        usable: spoonstill_app::tooling::best_graphics()
+            .iter()
+            .map(spoonstill_app::tooling::encoder_label)
+            .collect(),
+    }
+}
+
+/// Use the graphics card for renders, or stop using it (D-199).
+#[tauri::command]
+async fn set_use_graphics(on: bool) -> Result<GraphicsView, String> {
+    journalled(
+        "set_use_graphics",
+        None,
+        match spoonstill_app::machine::set_use_graphics(on) {
+            Ok(_) => tauri::async_runtime::spawn_blocking(graphics_view)
+                .await
+                .map_err(|e| format!("the check failed: {e}")),
+            Err(e) => Err(e),
+        },
+    )
+}
+
 /// Set the fallback voice, or clear it by passing nothing.
 #[tauri::command]
 fn set_default_voice(voice: Option<String>) -> Result<spoonstill_app::machine::Machine, String> {
@@ -674,6 +727,8 @@ enum ProgressView {
         per_worker: String,
         /// Whether memory rather than the core count chose `jobs`.
         limited_by_memory: bool,
+        /// What encodes the video, worded for a person (D-199).
+        encoder: String,
     },
     /// This run plans to use more memory than the machine should give it.
     MemoryPressure {
@@ -2159,6 +2214,10 @@ async fn render_project_inner(
                 subtitle_placement,
                 aspect,
                 short_edge,
+                // The machine's answer (D-199): the graphics card when it works
+                // and Settings has not turned it off. Asked here, inside the
+                // blocking task, because the first ask encodes a test frame.
+                encoder: Some(spoonstill_app::tooling::default_encoder()),
                 ..defaults
             };
 
@@ -2322,6 +2381,7 @@ fn view_of(event: FilmEvent) -> ProgressView {
             audio_jobs,
             per_worker,
             limited_by_memory,
+            encoder,
         } => ProgressView::Planned {
             scenes,
             jobs,
@@ -2330,6 +2390,7 @@ fn view_of(event: FilmEvent) -> ProgressView {
             // second answer to a question this crate already answers (D-010).
             per_worker: spoonstill_app::capacity::gigabytes(per_worker),
             limited_by_memory,
+            encoder,
         },
         FilmEvent::MemoryPressure(pressure) => ProgressView::MemoryPressure {
             jobs: pressure.jobs,
@@ -2445,6 +2506,8 @@ fn main() {
             app_settings,
             set_default_voice,
             set_chapter_cut,
+            graphics_status,
+            set_use_graphics,
             usage,
             voice_choice,
             activity_log,

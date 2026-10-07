@@ -302,18 +302,20 @@ struct RenderArgs {
     #[arg(long, value_name = "FPS")]
     fps: Option<u32>,
 
-    /// Encode with the graphics card instead of the CPU (D-162).
+    /// Which encoder makes the video (D-162, D-199).
     ///
-    /// `auto` picks the best encoder this machine can actually run, `off` is
-    /// D-036's `libx264`, and a name — `h264_nvenc`, `h264_amf`,
-    /// `h264_videotoolbox` — asks for exactly that one. `still doctor` lists
-    /// what this machine has.
+    /// Left off, the graphics card is used when this machine has one that
+    /// works, unless it was turned off with `still doctor --graphics off` or in
+    /// the window's Settings. `auto` asks for the card for this run whatever
+    /// the setting, `off` is D-036's `libx264` on the processor, and a name —
+    /// `h264_nvenc`, `h264_amf`, `h264_videotoolbox` — asks for exactly that
+    /// one. `still doctor` lists what this machine has.
     ///
-    /// A draft mode, not a better default. What it is worth depends on how
-    /// slow the CPU is: about 1.2x on a desktop GPU (D-159) and 1.67x on a 15W
-    /// laptop (D-198). It saves no memory — that is the prescale canvas, not
-    /// the encoder — and hardware H.264 bands on the slow pans across smooth
-    /// gradients that this content is made of, measured at SSIM 0.985.
+    /// What the card is worth depends on how slow the CPU is: about 1.2x on a
+    /// desktop GPU (D-159) and 1.67x on a 15W laptop (D-198). It saves no
+    /// memory — that is the prescale canvas, not the encoder — and costs a
+    /// little quality on slow pans across smooth gradients, measured at SSIM
+    /// 0.985. `off` is the sharper picture.
     #[arg(long, value_name = "ENCODER")]
     encoder: Option<String>,
 }
@@ -847,6 +849,20 @@ struct DoctorArgs {
     /// (D-012).
     #[arg(long)]
     install: bool,
+
+    /// Whether a render that names no `--encoder` uses the graphics card
+    /// (D-199): `on` (the default) or `off`. Saved for this machine, beside
+    /// the fallback voice; the window's Settings changes the same answer.
+    #[arg(long, value_name = "on|off", value_parser = parse_on_off)]
+    graphics: Option<bool>,
+}
+
+fn parse_on_off(value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "on" | "yes" | "true" | "1" => Ok(true),
+        "off" | "no" | "false" | "0" => Ok(false),
+        other => Err(format!("{other:?} is not on or off")),
+    }
 }
 
 /// `still doctor` — every external program, checked in one place (D-105).
@@ -857,6 +873,17 @@ struct DoctorArgs {
 /// the application opened a good folder as zero scenes: that was D-103, and
 /// the answer was always one of these two lines.
 fn doctor(args: &DoctorArgs) -> Result<(), String> {
+    if let Some(on) = args.graphics {
+        spoonstill_app::machine::set_use_graphics(on)?;
+        println!(
+            "  renders that name no --encoder now use {}",
+            if on {
+                "the graphics card when this machine has one that works"
+            } else {
+                "the processor (libx264)"
+            }
+        );
+    }
     let mut unresolved = 0;
     // Whether there is an FFmpeg to ask about hardware at all. Without it every
     // candidate answers "not in this ffmpeg", which is four lines of noise
@@ -961,23 +988,26 @@ fn report_graphics() {
         }
     }
 
-    // Said every time, because the list above invites exactly one wrong
-    // conclusion. D-036 chose libx264 on quality grounds for this content.
-    //
-    // What this used to say was "the encoder is at most a fifth of a 4K render,
-    // so hardware would not make one much faster" — 14% on macOS (D-144) and
-    // 22.7% on a desktop Windows machine (D-159). Both numbers are real and
-    // both were taken on a fast CPU, which is the half the sentence left out:
-    // the encoder's *share* is a property of how slow the rest is. Measured on
-    // a 15W Core i3-1215U, 24 scenes at 720p, warm audio cache: libx264 279.1 s
-    // against Quick Sync 167.4 s, which is 1.67x and puts the encoder near 40%
-    // (D-198). So the old sentence talked an operator out of the flag on
-    // exactly the machine where it pays, and the honest answer names both ends
-    // of the range and the quality it costs.
-    println!("    Films render on the CPU with libx264 (D-036) — the better picture on slow");
-    println!("    pans across smooth gradients. What hardware buys depends on how slow the");
-    println!("    CPU is: about 1.2x on a desktop GPU (D-159), 1.67x on a 15W laptop");
-    println!("    (D-198). `--encoder auto` is a draft mode and costs quality: SSIM 0.985.");
+    // Said every time, and now it says what a render will *do* (D-199). The
+    // trade is unchanged and still stated: the card is faster by an amount that
+    // depends on how slow the processor is — 1.2x on a desktop GPU (D-159),
+    // 1.67x on a 15W laptop (D-198) — and costs a little picture quality on
+    // slow pans across smooth gradients, SSIM 0.985 against libx264.
+    let used = spoonstill_app::tooling::default_encoder();
+    println!();
+    println!(
+        "    Renders use {} unless told otherwise.",
+        spoonstill_app::tooling::encoder_label(&used)
+    );
+    if used.is_software() {
+        if found.iter().any(|accel| accel.usable) {
+            println!("    `still doctor --graphics on` uses the graphics card instead.");
+        }
+    } else {
+        println!("    The card is about 1.2x faster on a desktop and 1.67x on a slow laptop, at");
+        println!("    slightly lower quality on slow pans (SSIM 0.985). `still doctor --graphics");
+        println!("    off` renders on the processor with libx264, the sharper picture (D-036).");
+    }
 }
 
 /// Turn a `--encoder` value into the encoder a render will actually use
@@ -1130,7 +1160,24 @@ fn list_voices(args: &VoicesArgs) -> Result<(), String> {
     }
 
     let wanted = args.filter.as_deref().map(str::to_lowercase);
-    let voices = provider.voices().map_err(|e| e.to_string())?;
+    let voices = match provider.voices() {
+        Ok(voices) => voices,
+        // The same rule as a missing provider above, for the case that comment
+        // names and this branch used to miss: a machine whose provider is
+        // installed but whose network is down — or which the voice service is
+        // turning away after a few hundred lines (D-199) — can still be told
+        // which voice to use. Refusing made a preference depend on Microsoft's
+        // afternoon. Said out loud, never presented as checked.
+        Err(error) if args.use_voice.is_some() => {
+            let wanted = args.use_voice.as_deref().unwrap_or_default();
+            spoonstill_app::machine::set_default_voice(Some(wanted))?;
+            println!("  {wanted} reads every project on this machine that names no voice");
+            println!("  not checked against the catalogue — it could not be fetched: {error}");
+            println!("  `still voices {wanted}` confirms it exists once the service answers");
+            return Ok(());
+        }
+        Err(error) => return Err(error.to_string()),
+    };
 
     // Checked against the catalogue we have just fetched rather than accepted
     // on trust: a misspelt voice is otherwise a setting that silently fails
@@ -1467,7 +1514,13 @@ fn render_project(args: RenderArgs) -> Result<(), String> {
         // the machine what it can run is a process spawn per candidate, and
         // that is a control-surface question (D-151's split) — not something a
         // render should do once per run behind the operator's back.
-        encoder: Some(resolve_encoder(args.encoder.as_deref())?),
+        //
+        // Left off, the machine's own answer (D-199): the graphics card when
+        // it works and has not been turned off.
+        encoder: Some(match args.encoder.as_deref() {
+            None => spoonstill_app::tooling::default_encoder(),
+            Some(named) => resolve_encoder(Some(named))?,
+        }),
         ..defaults
     };
 
@@ -1488,11 +1541,12 @@ fn render_project(args: RenderArgs) -> Result<(), String> {
             audio_jobs,
             per_worker,
             limited_by_memory,
+            encoder,
         } => {
             total.set(scenes);
             done.set(0);
             println!(
-                "  {scenes} scene{}, {jobs} at a time ({audio_jobs} for audio)",
+                "  {scenes} scene{}, {jobs} at a time ({audio_jobs} for audio), encoded on {encoder}",
                 if scenes == 1 { "" } else { "s" }
             );
             // Only when memory, not the core count, chose the number — an

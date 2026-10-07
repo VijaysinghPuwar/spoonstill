@@ -209,6 +209,9 @@ pub enum FilmEvent {
         /// an explicit `--jobs` is obeyed and warned about, never quietly
         /// lowered (D-076 — the flag is not capped in either direction).
         limited_by_memory: bool,
+        /// What encodes the video, in the operator's terms (D-199) — so "is it
+        /// using my graphics card" is answered on every render.
+        encoder: String,
     },
     /// This run is planning to use more memory than the machine should give it
     /// (D-144).
@@ -605,7 +608,16 @@ pub fn render_project(
                     project.settings.output_spec.fps()
                 ),
             )
-            .with("worker_memory", capacity::gigabytes(capacity.per_worker)),
+            .with("worker_memory", capacity::gigabytes(capacity.per_worker))
+            .with(
+                "encoder",
+                options
+                    .encoder
+                    .clone()
+                    .unwrap_or_default()
+                    .name()
+                    .to_owned(),
+            ),
     );
 
     on_event(FilmEvent::Planned {
@@ -614,6 +626,7 @@ pub fn render_project(
         audio_jobs,
         per_worker: capacity.per_worker,
         limited_by_memory: options.jobs.is_none() && capacity.limited_by_memory(),
+        encoder: crate::tooling::encoder_label(&options.encoder.clone().unwrap_or_default()),
     });
 
     // Said before the pool starts, because the thing it warns about is a
@@ -685,19 +698,32 @@ pub fn render_project(
     // that used to sit between them was stronger than the dependency it
     // enforced — and it left the CPU idle for a fifth of every cold render
     // while `edge-tts` waited on the network.
-    let (audio, rendered) = resolve_and_render(
-        &project,
-        options,
-        audio_jobs,
-        jobs,
-        &segments_dir,
-        output,
-        &encode,
-        &tools,
-        cancel,
-        sink,
-        on_event,
-    )?;
+    //
+    // Beside them, a watcher for the voice service turning this machine away
+    // (D-199). Lines wait that out now rather than failing, for up to an
+    // hour, and a render whose narration column stops moving for that long
+    // reads as a hang — which is how D-195 was first reported ("it pauses and
+    // crashes"). So the first sign of each streak is said once, as a warning,
+    // on both surfaces.
+    let finished = std::sync::atomic::AtomicBool::new(false);
+    let (audio, rendered) = std::thread::scope(|scope| {
+        scope.spawn(|| watch_voice_service(&finished, sink, on_event));
+        let outcome = resolve_and_render(
+            &project,
+            options,
+            audio_jobs,
+            jobs,
+            &segments_dir,
+            output,
+            &encode,
+            &tools,
+            cancel,
+            sink,
+            on_event,
+        );
+        finished.store(true, std::sync::atomic::Ordering::Release);
+        outcome
+    })?;
 
     // Phase three: the join. Only reached when every segment above passed its
     // own profile assertion (D-040).
@@ -1216,6 +1242,67 @@ fn check_voice_service(
     Ok(())
 }
 
+/// Say so, once per streak, when the voice service starts turning this machine
+/// away during a render (D-199). Polls the process-wide gate until `finished`.
+///
+/// A streak already in progress when the render started was announced by the
+/// render that saw it begin — in the window, an earlier render in the same
+/// process — and is announced again here only if this render is the one now
+/// waiting on it, which is the same thing from the operator's side.
+fn watch_voice_service(
+    finished: &std::sync::atomic::AtomicBool,
+    log: &dyn Diagnostics,
+    on_event: &(dyn Fn(FilmEvent) + Sync),
+) {
+    let gate = spoonstill_tts::pace::Gate::shared();
+    let mut told = None;
+    while !finished.load(std::sync::atomic::Ordering::Acquire) {
+        let now = std::time::Instant::now();
+        if let Some(throttle) = gate.throttle()
+            && worth_announcing(told, throttle.episode, now)
+        {
+            told = Some((throttle.episode, now));
+            let detail = throttle_warning();
+            log.record(
+                &Event::warn("render", "voice service turned this machine away")
+                    .with("said", throttle.said.clone()),
+            );
+            on_event(FilmEvent::Warned {
+                detail: detail.to_owned(),
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+/// How often a throttle is announced at most, however many streaks it has.
+const ANNOUNCE_AT_MOST_EVERY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Whether a streak is worth saying out loud: it is a new one, and the last
+/// announcement is long enough ago. A service that lets one line through every
+/// few minutes begins a new streak each time — measured on 2026-10-07 — and a
+/// warning per line through a half-hour wait is noise, not information.
+fn worth_announcing(
+    told: Option<(u64, std::time::Instant)>,
+    episode: u64,
+    now: std::time::Instant,
+) -> bool {
+    match told {
+        None => true,
+        Some((last, at)) => {
+            last != episode && now.saturating_duration_since(at) >= ANNOUNCE_AT_MOST_EVERY
+        }
+    }
+}
+
+/// The sentence [`watch_voice_service`] says.
+const fn throttle_warning() -> &'static str {
+    "Microsoft's voice service has stopped answering for now — it does this \
+     after a few hundred lines. This render is waiting for it (up to an hour) \
+     and keeps rendering every scene whose line is already spoken; \
+     nothing is lost if you stop and render again later"
+}
+
 /// Resolve every narration and render every segment, overlapping the two
 /// (D-146, `findings.md` F-12).
 ///
@@ -1268,8 +1355,18 @@ fn resolve_and_render(
     let occurrences = occurrences_of(project);
 
     let image_hashes = ImageHashes::default();
-    let (audio_outcomes, segment_outcomes) = pool::pipeline(
+    // Scenes whose narration needs no voice service go first (D-199): a
+    // recording, silence, or a line already in the speech cache. Otherwise a
+    // few lines the service is throttling occupy every audio worker and the
+    // scenes ready behind them wait with the encoders idle. Stable within each
+    // half, so a cold project still speaks in film order.
+    let (ready, waiting): (Vec<usize>, Vec<usize>) = (0..project.scenes.len()).partition(|&i| {
+        crate::audio::provider_needed(&cache, &project.scenes[i].spec.source).is_none()
+    });
+    let order: Vec<usize> = ready.into_iter().chain(waiting).collect();
+    let (audio_outcomes, segment_outcomes) = pool::pipeline_in(
         &project.scenes,
+        &order,
         audio_jobs,
         jobs,
         cancel,
@@ -1564,13 +1661,51 @@ fn render_one(
         let _ = std::fs::remove_file(&plan.request.out);
     }
 
-    let rendered = spoonstill_media::render_scene(tools, &plan.request, cancel, log, &mut |_| {})?;
+    let rendered = with_processor_fallback(&plan.request, cancel, log, |request| {
+        spoonstill_media::render_scene(tools, request, cancel, log, &mut |_| {})
+    })?;
     Ok(Segment {
         path: rendered.path,
         frames: rendered.frames,
         duration: rendered.duration,
         reused: false,
     })
+}
+
+/// Render a scene, and if the graphics card refuses it, render it again on the
+/// processor (D-199).
+///
+/// A card that encoded the probe frame can still refuse a real scene — a
+/// driver's session limit, memory taken by a game — and that costs the scene
+/// some speed rather than costing the film. D-036's third clause, applied per
+/// scene. The two join legally: D-162 measured both against `SegmentProfile`
+/// and they match it field for field, and `render_scene` asserts the fallback
+/// against it again. A cancellation is never retried, and a software failure
+/// has nothing to fall back to.
+fn with_processor_fallback<T>(
+    request: &SceneRequest,
+    cancel: &Cancel,
+    log: &dyn Diagnostics,
+    mut render: impl FnMut(&SceneRequest) -> Result<T, MediaError>,
+) -> Result<T, MediaError> {
+    match render(request) {
+        Err(error)
+            if !request.encode.encoder.is_software()
+                && !cancel.is_requested()
+                && !matches!(error, MediaError::Cancelled { .. }) =>
+        {
+            log.record(
+                &Event::warn("render", "graphics card failed; encoding on the processor")
+                    .with("encoder", request.encode.encoder.name())
+                    .with("out", request.out.display().to_string())
+                    .with("detail", error.to_string()),
+            );
+            let mut again = request.clone();
+            again.encode.encoder = VideoEncoder::Software;
+            render(&again)
+        }
+        other => other,
+    }
 }
 
 /// Is the segment already on disk as long as this plan needs it to be?
@@ -3434,5 +3569,103 @@ mod tests {
         };
         apply_geometry_override(&mut project, &options).expect("720 is a legal size");
         assert_eq!(project.warnings().count(), 0, "{:?}", project.problems);
+    }
+
+    fn a_request(encoder: VideoEncoder) -> SceneRequest {
+        let mut request = SceneRequest::new(
+            PathBuf::from("still.jpg"),
+            PathBuf::from("line.wav"),
+            PathBuf::from("seg.mp4"),
+            output(),
+        );
+        request.encode.encoder = encoder;
+        request
+    }
+
+    fn refused() -> MediaError {
+        MediaError::Exit {
+            program: "ffmpeg".to_owned(),
+            command: "ffmpeg -c:v h264_nvenc".to_owned(),
+            code: Some(1),
+            stderr: "OpenEncodeSessionEx failed: incompatible client key (21)".to_owned(),
+        }
+    }
+
+    /// D-199: a scene the graphics card refuses is encoded on the processor,
+    /// and the film keeps going.
+    #[test]
+    fn a_scene_the_graphics_card_refuses_is_encoded_on_the_processor() {
+        let mut asked = Vec::new();
+        let outcome = with_processor_fallback(
+            &a_request(VideoEncoder::Hardware("h264_nvenc".to_owned())),
+            &Cancel::new(),
+            &spoonstill_core::diagnostics::Noop,
+            |request| {
+                asked.push(request.encode.encoder.clone());
+                if request.encode.encoder.is_software() {
+                    Ok("encoded")
+                } else {
+                    Err(refused())
+                }
+            },
+        );
+        assert_eq!(outcome.expect("the processor encoded it"), "encoded");
+        assert_eq!(
+            asked,
+            vec![
+                VideoEncoder::Hardware("h264_nvenc".to_owned()),
+                VideoEncoder::Software
+            ]
+        );
+    }
+
+    /// Nothing to fall back to from libx264, and a stopped run is not retried.
+    #[test]
+    fn a_software_failure_or_a_cancellation_is_not_tried_again() {
+        let mut calls = 0;
+        let outcome: Result<(), _> = with_processor_fallback(
+            &a_request(VideoEncoder::Software),
+            &Cancel::new(),
+            &spoonstill_core::diagnostics::Noop,
+            |_| {
+                calls += 1;
+                Err(refused())
+            },
+        );
+        assert!(outcome.is_err());
+        assert_eq!(calls, 1);
+
+        let cancel = Cancel::new();
+        cancel.request();
+        let mut calls = 0;
+        let outcome: Result<(), _> = with_processor_fallback(
+            &a_request(VideoEncoder::Hardware("h264_nvenc".to_owned())),
+            &cancel,
+            &spoonstill_core::diagnostics::Noop,
+            |_| {
+                calls += 1;
+                Err(refused())
+            },
+        );
+        assert!(outcome.is_err());
+        assert_eq!(calls, 1, "Stop means stop, not encode it again on the CPU");
+    }
+
+    /// D-199: a trickling service begins a new streak per line; the warning
+    /// is said once, and again only after ten minutes.
+    #[test]
+    fn a_trickling_throttle_is_announced_once_per_ten_minutes() {
+        let t0 = std::time::Instant::now();
+        assert!(worth_announcing(None, 1, t0), "the first streak is said");
+        let told = Some((1, t0));
+        assert!(
+            !worth_announcing(told, 1, t0 + ANNOUNCE_AT_MOST_EVERY),
+            "the same streak never twice"
+        );
+        assert!(
+            !worth_announcing(told, 2, t0 + std::time::Duration::from_secs(90)),
+            "a line let through and the next refused is not news"
+        );
+        assert!(worth_announcing(told, 2, t0 + ANNOUNCE_AT_MOST_EVERY));
     }
 }

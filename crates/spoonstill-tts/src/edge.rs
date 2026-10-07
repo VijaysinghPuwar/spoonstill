@@ -689,6 +689,39 @@ fn persevere<T>(
     Err((total, Failure::Transient(last)))
 }
 
+/// [`persevere`], round after round, while the service is turning this
+/// machine away and `keep_waiting` says the streak is still worth waiting
+/// through (D-199). Returns the outcome, with attempts counted across every
+/// round, and whether any round was waited through.
+///
+/// The pause that makes the next round worth starting is not in here: each
+/// attempt enters the gate, which holds it for the cool-down a refusal began.
+/// Only a refusal starts another round. A permanent failure, an ordinary
+/// transient one, and a cancellation all end it exactly as `persevere` does.
+fn endure<T>(
+    policy: Retry,
+    mut attempt: impl FnMut(u32) -> Result<T, Failure>,
+    mut rest: impl FnMut(Duration),
+    mut keep_waiting: impl FnMut() -> bool,
+) -> (Result<T, (u32, Failure)>, bool) {
+    let mut before = 0u32;
+    let mut waited = false;
+    loop {
+        match persevere(policy, &mut attempt, &mut rest) {
+            Err((attempts, Failure::Transient(reason)))
+                if is_refusal(&reason) && keep_waiting() =>
+            {
+                before = before.saturating_add(attempts);
+                waited = true;
+            }
+            Err((attempts, failure)) => {
+                return (Err((before.saturating_add(attempts), failure)), waited);
+            }
+            Ok(value) => return (Ok(value), waited),
+        }
+    }
+}
+
 /// Read a failing `edge-tts` run and decide whether waiting could help.
 ///
 /// Classified on the **last** line of stderr, which is where Python puts the
@@ -766,8 +799,20 @@ fn worth_asking_again(text: &str, voice: &str) -> bool {
 /// 335 lines in three and a half minutes. A DNS failure is deliberately not a
 /// refusal: an offline machine should be told so in seconds, not after
 /// cool-downs meant for a throttle.
+///
+/// **A connection that times out before it opens is one too** (D-199). On
+/// 2026-10-06 the same throttle arrived as `ConnectionTimeoutError: Connection
+/// timeout to host wss://speech.platform.bing.com/…` after ~390 lines — the
+/// address resolved and then stopped answering. That is aiohttp's *connect*
+/// timeout, not a read that stalled mid-line, which stays an ordinary
+/// transient failure.
 fn is_refusal(reason: &str) -> bool {
-    turned_away(reason) || reason.contains("429")
+    turned_away(reason) || reason.contains("429") || never_connected(reason)
+}
+
+/// The connection was not opened in time: DNS answered, and nothing did after.
+fn never_connected(reason: &str) -> bool {
+    reason.contains("ConnectionTimeoutError") || reason.contains("Connection timeout to host")
 }
 
 /// The service's address would not take the connection. Not a DNS failure
@@ -844,6 +889,14 @@ fn network_hint(reason: &str) -> &'static str {
          machine, which it does after many lines in a short time. Every line \
          already spoken is kept — wait a while (it has taken up to an hour) \
          and render again"
+    } else if never_connected(reason) {
+        // D-199: what the same throttle looked like on 2026-10-06. It is also
+        // what a firewall that drops the service looks like, so both readings
+        // are given, the throttle first because it is the one seen in logs.
+        "Microsoft's voice service stopped answering this machine, which it \
+         does after a few hundred lines. Every line already spoken is kept — \
+         wait a while and render again. If this happens before any line is \
+         spoken, check your internet connection, VPN or firewall"
     } else if NO_ROUTE.iter().any(|marker| reason.contains(marker)) {
         "this machine could not reach Microsoft's voice service — check your \
          internet connection, then any VPN or firewall, and try again"
@@ -1154,7 +1207,16 @@ impl Edge {
         // between attempts can be interrupted. D-094's backoff reaches
         // seconds, and a pause nothing can break into is a pause the operator
         // waits out after pressing Stop.
-        let outcome = persevere(
+        //
+        // **And a throttle is waited through (D-199).** `persevere`'s three
+        // attempts are for a flaky socket; a service turning this machine away
+        // after a few hundred lines answers again in minutes, so a line that
+        // ran out of attempts that way starts another round — each one waits
+        // out the gate's growing cool-down first — until the streak outlasts
+        // the pace's patience. Everything else gives up exactly as before.
+        let gate = Gate::shared();
+        let started = std::time::Instant::now();
+        let (outcome, waited_through) = endure(
             self.retry,
             |_attempt| {
                 if cancel.is_requested() {
@@ -1165,7 +1227,6 @@ impl Edge {
                 // Every request waits its turn on the machine-wide gate
                 // (D-195): a throttled service is one this whole process
                 // shares, not one render's.
-                let gate = Gate::shared();
                 let Some(slot) = gate.enter(self.pace, cancel) else {
                     return Err(Failure::Permanent(TtsError::Cancelled {
                         provider: ID.to_owned(),
@@ -1176,13 +1237,26 @@ impl Edge {
                 match &outcome {
                     Ok(_) => gate.spoke(self.pace),
                     Err(Failure::Transient(reason)) if is_refusal(reason) => {
-                        gate.refused(self.pace);
+                        gate.refused(self.pace, reason);
                     }
                     Err(_) => {}
                 }
                 outcome
             },
             |pause| cancel.sleep(pause),
+            // Two clocks. The streak's says the service is still turning this
+            // machine away; the line's own bounds the whole wait, because a
+            // service that lets one line through every few minutes resets the
+            // streak each time — measured on the author's 431 scenes on
+            // 2026-10-07 — and without it a render could wait for hours.
+            || {
+                still_worth_waiting(
+                    cancel.is_requested(),
+                    gate.keep_waiting(self.pace),
+                    started.elapsed(),
+                    self.pace,
+                )
+            },
         );
 
         // The script is the operator's words on our disk. It goes away whether
@@ -1196,13 +1270,46 @@ impl Edge {
                 provider: ID.to_owned(),
                 text: opening(text),
                 detail: format!(
-                    "{} — it failed {attempts} time{} in a row. \
-                     The last attempt said: {reason}",
+                    "{} — it failed {attempts} time{}{}. The last attempt said: {reason}",
                     network_hint(&reason),
-                    if attempts == 1 { "" } else { "s" }
+                    if attempts == 1 { "" } else { "s" },
+                    if waited_through {
+                        waited_for(started.elapsed())
+                    } else {
+                        " in a row".to_owned()
+                    },
                 ),
             }),
         }
+    }
+}
+
+/// Whether a line the service turned away starts another round (D-199): not
+/// cancelled, the streak is young enough by the gate's clock, and this line has
+/// not waited a whole patience by its own.
+fn still_worth_waiting(
+    cancelled: bool,
+    streak_is_young: bool,
+    this_line_waited: Duration,
+    pace: Pace,
+) -> bool {
+    !cancelled && streak_is_young && this_line_waited < pace.patience
+}
+
+/// How long a line waited out a throttle before it gave up, as the tail of
+/// "it failed N times" (D-199).
+fn waited_for(waited: Duration) -> String {
+    let minutes = waited.as_secs() / 60;
+    if minutes == 0 {
+        format!(
+            " over {} seconds of waiting for it",
+            waited.as_secs().max(1)
+        )
+    } else {
+        format!(
+            " over {minutes} minute{} of waiting for it",
+            if minutes == 1 { "" } else { "s" }
+        )
     }
 }
 
@@ -1731,6 +1838,145 @@ mod tests {
 
     /// D-195: what the author's log said when the service stopped taking
     /// connections is a refusal; a machine with no DNS is not.
+    #[test]
+    fn a_connection_that_never_opened_is_a_throttle_and_says_so() {
+        // Verbatim from the author's runs.csv, 2026-10-06, v0.1.19.
+        let reason = "aiohttp.client_exceptions.ConnectionTimeoutError: Connection timeout \
+                      to host wss://speech.platform.bing.com/consumer/speech/synthesize/\
+                      readaloud/edge/v1?TrustedClientToken=[redacted]";
+        assert!(
+            is_refusal(reason),
+            "D-199: this is how the throttle arrived"
+        );
+        assert_eq!(classify(reason), Fault::Transient);
+        let hint = network_hint(reason);
+        assert!(hint.contains("stopped answering"), "{hint}");
+        assert!(hint.contains("already spoken is kept"), "{hint}");
+        // A read that stalled once the line was under way is still ordinary.
+        assert!(!is_refusal("asyncio.exceptions.TimeoutError"));
+        assert!(!is_refusal("it did not finish within 60s"));
+    }
+
+    const THROTTLED: &str = "aiohttp.client_exceptions.ConnectionTimeoutError: \
+                             Connection timeout to host wss://speech.platform.bing.com";
+
+    /// D-199, the defect itself: eight lines used their three attempts inside
+    /// one throttle and failed the render. Now a refused round is followed by
+    /// another while the streak is young, and the line speaks when it lifts.
+    #[test]
+    fn a_line_waits_through_a_throttle_and_speaks_when_it_lifts() {
+        let mut calls = 0;
+        let (outcome, waited) = endure(
+            Retry {
+                attempts: 3,
+                backoff: Duration::ZERO,
+            },
+            |_| {
+                calls += 1;
+                if calls <= 7 {
+                    Err(Failure::Transient(THROTTLED.to_owned()))
+                } else {
+                    Ok("spoken")
+                }
+            },
+            |_| {},
+            || true,
+        );
+        assert!(matches!(outcome, Ok("spoken")));
+        assert!(waited);
+        assert_eq!(calls, 8, "three rounds of three, the third speaking");
+    }
+
+    #[test]
+    fn a_throttle_that_outlasts_the_patience_reports_every_attempt() {
+        let mut rounds_allowed = 2;
+        let (outcome, waited) = endure::<()>(
+            Retry {
+                attempts: 3,
+                backoff: Duration::ZERO,
+            },
+            |_| Err(Failure::Transient(THROTTLED.to_owned())),
+            |_| {},
+            || {
+                rounds_allowed -= 1;
+                rounds_allowed >= 0
+            },
+        );
+        match outcome {
+            Err((attempts, Failure::Transient(reason))) => {
+                assert_eq!(attempts, 9, "three rounds of three");
+                assert!(reason.contains("ConnectionTimeoutError"));
+            }
+            _ => panic!("expected the throttle to be reported"),
+        }
+        assert!(waited);
+    }
+
+    /// Only a refusal earns another round. A dropped socket and a permanent
+    /// failure end exactly where D-094 always ended them, whatever the gate
+    /// says, so an offline machine is still told in seconds.
+    /// D-199, found by watching the real render: a service that lets one line
+    /// through every few minutes resets the streak each time, so the streak's
+    /// clock alone would let a render wait for hours. The line's own clock
+    /// bounds it.
+    #[test]
+    fn a_line_stops_waiting_after_its_own_patience_even_if_the_streak_is_young() {
+        let pace = Pace::service();
+        let minute = Duration::from_secs(60);
+        assert!(still_worth_waiting(false, true, 59 * minute, pace));
+        assert!(
+            !still_worth_waiting(false, true, 60 * minute, pace),
+            "the line's own clock"
+        );
+        assert!(
+            !still_worth_waiting(false, false, minute, pace),
+            "the streak's clock"
+        );
+        assert!(!still_worth_waiting(true, true, minute, pace), "Stop");
+    }
+
+    #[test]
+    fn only_a_refusal_is_waited_through() {
+        for reason in [
+            "ServerDisconnected",
+            "ClientConnectorDNSError: no such host",
+        ] {
+            let mut calls = 0;
+            let (outcome, waited) = endure::<()>(
+                Retry {
+                    attempts: 3,
+                    backoff: Duration::ZERO,
+                },
+                |_| {
+                    calls += 1;
+                    Err(Failure::Transient(reason.to_owned()))
+                },
+                |_| {},
+                || true,
+            );
+            assert!(
+                matches!(outcome, Err((3, Failure::Transient(_)))),
+                "{reason}"
+            );
+            assert!(!waited, "{reason}");
+            assert_eq!(calls, 3, "{reason}");
+        }
+        let mut calls = 0;
+        let (outcome, _) = endure::<()>(
+            Retry::default(),
+            |_| {
+                calls += 1;
+                Err(Failure::Permanent(TtsError::Cancelled {
+                    provider: ID.to_owned(),
+                }))
+            },
+            |_| {},
+            || true,
+        );
+        assert!(matches!(outcome, Err((1, Failure::Permanent(_)))));
+        assert_eq!(calls, 1);
+    }
+
     #[test]
     fn a_turned_away_connection_is_told_apart_from_no_network() {
         assert!(is_refusal(

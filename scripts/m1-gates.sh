@@ -56,6 +56,10 @@ echo
 cargo build --release -p spoonstill-cli >/dev/null 2>&1 || {
   echo "  ${RED}FAIL${OFF}  the CLI does not build"; exit 1; }
 STILL=./target/release/still
+# D-199: a render that names no encoder uses the graphics card when the
+# machine has one. These gates assert libx264 films byte for byte, so they pin
+# the processor; gate 7h asks for the card by name and is unaffected.
+export SPOONSTILL_GRAPHICS=off
 
 # --- gate 1: the single-scene render works and is frame-exact ---------------
 gate_one() {

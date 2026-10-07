@@ -9597,3 +9597,177 @@ the gates are macOS-only. VideoToolbox remains unverified by measurement (D-162
 said so and still does). The 40x stress project was not rendered to completion
 here — at the measured throughput that is roughly 75 hours, so the at-scale
 check was run against orchestration rather than against 17 240 encodes.
+
+### D-199 — A throttle is waited out, not reported, and a render uses the graphics card unless told not to · Accepted
+
+**Reported 2026-10-07 by the author, on Windows, v0.1.19:** *"some of the
+voices it's not generating, or if it generates it only generates half of
+them"*, and *"this computer has a GPU so I do not know if it auto detects the
+GPU and switches its work to GPU or not — fix both"*.
+
+#### The voices: D-195's pace did not prevent the throttle, because it is a count
+
+Read out of the operator's own `runs.csv` and their 431-scene project's log
+before anything was changed. Three renders were cut off by the voice service:
+
+| when | build | rate | lines before the cut | how it arrived |
+|---|---|---|---|---|
+| 2026-10-03 (D-195) | v0.1.16 | ~100 a minute | 335 | `Connect call failed` |
+| 2026-10-03, `fanfic neew` | v0.1.16 | eight at a time | 388 | `ConnectionTimeoutError` |
+| 2026-10-06, `skill g` | **v0.1.19** | **~20 a minute** | ~390 | `ConnectionTimeoutError` |
+
+The third ran with D-195's pacing in force — two in flight, 1.2 s apart — at a
+fifth of the rate that was first refused, and was cut off after the **same**
+count. So the limit is a number of lines in some window, not a rate, and no
+pace slow enough to be usable avoids it. Microsoft documents none of this; the
+reading is from three logs and is labelled as one.
+
+What the service did the second and third time was **let connections time out**
+rather than refuse them. D-195's cool-down started only on a refusal (`Connect
+call failed`, `ConnectionRefusedError`, a `429`), so each line spent its three
+D-094 attempts inside a few seconds of the throttle, **seven or eight scenes
+failed, and the whole render stopped** (D-146 stops admitting work after a
+stage-one failure). Every spoken line was kept (D-075) and the next render
+finished, which is why it read to the operator as "half of them".
+
+Three changes in `spoonstill-tts`:
+
+- **`ConnectionTimeoutError` / `Connection timeout to host` is a refusal** for
+  `is_refusal`. It is aiohttp's *connect* timeout — the address resolved and
+  then nothing answered. A read that stalls once a line is under way
+  (`asyncio TimeoutError`, our own kill) stays an ordinary transient failure.
+- **A refused line waits the streak out.** `endure` runs D-094's `persevere`
+  round after round while the service is turning this machine away and the
+  streak is younger than `Pace::patience` — **60 minutes** once this process
+  has spoken a line, **3 minutes** (`patience_cold`) when it has not, because
+  a firewall that drops the service from the first request should not cost
+  an hour to be told about. Every attempt still enters D-195's gate, so a
+  round waits out the growing cool-down (15 s doubling to 120 s) before it
+  knocks. Only a refusal earns another round: a dropped socket, a DNS failure
+  and every permanent failure end exactly where they always did.
+- **The render says it is waiting.** A watcher beside the two pools polls
+  `Gate::throttle` and emits one `FilmEvent::Warned` per streak, on both
+  surfaces and in the log, because a narration column that stops for twenty
+  minutes reads as a hang — which is how D-195 was first reported. The segment
+  pool keeps encoding every scene whose line is already spoken meanwhile.
+
+`network_hint` gained the timeout's own sentence: the service stopped
+answering, which it does after a few hundred lines, every spoken line is kept;
+and, because a blocked network looks the same from here, to check the
+connection if it happens before any line is spoken.
+
+Mutation-tested: removing the timeout from `is_refusal` fails exactly
+`a_connection_that_never_opened_is_a_throttle_and_says_so`,
+`a_line_waits_through_a_throttle_and_speaks_when_it_lifts` and
+`a_throttle_that_outlasts_the_patience_reports_every_attempt`. `endure` is a
+pure function over closures so that it is tested on Windows, where
+`edge_retry.rs` cannot run (D-155).
+
+**Not done, deliberately:** slowing the pace further. A count quota is not
+avoided by going slower, and D-195 already costs a 1080p render with short
+lines ten minutes per 500 new lines.
+
+#### What the real render showed, and the two things it changed
+
+Run on the author's 431-scene `fanfic neew` (a copy with the same folder
+name), `en-US-AndrewNeural`, 1080p, captions, the new build, on this Windows
+machine. The voice was not in the cache, so every line was spoken fresh.
+
+- **The throttle arrived at line 338**, 06:21 UTC — D-195's 335 again. The
+  render printed the warning, kept encoding every spoken scene, and **failed
+  nothing**. The service let two lines through by 06:33, then refused
+  everything until ~06:55, and the render resumed on its own: 390 lines by
+  06:56. That is precisely where v0.1.19 failed seven or eight scenes and
+  stopped.
+- **A second streak began at 390** — ~50 lines per recovery — and the service
+  then **trickled**: one line in thirty minutes, the rest refused.
+
+Two defects in this decision's own first version, both only visible by
+watching it:
+
+- **Every trickled line restarted the patience.** A line spoken ends the
+  streak, so the next refusal starts a fresh half-hour — a service letting one
+  line through every twenty-five minutes would have held a render for hours.
+  Each line now also carries **its own** clock (`still_worth_waiting`): it
+  gives up after `Pace::patience` of its own waiting, whatever the streak says.
+- **Every trickled line repeated the warning**, six times in forty minutes. It
+  is said once per streak and at most every ten minutes
+  (`worth_announcing`).
+
+**And a waiting line no longer holds up the scenes behind it.** The 40x run
+(17 240 scenes, 15 640 of them with their line already in the cache) stalled at
+**392 segments**: the audio stage admitted scenes in film order, so all eight
+audio workers took the first eight lines the service was refusing and the
+ready scenes behind them could not start — the graphics card idle for the whole
+throttle. `pool::pipeline_in` admits stage one in a given order and still
+returns both vectors in input order; `resolve_and_render` puts every scene
+whose narration needs no request first (`audio::provider_needed`, the same key
+`resolve` computes). What is encoded is unchanged; only when.
+
+**And the patience is an hour, not the half-hour first written.** The first
+streak here lasted ~35 minutes and D-195's log shows one of at least 54, so
+thirty minutes would still fail the render of an operator who walked away — and
+a film an hour later is worth more to them than an error that asks them to come
+back and press Render. Each line waits in parallel, so the render waits at most
+about an hour past its last progress before it reports what is left.
+
+And one the throttle exposed elsewhere: **`still voices --use` refused to save
+a preference when the catalogue could not be fetched** — gate 7i failed on a
+throttled machine with *"could not set a fallback voice"*. The no-provider path
+already saved with *"not checked against a catalogue"* and its comment named a
+machine that has lost its network as the reason; the installed-but-unreachable
+path now does the same.
+
+And the log was missing what the service said: each refused attempt's stderr
+reached `runs.csv` only when a line finally gave up. `Gate::refused` keeps the
+last refusal's text and the warning row carries it as `said` (D-016).
+
+#### The graphics card: it was never used by the window, and now it is the default
+
+The window had **no way to ask for the card at all** — `--encoder` (D-162)
+existed only on the command line — so every film the author made in the window
+was encoded by libx264 on the processor while the RTX 3060 sat idle. That is
+the answer to *"does it auto-detect"*: it detected (D-159, `still doctor`) and
+never used what it found.
+
+Asked which way to go, **the author chose the graphics card on by default**,
+with a switch to turn it off. That reverses D-036's default and D-162's "a
+draft mode, not a better default", on the author's authority, with the costs
+stated rather than discovered:
+
+- **Speed**: 1.20x on this machine (D-159, D-162 and the 2026-09-20 session
+  measured 1.19–1.23x), 1.67x on a slow laptop (D-198).
+- **Quality**: SSIM 0.985 against libx264 on this content (D-198); slight
+  banding on slow pans across smooth gradients. `off` is the sharper picture.
+- **One full re-encode per project**: a hardware segment has its own cache key
+  (D-162), so the first render of every existing project after upgrading
+  re-encodes its video once. Narration is untouched — the audio cache does not
+  key on the encoder.
+- **Determinism (D-077) is per machine now**, not per project: two machines
+  with different cards produce different bytes from one project. Each one is
+  still deterministic against itself.
+
+How it is built:
+
+- `machine::Machine::use_graphics` in `settings.yaml`; absent means on, and only
+  `use_graphics: false` is ever written.
+- `tooling::default_encoder()` — the card when this machine *proved* it can
+  encode a frame with it (D-159) and the setting is on; libx264 otherwise.
+  Detection is once per process. `SPOONSTILL_GRAPHICS=on|off` overrides it for
+  one process.
+- **Resolved by the control surfaces, never inside `render_project`.** A library
+  render that names no encoder still means libx264, so every test that pins a
+  film's bytes keeps describing the same film; the gate scripts export
+  `SPOONSTILL_GRAPHICS=off` for the same reason, and gate 7h still asks for the
+  card by name.
+- **A scene the card refuses is encoded on the processor** rather than failing
+  the film — a driver's session limit or memory taken by a game can refuse a
+  real scene after the probe frame worked. Legal because D-162 measured both
+  against `SegmentProfile` field for field, and the fallback is asserted
+  against it again inside `render_scene`.
+- **Every render says what encoded it** — `FilmEvent::Planned.encoder`, on the
+  CLI's first line and in the window's log — and `runs.csv` records the
+  encoder's name.
+- **The switch is in both places**: the window's Settings → *Graphics card*,
+  and `still doctor --graphics on|off`, which also prints what renders will
+  use.
