@@ -391,7 +391,13 @@ with `validate` alone reports the harness's own cascade, which is how the first
 run of this one misled for a minute.
 
 Render stress on the 431 scenes, cold: 8 m 49 s, no refusals, 1867.855 s
-against 1867.833 s, VideoToolbox (D-199's default). **Not run on Windows.**
+against 1867.833 s, VideoToolbox (D-199's default). Re-rendered after the
+fix: same frames and duration, audio byte-identical, **video not** — and that
+is VideoToolbox, not the fix: one scene rendered twice by one binary differs
+with `--encoder auto` and is identical with `--encoder off`. D-199's
+"deterministic against itself" is corrected in place; the default is left for
+the author. **Compare films byte for byte only with `--encoder off`.**
+**Not run on Windows.**
 
 
 ### State as of 2026-10-07 — voices that went missing, and a graphics card nobody asked (D-199), `v0.1.20`

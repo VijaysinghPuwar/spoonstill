@@ -9746,6 +9746,14 @@ stated rather than discovered:
 - **Determinism (D-077) is per machine now**, not per project: two machines
   with different cards produce different bytes from one project. Each one is
   still deterministic against itself.
+  **Corrected 2026-10-07, measured: not on macOS.** `still render-scene
+  --encoder auto` run twice on one scene, same binary, same Mac: two
+  different VideoToolbox video streams; `--encoder off` gave identical
+  bytes. The 431-scene film rendered twice gave identical audio and
+  different video. The films are correct (same frames, duration and audio, and
+  the segment cache still reuses what it made), but a re-render with the card
+  is not byte-identical, and a byte comparison must pass `--encoder off`.
+  Whether that changes the default is the author's call; not changed here.
 
 How it is built:
 
