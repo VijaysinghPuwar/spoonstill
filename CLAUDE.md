@@ -367,6 +367,22 @@ be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
 
+### State as of 2026-10-08 — D-200 and D-201 run on Windows, and the harness that checks them could not (D-202), `v0.1.22`
+
+**Run on Windows 11, the author's machine (RTX 3060).** The product needed no
+change: `cargo test --workspace` **774 / 0 / 11** (desktop included), gates
+**39/39**, and `scripts/kill-stress.py` **1 200 rounds, 1 062 killed, 542
+stopped a rename part-way, 0 failures** on NTFS with `TerminateProcess`. The
+harness itself could not start here — `signal.SIGKILL`, `cp -c`, and a
+relative binary path `CreateProcess` will not resolve — and its 0–60 ms kill
+window was tuned for APFS while a Windows move takes ~0.6 s, so most kills
+would have landed in start-up and still reported 0 failures. **Read D-202
+before touching the harness**: the window is measured per machine now and the
+last line counts kills that left a parked file — if that is 0, nothing was
+tested. Also: WebView2 holds no thumbnail open (swaps rename fine with the
+window up), and **NVENC is byte-deterministic** here, unlike VideoToolbox.
+Render stress: 120 spoken scenes cold, exit 0; reorder + swap reuses 118/120.
+
 ### State as of 2026-10-07, later — Undo checks content (D-200), and a killed move no longer locks the project (D-201), `v0.1.21`
 
 **D-200 is the author's own work**, written locally as "D-198" while upstream

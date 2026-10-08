@@ -9911,3 +9911,55 @@ failures** across three seeds. The render stress, run on the same tree before
 the fix, was unaffected by it: 431 scenes cold in 8 m 49 s, 431 lines spoken
 with no refusal, 1867.855 s against 1867.833 s expected. **Not run on
 Windows.**
+
+### D-202 — The kill harness runs where it is pointed, and says whether it hit anything · Accepted
+
+**Found 2026-10-08 running D-201's `scripts/kill-stress.py` on Windows 11**,
+the first time any of D-200 or D-201 was executed on this platform. The
+product held; the harness could not start, three ways, each D-198's shape — a
+rule written for one platform and handed to its sibling:
+
+| | on Windows |
+|---|---|
+| `signal.SIGKILL` | does not exist in Python's `signal` module there, so the first kill is an `AttributeError` |
+| `cp -c` | a macOS clone flag, and there is no `cp` outside Git Bash at all |
+| `target/release/still` | `CreateProcess` does not resolve the documented relative path, so the first round is `FileNotFoundError` |
+
+`p.kill()` is SIGKILL on unix and `TerminateProcess` on Windows — the same
+"no chance to clean up" the harness exists to provoke. `shutil.copyfile` gives
+the same bytes everywhere, which is all the harness compares. The binary path
+is made absolute, with `.exe` added where it exists.
+
+**The fourth defect would have passed, which is why it matters most.** The
+kill fell at `uniform(0, 0.06)` s for a move and `0.02` s for a picture move —
+right on an APFS laptop, and on NTFS a 431-scene move takes **0.58–0.73 s**.
+Measured first: with the old window, 5 kills out of 5 rounds, and nothing said
+whether any of them reached a rename. A harness whose kills all land in process
+start-up reports `0 failures` truthfully and tests nothing (D-154's vacuous
+resume gate, D-116's trap). The window is now **measured** on the machine
+running it — each command timed there and back, so the project is unchanged —
+and the final line counts the kills that **left a parked file**, which is the
+case under test. A run where that number is 0 has tested nothing and says so.
+
+**Measured on Windows, after:** three seeds, **1 200 rounds, 1 062 killed
+mid-run, 542 stopped a rename part-way, 0 failures** — no file lost,
+duplicated or separated from its partner, recovery idempotent, `still
+validate` clean after every round. So D-201 holds on NTFS with
+`TerminateProcess`, against roughly half its kills landing inside pass one or
+pass two.
+
+Also checked here, because only this platform can: WebView2 holds no handle on
+a displayed thumbnail. With the window open on a 30-scene project, picture
+swaps (one mixed `.png`/`.jpg`), a scene move, a remove and a replace all
+renamed cleanly and validated with no problems. And **NVENC is deterministic
+against itself** on this RTX 3060: one scene rendered twice with `--encoder
+auto` gave identical bytes, as `--encoder off` did — so D-199's correction
+(VideoToolbox is not) is a macOS fact, not a graphics-card one.
+
+**And the render path, on the same tree:** 120 of the author's scenes, spoken
+and captioned at 720p on the graphics card (D-199's default), cold in 2 m 53 s,
+524.388 s against 524.367 s expected, no refusal. Then `still move 120 1` and
+a picture swap of 050/051, re-rendered: **120 narrations from cache, 118 of 120
+segments reused** in 5.8 s — the move free under `motion_seed: v2`, the swap
+re-encoding exactly its two scenes. `cargo test --workspace` **774 passed / 0
+failed / 11 ignored**, desktop included; `make gates`' three scripts **39/39**.

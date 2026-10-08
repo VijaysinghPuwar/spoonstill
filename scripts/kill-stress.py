@@ -5,10 +5,15 @@ project and check that recovery never loses, duplicates or mispairs a file
 usage: python3 -I scripts/kill-stress.py STILL FIXTURE_DIR WORK_DIR ROUNDS
        SEED=N to vary the schedule; a round is one command, killed or not.
 """
-import hashlib, os, random, re, shutil, signal, subprocess, sys, time
+import hashlib, os, random, re, shutil, subprocess, sys, time
 from collections import Counter
 
 still, fixture, work, rounds = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+# Windows' CreateProcess does not find a relative `target/release/still` the
+# way a unix exec does, so the documented invocation is resolved here
+still = os.path.abspath(still)
+if os.name == "nt" and not still.lower().endswith(".exe") and os.path.isfile(still + ".exe"):
+    still += ".exe"
 random.seed(int(os.environ.get("SEED", "7")))
 IMG = {"jpg", "jpeg", "png"}
 
@@ -93,10 +98,32 @@ for name in sorted(os.listdir(fixture)):
         # every fifth picture is a .png, so swaps mix extensions (D-200)
         if name.endswith(".jpg") and int(name[:3]) % 5 == 0:
             dst = name[:-4] + ".png"
-        subprocess.run(["cp", "-c", os.path.join(fixture, name), os.path.join(proj, dst)], check=True)
+        # `cp -c` is a macOS clone and Windows has no `cp`; a plain copy is the
+        # same bytes everywhere, which is all the harness compares
+        shutil.copyfile(os.path.join(fixture, name), os.path.join(proj, dst))
 
 n = len(snapshot(proj)[0])
-fails = kills = 0
+
+def timed(argv):
+    t = time.monotonic()
+    subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    return time.monotonic() - t
+
+# A kill only tests recovery if it lands while files are being renamed, and how
+# long that takes is the machine's: a 431-scene move is tens of milliseconds on
+# an APFS laptop and ~0.6 s on NTFS. Each command's own duration is measured
+# (there and back, so the project is unchanged) and kills are spread across it.
+window = {
+    "move": max(timed([still, "move", proj, str(n), "1"]), timed([still, "move", proj, "1", str(n)])),
+    "picture": max(timed([still, "picture", proj, "2", "--to", str(n - 1)]),
+                   timed([still, "picture", proj, str(n - 1), "--to", "2"])),
+}
+print(f"kill windows: move {window['move']:.3f} s, picture {window['picture']:.3f} s", flush=True)
+
+def parked(d):
+    return any(name.startswith(".arranging") for name in os.listdir(d))
+
+fails = kills = interrupted = 0
 for r in range(rounds):
     mode = random.choice(["move", "picture"])
     a, b = random.sample(range(1, n + 1), 2)
@@ -104,13 +131,18 @@ for r in range(rounds):
             else [still, "picture", proj, str(a), "--to", str(b)])
     before, _ = snapshot(proj)
     p = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(random.uniform(0, 0.06 if mode == "move" else 0.02))
+    time.sleep(random.uniform(0, window[mode]))
     if p.poll() is None:
-        p.send_signal(signal.SIGKILL)
+        # SIGKILL on unix, TerminateProcess on Windows, where the signal module
+        # has no SIGKILL at all: both stop the process with no chance to clean up
+        p.kill()
         kills += 1
     p.wait()
+    # a kill that left a parked file stopped a rename part-way, which is the
+    # case under test; one that left none hit startup or the finished command
+    interrupted += parked(proj)
     if not check(proj, before, mode, f"round {r} {' '.join(argv[1:2] + argv[3:])}"):
         fails += 1
         if fails >= 5:
             break
-print(f"done: {r + 1} rounds, {kills} killed mid-run, {fails} failures", flush=True)
+print(f"done: {r + 1} rounds, {kills} killed mid-run, {interrupted} left a rename part-way, {fails} failures", flush=True)
