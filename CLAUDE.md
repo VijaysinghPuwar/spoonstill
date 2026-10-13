@@ -391,6 +391,14 @@ no error or refusal, the campaign with no failure printed and no round count.
 Rerun `scripts/kill-stress.py` (it now covers `remove`) and the 431-scene
 render before quoting either as a pass. **Not run on macOS.**
 
+**CI's audit job went red on this push without a dependency changing**:
+RUSTSEC-2024-0449, `unsafe-libyaml` unmaintained, under `serde_yaml_ng`, so in
+every binary and fed `project.yaml`. Nothing to upgrade to. Recorded in
+`.cargo/audit.toml` with its reasons, **not** swapped for `serde-saphyr`:
+that reopens D-056 and can change how an existing `project.yaml` is read, which
+is the author's call. Locally `cargo audit --deny warnings` is exit 0 with the
+entry and fails on exactly that advisory without it.
+
 ### State as of 2026-10-08 — D-200 and D-201 run on Windows, and the harness that checks them could not (D-202), `v0.1.22`
 
 **Run on Windows 11, the author's machine (RTX 3060).** The product needed no

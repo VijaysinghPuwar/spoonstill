@@ -19,7 +19,7 @@ jobs:
   # A separate job because it is the one thing here that depends on the outside
   # world: an advisory published this morning fails this without a line of our
   # code changing, and that is the point (D-129). `--deny warnings` against the
-  # triaged list in `.cargo/audit.toml` — the eighteen known ones pass, and
+  # triaged list in `.cargo/audit.toml` — the nineteen known ones pass, and
   # anything new stops the build until somebody looks at it and writes down what
   # they found.
   audit:

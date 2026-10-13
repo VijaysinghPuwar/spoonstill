@@ -14,6 +14,9 @@
 # that advisory names as the maintained replacement, carries no advisory. An
 # ignore entry was the alternative and would have been the wrong answer.
 #
+# Re-run 2026-10-13: one new warning, RUSTSEC-2024-0449 (`unsafe-libyaml`),
+# recorded below rather than fixed, and the entry says why. Nineteen now.
+#
 # The two targets this project ships are macOS and Windows (D-071, and the five
 # `target:` entries in .github/workflows/release.yml). There is no Linux build.
 # That is not a reason to ignore a Linux-only advisory forever — it is the
@@ -90,4 +93,32 @@ ignore = [
     # itself going quiet, or spoonstill ever loading a font it did not compile
     # in — which would make this the highest-priority entry in the file.
     "RUSTSEC-2026-0192", # ttf-parser unmaintained
+
+    # --- The YAML parser underneath serde_yaml_ng ----------------------------
+    #
+    # Added 2026-10-13, when this advisory reached the database and turned CI's
+    # audit job red on a commit that changed no dependency. `unsafe-libyaml` is
+    # libyaml machine-translated into unsafe Rust, archived by its owner in
+    # March 2024. It is reached only through `serde_yaml_ng` (D-056's maintained
+    # fork of `serde_yaml`), from spoonstill-app, so it is **in every binary on
+    # every platform**. Both crates are at their newest release: there is
+    # nothing to upgrade to.
+    #
+    # **Unlike `ttf-parser` above, this one is fed operator input** —
+    # `project.yaml`, and the machine's own `settings.yaml`. What bounds that:
+    # D-126 refuses a `project.yaml` over 1 MiB before it is read, and the file
+    # is the operator's own, in their own folder, not something fetched. That
+    # is a smaller exposure than a parser fed network bytes and a larger one
+    # than three compiled-in fonts, and it is the entry here most worth acting
+    # on.
+    #
+    # The advisory names safe-Rust replacements (`serde-saphyr`, `noyalib`).
+    # Switching was **not done unattended, deliberately**: it reopens D-056,
+    # and a different parser can read an existing `project.yaml` differently —
+    # YAML 1.1's `yes`/`no`/`on`/`off` booleans, number forms, error wording
+    # every `still validate` message is built on. That is the author's
+    # decision to make with those files in front of them, with a test that
+    # parses every fixture through both parsers and compares. Review by
+    # 2026-11-30 with the rest of this file.
+    "RUSTSEC-2024-0449", # unsafe-libyaml unmaintained
 ]
