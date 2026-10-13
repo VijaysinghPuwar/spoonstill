@@ -45,7 +45,7 @@
 //!   alone would silently unpair the narration — a scene that still renders,
 //!   with the wrong voice on it.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -177,6 +177,12 @@ pub fn scenes(root: &Path) -> Result<Vec<Scene>, ArrangeError> {
             source,
         })?
         .flatten()
+        // A dotfile is not part of the project, by the folder scan's own rule
+        // (D-050), and must not be here either (D-203). Two had this surface
+        // refusing every move over a project `still validate` passed: the
+        // `.001.jpg.partial-…` a killed `still picture` copy leaves, and the
+        // `._001.jpg` a Mac writes beside every file on an exFAT or SMB drive.
+        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
         .map(|entry| entry.path())
         .filter(|path| path.is_file())
         .collect();
@@ -424,9 +430,17 @@ fn renumber(root: &Path, order: &[Scene]) -> Result<(), ArrangeError> {
     // disappeared and nothing could work out where they belonged. Measured on a
     // 2000-scene project, killed 120 ms in: 433 files parked, 434 scenes gone,
     // and `still validate` reporting "1566 scenes — no problems".
+    //
+    // **A scene already wearing its wanted name is not touched** (D-204).
+    // Names are one per position, so no other file comes from that name or is
+    // going to it: leaving it out changes nothing recovery reads. Moving scene
+    // 400 to 401 of 431 used to rename all 862 files twice; it renames four.
     let mut staged: Vec<(PathBuf, String, String)> = Vec::new();
     for (index, scene) in order.iter().enumerate() {
         let wanted = format!("{:0width$}", index + 1, width = width);
+        if already_named(scene, &wanted) {
+            continue;
+        }
         for file in &scene.files {
             let extension = file
                 .extension()
@@ -474,10 +488,15 @@ fn already_in_place(order: &[Scene]) -> bool {
     let width = MIN_WIDTH.max(order.len().to_string().len());
     order.iter().enumerate().all(|(index, scene)| {
         let wanted = format!("{:0width$}", index + 1, width = width);
-        scene.files.iter().all(|file| {
-            let extension = file.extension().and_then(OsStr::to_str).unwrap_or_default();
-            file.file_name().and_then(OsStr::to_str) == Some(&format!("{wanted}.{extension}"))
-        })
+        already_named(scene, &wanted)
+    })
+}
+
+/// Whether every file of `scene` is already called `<wanted>.<its extension>`.
+fn already_named(scene: &Scene, wanted: &str) -> bool {
+    scene.files.iter().all(|file| {
+        let extension = file.extension().and_then(OsStr::to_str).unwrap_or_default();
+        file.file_name().and_then(OsStr::to_str) == Some(&format!("{wanted}.{extension}"))
     })
 }
 
@@ -673,6 +692,7 @@ pub fn recover(root: &Path) -> Result<usize, ArrangeError> {
 
     let mut parked: Vec<(PathBuf, String, String, String)> = Vec::new();
     let mut removing: Vec<PathBuf> = Vec::new();
+    let mut abandoned: BTreeSet<String> = BTreeSet::new();
     for entry in entries.flatten() {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
@@ -684,13 +704,68 @@ pub fn recover(root: &Path) -> Result<usize, ArrangeError> {
             removing.push(entry.path());
         } else if let Some((from, wanted, extension)) = parked_parts(&name) {
             parked.push((entry.path(), from, wanted, extension));
+        } else if let Some(destination) = scene_partial_destination(&name) {
+            abandoned.insert(destination);
         }
+    }
+    // A copy killed before its rename leaves its temporary beside the scene
+    // name it was for (D-203) — a whole photograph, under a dot the operator's
+    // file browser hides. `sweep_partials` keeps its own exact-name rule and
+    // leaves anything written in the last minute, so a copy another process is
+    // still making is not touched. A clean folder pays nothing for this.
+    for destination in abandoned {
+        spoonstill_media::atomic::sweep_partials(&root.join(destination));
     }
     // Deterministic, so two runs of a recovery resolve the same way.
     parked.sort_by(|a, b| a.0.cmp(&b.0));
     removing.sort();
 
     let mut restored = 0;
+
+    // A removal killed while it was still parking left the rest of its scene
+    // under the scene's own name (D-203): the still parked, the narration not,
+    // so finishing only what was parked put the photograph in the bin and left
+    // its narration behind as a scene waiting for a picture — the split D-170
+    // parks to prevent. `remove` renumbers only after every file has reached the
+    // bin, so while anything is parked as `.removing-<stem>` no other scene can
+    // be called `<stem>`: whatever still is belongs to the scene being removed.
+    // It is parked too, so a recovery that is itself interrupted can resume.
+    let stems: BTreeSet<String> = removing
+        .iter()
+        .filter_map(|path| path.file_name()?.to_str().and_then(removing_parts))
+        .map(|(stem, _)| stem)
+        .collect();
+    if !stems.is_empty() {
+        let mut rest: Vec<PathBuf> = fs::read_dir(root)
+            .map_err(|source| ArrangeError::Io {
+                doing: "reading what is left of a removed scene",
+                path: root.to_path_buf(),
+                source,
+            })?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .filter(|path| {
+                has_extension(path, &IMAGE_EXTENSIONS)
+                    || has_extension(path, &AUDIO_EXTENSIONS)
+                    || has_extension(path, &TEXT_EXTENSIONS)
+            })
+            .filter(|path| {
+                path.file_stem()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|stem| stems.contains(stem))
+            })
+            .collect();
+        rest.sort();
+        for file in rest {
+            let extension = file.extension().and_then(OsStr::to_str).unwrap_or_default();
+            let stem = file.file_stem().and_then(OsStr::to_str).unwrap_or_default();
+            let target = unique(root.join(removing_name(stem, extension)));
+            rename(&file, &target)?;
+            removing.push(target);
+        }
+        removing.sort();
+    }
 
     // A removal that stopped half way. It is always finished rather than undone
     // — see `finish_removal` for why that is the reading that keeps the scene
@@ -811,6 +886,17 @@ pub fn recover(root: &Path) -> Result<usize, ArrangeError> {
         let _ = fs::remove_file(&marked);
     }
     Ok(restored)
+}
+
+/// The scene file a copy's temporary was for — `024.jpeg` for
+/// `.024.jpeg.partial-<pid>-<n>.jpeg` — and only for a numbered scene name, so
+/// nothing of the operator's that merely looks similar is ever considered.
+fn scene_partial_destination(name: &str) -> Option<String> {
+    let (destination, _) = name.strip_prefix('.')?.split_once(".partial-")?;
+    let (stem, _) = destination.rsplit_once('.')?;
+    let numbered = !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_digit());
+    (numbered && spoonstill_media::atomic::is_partial_of(name, destination))
+        .then(|| destination.to_owned())
 }
 
 /// Whether scene `id` already holds a file these parked files would land on:
@@ -1674,6 +1760,90 @@ mod tests {
         );
     }
 
+    /// D-203. A kill *between* the two parks: the still is parked, its script
+    /// still wears the scene's name. Finishing only what was parked put the
+    /// photograph in the bin and left the script behind as scene 002 waiting
+    /// for a picture — reproduced by hand before the fix, with `still validate`
+    /// then calling it an ordinary waiting scene.
+    #[test]
+    fn a_removal_killed_mid_park_takes_the_rest_of_its_scene_with_it() {
+        let project = three();
+        fs::rename(
+            project.path().join("002.jpeg"),
+            project.path().join(removing_name("002", "jpeg")),
+        )
+        .expect("park the still alone");
+
+        assert_eq!(recover(project.path()).expect("recovers"), 2);
+
+        let mut kept: Vec<String> = fs::read_dir(project.path().join(REMOVED_DIR))
+            .expect("the removed folder")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        kept.sort();
+        assert_eq!(kept, vec!["002.jpeg", "002.txt"], "the scene, whole");
+        assert_eq!(
+            project.listing(),
+            vec!["001.jpeg", "001.txt", "003.jpeg"],
+            "no half of 002 left behind, and no other scene touched"
+        );
+    }
+
+    /// D-203. A dotfile with an image extension is not a scene. Found by
+    /// killing `still picture 185 FILE` mid-copy: the `.185.jpg.partial-…`
+    /// temporary it left made every move refuse the project as "not a numbered
+    /// scene", while `still validate` reported no problems. A Mac's `._002.jpg`
+    /// on a shared drive did the same.
+    #[test]
+    fn a_dotfile_beside_the_scenes_does_not_stop_a_move() {
+        let project = three();
+        fs::write(project.path().join(".002.jpeg.partial-9484-0.jpeg"), "half").expect("w");
+        fs::write(project.path().join("._002.jpeg"), "appledouble").expect("w");
+
+        let all = scenes(project.path()).expect("the dotfiles are not scenes");
+        assert_eq!(all.len(), 3);
+        move_to(project.path(), "003", 1).expect("a move is not refused");
+        assert!(
+            project.path().join("._002.jpeg").exists(),
+            "and nothing touched them"
+        );
+        assert!(
+            project
+                .path()
+                .join(".002.jpeg.partial-9484-0.jpeg")
+                .exists()
+        );
+    }
+
+    /// D-203. What a killed copy left is collected — and only that, and only
+    /// once nobody can still be writing it.
+    #[test]
+    fn an_abandoned_copy_is_collected_and_a_live_one_is_not() {
+        let project = three();
+        let old = project.path().join(".002.jpeg.partial-9484-0.jpeg");
+        let live = project.path().join(".003.jpeg.partial-9485-0.jpeg");
+        let stranger = project.path().join(".notes.partial-backup.txt");
+        for path in [&old, &live, &stranger] {
+            fs::write(path, "bytes").expect("w");
+        }
+        let an_hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(&old)
+            .and_then(|f| f.set_modified(an_hour_ago))
+            .expect("age it");
+
+        recover(project.path()).expect("recovers");
+
+        assert!(!old.exists(), "a copy killed an hour ago is litter");
+        assert!(
+            live.exists(),
+            "a copy written a moment ago may still be running"
+        );
+        assert!(stranger.exists(), "and nothing that is not ours is touched");
+    }
+
     /// The half that already reached the bin stays there, and the parked half
     /// follows it — the scene ends whole, under the bin's own collision rule.
     #[test]
@@ -1683,6 +1853,14 @@ mod tests {
         fs::create_dir_all(&bin).expect("bin");
         // A photograph removed earlier, wearing the name this one wants.
         fs::write(bin.join("002.jpeg"), "an earlier photograph").expect("write");
+        // The state a kill leaves (D-203): the script already reached the bin
+        // and the still was parked, so nothing of 002 is under its own name.
+        fs::rename(project.0.join("002.txt"), bin.join("002.txt")).expect("binned");
+        fs::rename(
+            project.0.join("002.jpeg"),
+            project.0.join(removing_name("002", "jpeg")),
+        )
+        .expect("park");
         fs::write(
             project.0.join(removing_name("002", "jpeg")),
             "the interrupted one",
@@ -1836,6 +2014,78 @@ mod tests {
             fs::read_to_string(project.path().join("002.txt")).unwrap(),
             "0002.txt"
         );
+    }
+
+    /// D-204. A move renames the scenes whose names change, and no others.
+    ///
+    /// On Windows the untouched files are held open without
+    /// `FILE_SHARE_DELETE`, so renaming one is a sharing violation and the
+    /// move fails — a positive check on the platform with no `ctime`. On unix
+    /// the `ctime` of each is compared, D-187's instrument.
+    #[test]
+    fn a_move_renames_only_the_scenes_whose_names_change() {
+        let project = Project::new(
+            "partial-move",
+            &[
+                ("001", &["jpeg", "txt"]),
+                ("002", &["jpeg", "txt"]),
+                ("003", &["jpeg", "txt"]),
+                ("004", &["jpeg", "txt"]),
+                ("005", &["jpeg", "txt"]),
+            ],
+        );
+        let untouched: Vec<PathBuf> = ["001", "002", "003"]
+            .iter()
+            .flat_map(|id| ["jpeg", "txt"].map(|ext| project.path().join(format!("{id}.{ext}"))))
+            .collect();
+
+        #[cfg(windows)]
+        let _held: Vec<fs::File> = {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_SHARE_READ | FILE_SHARE_WRITE, and not FILE_SHARE_DELETE.
+            untouched
+                .iter()
+                .map(|path| {
+                    fs::OpenOptions::new()
+                        .read(true)
+                        .share_mode(0x1 | 0x2)
+                        .open(path)
+                        .expect("hold")
+                })
+                .collect()
+        };
+        #[cfg(unix)]
+        let stamp = |paths: &[PathBuf]| -> Vec<(i64, i64)> {
+            use std::os::unix::fs::MetadataExt;
+            paths
+                .iter()
+                .map(|p| {
+                    let m = fs::metadata(p).expect("metadata");
+                    (m.ctime(), m.ctime_nsec())
+                })
+                .collect()
+        };
+        #[cfg(unix)]
+        let before = stamp(&untouched);
+
+        super::move_to(project.path(), "005", 4).expect("swapping the last two scenes");
+
+        #[cfg(unix)]
+        assert_eq!(
+            before,
+            stamp(&untouched),
+            "a scene that kept its name was renamed"
+        );
+        assert_eq!(
+            project.contents(),
+            vec!["001.jpeg", "002.jpeg", "003.jpeg", "005.jpeg", "004.jpeg"]
+        );
+        assert_eq!(
+            fs::read_to_string(project.path().join("004.txt")).unwrap(),
+            "005.txt",
+            "the moved scene took its narration with it"
+        );
+        assert!(!project.path().join(PLACING_MARKER).exists());
     }
 
     /// What this module does **not** check on Windows, said out loud.

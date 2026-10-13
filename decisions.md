@@ -9963,3 +9963,92 @@ a picture swap of 050/051, re-rendered: **120 narrations from cache, 118 of 120
 segments reused** in 5.8 s — the move free under `motion_seed: v2`, the swap
 re-encoding exactly its two scenes. `cargo test --workspace` **774 passed / 0
 failed / 11 ignored**, desktop included; `make gates`' three scripts **39/39**.
+
+### D-203 — A removal takes its whole scene, and a dotfile is never a scene · Accepted
+
+**Found 2026-10-13 on Windows 11 by widening D-201's kill harness** to every
+command that renames inside a project — `move`, `picture --to`, `picture
+--remove`, `picture FILE` and `remove` — and by reading `remove` before
+believing the harness. Two defects, both in `spoonstill_app::arrange`, neither
+reachable by the harness as it shipped, which killed only `move` and `picture
+--to`.
+
+**A removal killed mid-park split its scene.** D-170 parks a scene's files as
+`.removing-<stem>.<ext>` so that recovery finishes a removal rather than
+leaving the scene in two places — but parking is one rename per file, and the
+still is parked first. Killed between the two, recovery finished what was
+parked: the photograph went to `removed/` and the narration stayed as `003.txt`,
+which since D-193 is an ordinary *scene waiting for its picture*. `still
+validate` then reported one warning and no error. Reproduced by hand, which is
+exactly the state a kill leaves; the window is microseconds wide, so a random
+kill finds it about never (300 kills of `remove` alone hit it zero times),
+which is why the proof is a unit test and not the harness.
+
+The rule is decidable from the disk: `remove` renumbers only after every file
+has reached the bin, so while anything is parked as `.removing-<stem>`, no other
+scene can be called `<stem>`. Whatever still wears that stem is the rest of the
+scene being removed, and recovery parks it too — parked rather than moved, so a
+recovery that is itself killed resumes. `picture --remove` does not use this
+journal (it moves straight to the bin), so a scene losing only its picture is
+never mistaken for one being removed. A test fixture,
+`a_removal_finishes_around_files_already_in_the_bin`, had built a state no run
+produces — a parked `.removing-002.jpeg` while `002.jpeg` was still in the
+folder — and now builds the one a kill leaves.
+
+**A dotfile with an image extension stopped every arrange command.** `scenes()`
+took every file with an image extension, including dot-prefixed ones, while the
+folder scan has always ignored them (D-050). Found when the harness killed
+`still picture 185 FILE` mid-copy: the copy's `.185.jpg.partial-9484-0.jpg`
+temporary made every later `move`, `remove` and `picture` refuse the project as
+*"not a numbered scene, so this project's order is not spoonstill's to
+rewrite"* — permanently, over a folder `still validate` called clean. Two
+implementations of one rule disagreeing (D-111's shape). It is not only a
+crash's leftover: a Mac writes `._001.jpg` beside every file it touches on an
+exFAT or SMB drive, which is where an operator who works on both machines keeps
+their media. Confirmed with a hand-made `._002.jpg`: refused before, moves after.
+
+**And the killed copy's temporary is now collected.** A whole photograph under
+a name the file browser hides is D-178's litter in the project folder. `recover`
+already walks the folder before every arrange and picture command; it notes any
+`.<NNN>.<ext>.partial-<pid>-<n>.<ext>` — a numbered scene name only — and hands
+it to `atomic::sweep_partials`, which keeps its exact-name match and its
+one-minute grace for a copy another process is still writing. A clean folder
+pays nothing.
+
+**And one sentence.** `ProblemKind::InterruptedRename` with one file read
+*"1 file is are part-way through a rename"* — the count a single killed rename
+most often leaves. Pinned now.
+
+Each of the four tests was run against the code without its fix and seen to
+fail, alone. `scripts/kill-stress.py` gained `remove` (a ninth of its rounds, so
+a long run does not empty the project) and counts `removed/` with the project
+when it checks that nothing was lost.
+
+### D-204 — A renumber renames the scenes whose names change, and no others · Accepted
+
+**Measured 2026-10-13 on Windows 11, while testing D-203.** `renumber` parked
+and re-placed **every file in the project** whenever any name had to change, so
+swapping two adjacent scenes of the author's 431 was 862 files renamed twice —
+**0.52–0.57 s** on NTFS for a change of four names. D-187 already skipped the
+renumber when *nothing* changed; this is the same rule one scene at a time.
+
+**Why it cannot weaken recovery.** A wanted name is one per position, so a
+scene already wearing its wanted name is not the origin of any other file and
+not the destination of any other file: leaving it out of both passes removes
+nothing D-121's journal, D-170's occupancy check or D-201's marker reads. Every
+argument those decisions make is about the files that move, and those are
+exactly the files that still move. A change of width (999 → 1 000 scenes)
+changes every wanted name, so it renames everything, as it must.
+
+**Measured, 431 scenes, six runs each:** an adjacent swap near the end,
+**0.52–0.57 s → 0.13–0.14 s**; moving the first scene to the last renames
+everything either way and stays at **0.52–0.55 s**. A removal now renames only
+the scenes after it, and removing the last renames nothing. On a network share,
+where this author keeps media and where every rename is a round trip, the
+saving is larger than on a local disk; that is directional and was not
+measured.
+
+**The test runs on Windows, which D-187's could not.** It holds the untouched
+scenes' files open without `FILE_SHARE_DELETE`, so renaming one is a sharing
+violation and the move fails — with the skip removed it fails on `001.jpeg`,
+*"being used by another process"*. On unix it compares `ctime` as D-187 does.

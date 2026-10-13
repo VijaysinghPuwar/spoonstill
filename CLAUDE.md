@@ -367,6 +367,30 @@ be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
 
+### State as of 2026-10-13 — a removal that split its scene, a dotfile that locked arrange (D-203), and a move that renames only what moves (D-204), `v0.1.23`
+
+**Run on Windows 11, the author's machine, FFmpeg now 9.0.2.** Read **D-203
+and D-204 before touching `arrange::recover`'s `.removing-` branch,
+`scene_partial_destination`, the dotfile filter in `scenes`, or the
+`already_named` skip in `renumber`.** Both defects were found by widening the
+kill harness to `remove`, `picture --remove` and `picture FILE`, and by reading
+`remove` before trusting a random kill to reach a microsecond window: a removal
+killed between its two parks left the narration behind as a waiting scene, and
+a killed `still picture` copy's `.NNN.jpg.partial-…` (or a Mac's `._NNN.jpg`)
+made every arrange command refuse a project `still validate` called clean. And
+`renumber` renamed all 862 files of 431 scenes to swap two neighbours —
+0.54 s → 0.135 s now, with a test that holds the untouched files open without
+`FILE_SHARE_DELETE` so Windows proves it.
+
+`cargo test --workspace` **779 / 0 / 11**, M2 **23/23** after the change (M0
+8/8, M1 8/8 on the same session's earlier tree), fmt and clippy clean, the
+`aarch64-apple-darwin` cross-check clean with `-D warnings`. **Not finished:**
+the final-binary kill campaign and a cold 431-scene render were both stopped
+by Claude Code under machine-wide memory pressure — the render at 327/431 with
+no error or refusal, the campaign with no failure printed and no round count.
+Rerun `scripts/kill-stress.py` (it now covers `remove`) and the 431-scene
+render before quoting either as a pass. **Not run on macOS.**
+
 ### State as of 2026-10-08 — D-200 and D-201 run on Windows, and the harness that checks them could not (D-202), `v0.1.22`
 
 **Run on Windows 11, the author's machine (RTX 3060).** The product needed no

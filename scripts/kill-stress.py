@@ -1,6 +1,6 @@
-"""Kill `still move` / `still picture --to` at random moments on a numbered
-project and check that recovery never loses, duplicates or mispairs a file
-(D-201). Fetch the 431-scene fixture with scripts/stress.sh first.
+"""Kill `still move` / `still picture --to` / `still remove` at random moments
+on a numbered project and check that recovery never loses, duplicates or
+mispairs a file (D-201), and never splits a removed scene (D-203). Fetch the 431-scene fixture with scripts/stress.sh first.
 
 usage: python3 -I scripts/kill-stress.py STILL FIXTURE_DIR WORK_DIR ROUNDS
        SEED=N to vary the schedule; a round is one command, killed or not.
@@ -41,7 +41,12 @@ def snapshot(d):
             scenes.setdefault(int(stem), {"pic": [], "txt": []})[kind].append(h(p))
     return scenes, stray
 
-def check(d, before, mode, label):
+def binned(d):
+    """Hashes of everything in removed/, which a removal moves files into."""
+    b = os.path.join(d, "removed")
+    return Counter(h(os.path.join(b, n)) for n in os.listdir(b)) if os.path.isdir(b) else Counter()
+
+def check(d, before, mode, label, bin_before=Counter(), gone=None):
     # validate only reports an interrupted rename; an arrange command repairs it
     rec = subprocess.run([still, "move", d, "1", "1"], capture_output=True, text=True)
     if rec.returncode != 0:
@@ -69,15 +74,22 @@ def check(d, before, mode, label):
     pics_a = Counter(x for s in after.values() for x in s["pic"])
     txt_b = Counter(x for s in before.values() for x in s["txt"])
     txt_a = Counter(x for s in after.values() for x in s["txt"])
-    if pics_a != pics_b:
+    pair = lambda S: Counter((tuple(s["pic"]), tuple(s["txt"])) for s in S.values())
+    if mode == "remove":
+        # a removal moves files into removed/: count the bin with the project
+        if pics_a + txt_a + binned(d) != pics_b + txt_b + bin_before:
+            errs.append("a file was lost or duplicated across the project and removed/")
+        whole = pair(before) - Counter([(tuple(gone["pic"]), tuple(gone["txt"]))])
+        if pair(after) not in (pair(before), whole):
+            errs.append("a removed scene was split, or another scene lost its partner")
+    elif pics_a != pics_b:
         errs.append("picture set changed (lost or duplicated)")
-    if txt_a != txt_b:
+    if mode != "remove" and txt_a != txt_b:
         errs.append("narration set changed")
     if mode == "move":
-        pair = lambda S: Counter((tuple(s["pic"]), tuple(s["txt"])) for s in S.values())
         if pair(after) != pair(before):
             errs.append("a picture was separated from its narration")
-    else:  # picture --to: narration order never changes
+    elif mode == "picture":  # narration order never changes
         if {k: v["txt"] for k, v in after.items()} != {k: v["txt"] for k, v in before.items()}:
             errs.append("a narration moved during a picture move")
     if run.returncode != 0:
@@ -121,17 +133,21 @@ window = {
 print(f"kill windows: move {window['move']:.3f} s, picture {window['picture']:.3f} s", flush=True)
 
 def parked(d):
-    return any(name.startswith(".arranging") for name in os.listdir(d))
+    return any(name.startswith((".arranging", ".removing-")) for name in os.listdir(d))
 
 fails = kills = interrupted = 0
 for r in range(rounds):
-    mode = random.choice(["move", "picture"])
+    # a removal is rarer, so a long run does not empty the project
+    mode = random.choices(["move", "picture", "remove"], [4, 4, 1])[0]
+    n = len(snapshot(proj)[0])
     a, b = random.sample(range(1, n + 1), 2)
     argv = ([still, "move", proj, str(a), str(b)] if mode == "move"
+            else [still, "remove", proj, str(a)] if mode == "remove"
             else [still, "picture", proj, str(a), "--to", str(b)])
     before, _ = snapshot(proj)
+    bin_before = binned(proj)
     p = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(random.uniform(0, window[mode]))
+    time.sleep(random.uniform(0, window["move" if mode == "remove" else mode]))
     if p.poll() is None:
         # SIGKILL on unix, TerminateProcess on Windows, where the signal module
         # has no SIGKILL at all: both stop the process with no chance to clean up
@@ -141,7 +157,8 @@ for r in range(rounds):
     # a kill that left a parked file stopped a rename part-way, which is the
     # case under test; one that left none hit startup or the finished command
     interrupted += parked(proj)
-    if not check(proj, before, mode, f"round {r} {' '.join(argv[1:2] + argv[3:])}"):
+    gone = before.get(a) if mode == "remove" else None
+    if not check(proj, before, mode, f"round {r} {' '.join(argv[1:2] + argv[3:])}", bin_before, gone):
         fails += 1
         if fails >= 5:
             break

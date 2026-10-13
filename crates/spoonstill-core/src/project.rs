@@ -633,10 +633,10 @@ impl fmt::Display for ProblemKind {
             ProblemKind::DuplicateId => f.write_str("duplicate scene id"),
             ProblemKind::InterruptedRename { files } => write!(
                 f,
-                "{files} file{} are part-way through a rename that did not finish, \
+                "{files} {} part-way through a rename that did not finish, \
                  so the scenes they belong to are missing — `still remove` or \
                  `still move` on this project puts them back",
-                if *files == 1 { " is" } else { "s" }
+                if *files == 1 { "file is" } else { "files are" }
             ),
             ProblemKind::AmbiguousScene { slot, candidates } => write!(
                 f,
@@ -1210,6 +1210,16 @@ mod tests {
             }]
         );
         assert!(problems[0].to_string().contains("give exactly one"));
+    }
+
+    /// D-203. The singular read "1 file is are part-way…" — the one count a
+    /// killed `still remove` of a single still most often leaves.
+    #[test]
+    fn an_interrupted_rename_agrees_with_its_own_count() {
+        let one = ProblemKind::InterruptedRename { files: 1 }.to_string();
+        let two = ProblemKind::InterruptedRename { files: 2 }.to_string();
+        assert!(one.starts_with("1 file is part-way"), "{one}");
+        assert!(two.starts_with("2 files are part-way"), "{two}");
     }
 
     #[test]

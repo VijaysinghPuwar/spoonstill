@@ -426,7 +426,10 @@ still remove ~/holiday 12 4       # take scenes out, highest first
 **Nothing is ever deleted.** A removed scene's files go to `removed/`, which the
 folder scan never looks at. The whole scene moves together — a still is never
 silently unpaired from its narration — and an interrupted renumber is finished or
-undone on the next command, never left half-way.
+undone on the next command, never left half-way. A move renames only the scenes
+whose numbers change, so swapping two neighbours in a 431-scene project is four
+renames rather than 862, and hidden files beside your photos — a Mac's `._001.jpg`
+on a shared drive, or a copy that was cut off — never stop a move.
 
 The window's Scenes grid has ↑ ↓ and Remove on every row.
 
@@ -859,9 +862,9 @@ before it is called a test**.
 |---|---|
 | Rust | **~50,100 lines** across 6 crates + a Tauri app · edition 2024, pinned to 1.94 |
 | UI | ~4,800 lines of hand-written HTML/CSS/JS — no framework, no build step |
-| Tests | **802 `#[test]` functions** — 47 unit-test modules, 17 integration suites |
+| Tests | **807 `#[test]` functions** — 47 unit-test modules, 17 integration suites |
 | Exit gates | **39** shell gates that render real media and assert real properties |
-| Decisions | **169 numbered decisions** in `decisions.md`, each Accepted / Open / Superseded |
+| Decisions | **171 numbered decisions** in `decisions.md`, each Accepted / Open / Superseded |
 | Direct dependencies | **12 third-party crates** at runtime (plus one build-time, one dev-only) — and `spoonstill-core` has **none** |
 | `unsafe` | forbidden at the workspace root |
 | CI jobs per push | 6 — advisories, macOS, Windows, both installers executed, and the gates |
@@ -932,6 +935,11 @@ obvious fix was wrong, and the test that fails without it.
   reported *"1566 scenes — no problems"* over a project that had 2000. The
   journal is now the filename, so recovery is decidable from the disk alone.
   *(D-121)*
+- **The removal that kept half a scene.** Killed between parking a scene's
+  photograph and its narration, `still remove` finished what it had parked: the
+  photograph went to `removed/` and the narration stayed behind as a scene
+  waiting for a picture, which `validate` reported as ordinary. Recovery now
+  takes whatever still wears that scene's number with it. *(D-203)*
 - **A file lock that had never once worked.** `File::lock` on Windows needs a
   handle opened for read or write-data; `.create(true).append(true)` gives
   neither, so the lock returned `Err` on **every Windows write this program ever
@@ -1056,7 +1064,7 @@ Read in this order; later files never override earlier ones.
 
 | File | What it is |
 |---|---|
-| [`decisions.md`](decisions.md) | **Single source of truth.** 169 numbered decisions, each with the evidence that produced it. |
+| [`decisions.md`](decisions.md) | **Single source of truth.** 171 numbered decisions, each with the evidence that produced it. |
 | [`plan.md`](plan.md) | Milestones M0–M5, each with entry conditions, deliverables, and exit gates that are runnable commands. |
 | [`ffmpeg-findings.md`](ffmpeg-findings.md) | Benchmarks measured on real hardware, with reproduction commands. Evidence, not policy. |
 | [`PROCESS.md`](PROCESS.md) | How the work is actually done — reproduce, fix, prove the test fails without the fix. |
