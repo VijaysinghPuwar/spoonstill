@@ -151,7 +151,7 @@ pub fn concat(
     cancel: &Cancel,
     log: &dyn Diagnostics,
 ) -> Result<Film, MediaError> {
-    let list = write_list(segments, dest)?;
+    let list = write_list(segments, expect.segment_frames, expect.fps, dest)?;
 
     let result = run(tools, &list, segments, dest, expect, cancel, log);
 
@@ -201,6 +201,10 @@ fn run(
         .args(["-f", "concat", "-safe", "0"])
         .input(list)
         .args(["-c", "copy"])
+        // D-206: the film's own edit list in the track's clock, not in
+        // milliseconds, so the length it declares is the length it has.
+        .arg("-movie_timescale")
+        .arg(profile::VIDEO_TIMESCALE.to_string())
         .arg(&temporary_path);
 
     // Asked before a process is started, not only while one runs: a Ctrl-C
@@ -434,7 +438,32 @@ fn validate(
 /// Beside them because the demuxer resolves relative entries against the
 /// list's own directory, and bare filenames because that is the only form this
 /// module is willing to write (see the module docs).
-fn write_list(segments: &[PathBuf], dest: &Path) -> Result<PathBuf, MediaError> {
+///
+/// Every entry carries a `duration`, from the frame count that segment was
+/// asserted at (D-206). Without one the demuxer starts each scene at the
+/// previous file's *declared* end, and an MP4 written with FFmpeg's default
+/// movie timescale declares it rounded to the millisecond — so a long film
+/// drifted short by a fraction of a millisecond per join, and at 800 scenes
+/// the film's own assertion refused it. With one, the timeline is the frame
+/// grid, whatever the files' headers say, which is also what lets segments
+/// cached before the fix join correctly without being re-encoded.
+fn write_list(
+    segments: &[PathBuf],
+    segment_frames: &[u64],
+    fps: u32,
+    dest: &Path,
+) -> Result<PathBuf, MediaError> {
+    if segment_frames.len() != segments.len() {
+        return Err(MediaError::UnusableInput {
+            path: dest.to_path_buf(),
+            detail: format!(
+                "{} segments but {} frame counts — every segment needs the length it was asserted at",
+                segments.len(),
+                segment_frames.len()
+            ),
+        });
+    }
+
     let Some(first) = segments.first() else {
         return Err(MediaError::UnusableInput {
             path: dest.to_path_buf(),
@@ -450,8 +479,9 @@ fn write_list(segments: &[PathBuf], dest: &Path) -> Result<PathBuf, MediaError> 
             detail: "a segment must live in a directory the concat list can sit beside".into(),
         })?;
 
-    let mut body = String::with_capacity(segments.len() * 32);
-    for segment in segments {
+    let durations = list_durations(segment_frames, fps);
+    let mut body = String::with_capacity(segments.len() * 48);
+    for (segment, micros) in segments.iter().zip(durations) {
         if segment.parent() != Some(directory) {
             return Err(MediaError::UnusableInput {
                 path: segment.clone(),
@@ -474,6 +504,11 @@ fn write_list(segments: &[PathBuf], dest: &Path) -> Result<PathBuf, MediaError> 
         body.push_str("file '");
         body.push_str(name);
         body.push_str("'\n");
+        body.push_str(&format!(
+            "duration {}.{:06}\n",
+            micros / 1_000_000,
+            micros % 1_000_000
+        ));
     }
 
     let list = partial_path(&directory.join("concat.txt"));
@@ -483,6 +518,33 @@ fn write_list(segments: &[PathBuf], dest: &Path) -> Result<PathBuf, MediaError> 
         source,
     })?;
     Ok(list)
+}
+
+/// Each segment's `duration` for the concat list, in whole microseconds.
+///
+/// The demuxer works in microseconds, and `frames / fps` rarely is one. So the
+/// boundaries are rounded — the *cumulative* frame position, not each length —
+/// and each duration is the difference of two of them: no entry is off by more
+/// than half a microsecond, and the error never accumulates, at 800 scenes or
+/// at 80 000.
+#[must_use]
+pub fn list_durations(segment_frames: &[u64], fps: u32) -> Vec<u64> {
+    let fps = u128::from(fps.max(1));
+    let boundary = |frames: u128| -> u64 {
+        u64::try_from((frames * 2_000_000 + fps) / (2 * fps)).unwrap_or(u64::MAX)
+    };
+    let mut running: u128 = 0;
+    let mut previous = 0u64;
+    segment_frames
+        .iter()
+        .map(|frames| {
+            running += u128::from(*frames);
+            let end = boundary(running);
+            let micros = end - previous;
+            previous = end;
+            micros
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -766,7 +828,8 @@ mod tests {
 
     #[test]
     fn an_empty_segment_list_is_refused() {
-        let error = write_list(&[], Path::new("/out/film.mp4")).expect_err("nothing to join");
+        let error =
+            write_list(&[], &[], 30, Path::new("/out/film.mp4")).expect_err("nothing to join");
         assert!(error.to_string().contains("no segments"), "{error}");
     }
 
@@ -779,7 +842,8 @@ mod tests {
             PathBuf::from("/a/seg-0001-aaaaaaaaaaaaaaaa.mp4"),
             PathBuf::from("/b/seg-0002-bbbbbbbbbbbbbbbb.mp4"),
         ];
-        let error = write_list(&segments, Path::new("/out/film.mp4")).expect_err("two directories");
+        let error = write_list(&segments, &[6, 6], 30, Path::new("/out/film.mp4"))
+            .expect_err("two directories");
         assert!(error.to_string().contains("one directory"), "{error}");
     }
 
@@ -806,15 +870,75 @@ mod tests {
             dir.join("seg-0002-bbbbbbbbbbbbbbbb.mp4"),
         ];
 
-        let list = write_list(&segments, &dir.join("film.mp4")).expect("written");
+        let list = write_list(&segments, &[119, 30], 30, &dir.join("film.mp4")).expect("written");
         assert_eq!(list.parent(), Some(dir.as_path()));
 
         let body = std::fs::read_to_string(&list).unwrap();
         assert_eq!(
             body,
-            "file 'seg-0001-aaaaaaaaaaaaaaaa.mp4'\nfile 'seg-0002-bbbbbbbbbbbbbbbb.mp4'\n"
+            "file 'seg-0001-aaaaaaaaaaaaaaaa.mp4'\nduration 3.966667\n\
+             file 'seg-0002-bbbbbbbbbbbbbbbb.mp4'\nduration 1.000000\n"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A frame count and a list of segments that disagree is a caller's bug,
+    /// and guessing which segment the missing length belongs to would put a
+    /// wrong number in the one place this module exists to get right.
+    #[test]
+    fn a_frame_count_per_segment_is_required() {
+        let segments = vec![
+            PathBuf::from("/a/seg-0001-aaaaaaaaaaaaaaaa.mp4"),
+            PathBuf::from("/a/seg-0002-bbbbbbbbbbbbbbbb.mp4"),
+        ];
+        let error =
+            write_list(&segments, &[6], 30, Path::new("/out/film.mp4")).expect_err("one short");
+        assert!(error.to_string().contains("frame counts"), "{error}");
+    }
+
+    /// D-206. The durations sum to the film's exact length — at 30 fps, where
+    /// almost no segment is a whole number of microseconds, and at the scale
+    /// that found the defect and far beyond it. Rounding each length on its
+    /// own would drift by up to half a microsecond per scene.
+    #[test]
+    fn list_durations_never_accumulate_rounding() {
+        for fps in [24u32, 25, 30, 60] {
+            for scenes in [1usize, 2, 800, 80_000] {
+                // Lengths that mostly leave a remainder: 119, 35, 233 frames…
+                let frames: Vec<u64> = (0..scenes).map(|i| 31 + (i as u64 * 7919) % 250).collect();
+                let durations = list_durations(&frames, fps);
+                assert_eq!(durations.len(), frames.len());
+
+                let total_frames: u64 = frames.iter().sum();
+                let exact = u128::from(total_frames) * 1_000_000;
+                let summed = u128::from(durations.iter().sum::<u64>()) * u128::from(fps);
+                assert!(
+                    exact.abs_diff(summed) <= u128::from(fps) / 2 + 1,
+                    "{scenes} scenes at {fps} fps drift: {summed} vs {exact}"
+                );
+
+                // And no single entry is more than a microsecond off its own
+                // length, so a reader of the list sees what they expect.
+                for (f, d) in frames.iter().zip(&durations) {
+                    let want = u128::from(*f) * 1_000_000;
+                    let got = u128::from(*d) * u128::from(fps);
+                    assert!(
+                        want.abs_diff(got) <= u128::from(fps),
+                        "{f} frames -> {d} us"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_defect_s_own_segment_is_listed_at_its_real_length() {
+        // 119 frames at 30 fps: the segment that declared itself 3.966 s.
+        assert_eq!(list_durations(&[119], 30), vec![3_966_667]);
+        assert_eq!(
+            list_durations(&[119, 119, 119], 30),
+            vec![3_966_667, 3_966_666, 3_966_667]
+        );
     }
 }

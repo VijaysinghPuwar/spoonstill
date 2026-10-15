@@ -557,9 +557,13 @@ fn a_stopped_run_does_not_try_again() {
             std::thread::sleep(Duration::from_millis(2));
         }
         watcher.request();
+        // When Stop was pressed. The clock starts here, not before `speak`:
+        // macOS checks a freshly written executable before its first run,
+        // ~0.5 s alone and seconds with this suite's tests in parallel, and a
+        // stopwatch that includes it measures the launch, not the Stop (D-206).
+        std::time::Instant::now()
     });
 
-    let started = std::time::Instant::now();
     let error = Edge::at(&script)
         .with_pace(Pace::unpaced())
         .with_retry(Retry {
@@ -592,7 +596,8 @@ fn a_stopped_run_does_not_try_again() {
             &cancel,
         )
         .expect_err("every attempt fails");
-    ticker.join().expect("the watcher finished");
+    let returned = std::time::Instant::now();
+    let stopped = ticker.join().expect("the watcher finished");
 
     assert!(
         matches!(error, TtsError::Cancelled { .. }),
@@ -603,7 +608,7 @@ fn a_stopped_run_does_not_try_again() {
         1,
         "the loop tried again after the run was stopped"
     );
-    let waited = started.elapsed();
+    let waited = returned.saturating_duration_since(stopped);
     assert!(
         waited < STOP_CEILING,
         "the run took {waited:?} to stop against a {STOP_BACKOFF:?} backoff — the \
@@ -671,9 +676,13 @@ fn a_request_already_in_flight_is_stopped() {
             std::thread::sleep(Duration::from_millis(2));
         }
         watcher.request();
+        // When Stop was pressed. The clock starts here, not before `speak`:
+        // macOS checks a freshly written executable before its first run,
+        // ~0.5 s alone and seconds with this suite's tests in parallel, and a
+        // stopwatch that includes it measures the launch, not the Stop (D-206).
+        std::time::Instant::now()
     });
 
-    let started = std::time::Instant::now();
     let error = Edge::at(&script)
         .with_pace(Pace::unpaced())
         .with_retry(Retry {
@@ -690,16 +699,20 @@ fn a_request_already_in_flight_is_stopped() {
             &cancel,
         )
         .expect_err("a stopped request produces nothing");
-    let waited = started.elapsed();
-    ticker.join().expect("the watcher finished");
+    let returned = std::time::Instant::now();
+    let stopped = ticker.join().expect("the watcher finished");
+    let waited = returned.saturating_duration_since(stopped);
 
-    // `CANCEL_GRACE` is two seconds of asking politely before the child is
-    // forced, and this stand-in ignores the asking — so the floor is that,
-    // and the ceiling is well under the thirty the child would have slept.
+    // Under one second from Stop, not under fifteen from the start (D-206).
+    // `edge-tts` reads nothing on stdin, so the two seconds of `CANCEL_GRACE`
+    // FFmpeg gets to finish its file were two seconds of waiting after every
+    // Stop — and the old bound of fifteen accepted them. The stand-in ignores
+    // stdin too, which is what makes it a faithful one here.
     assert!(
-        waited < Duration::from_secs(15),
-        "a request in flight took {waited:?} to stop — the wait is not looking \
-         at the flag"
+        waited < Duration::from_secs(1),
+        "a request in flight took {waited:?} to stop — either the wait is not \
+         looking at the flag, or it is giving a program that cannot use it \
+         FFmpeg's grace"
     );
     assert!(
         error.to_string().to_lowercase().contains("cancel")

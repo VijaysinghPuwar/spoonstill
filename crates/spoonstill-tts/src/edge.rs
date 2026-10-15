@@ -1252,8 +1252,15 @@ impl Edge {
             .and_then(|child| {
                 // The same wait the join and the scene render use (D-186).
                 // A line can take a minute; before this, Stop meant waiting
-                // for it.
-                child.wait_until_cancellable(speak_timeout(text.chars().count()), cancel)
+                // for it. No grace (D-206): the `q` that asks FFmpeg to finish
+                // is a byte `edge-tts` never reads, so the two seconds it buys
+                // FFmpeg were two seconds of nothing after every Stop. What it
+                // wrote is a partial file this attempt removes either way.
+                child.wait_until_cancellable_with(
+                    speak_timeout(text.chars().count()),
+                    cancel,
+                    Duration::ZERO,
+                )
             })
             .and_then(spoonstill_media::Finished::ok);
 

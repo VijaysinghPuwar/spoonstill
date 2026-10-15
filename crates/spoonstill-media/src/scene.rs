@@ -524,6 +524,14 @@ fn run_ffmpeg(
         // frame rate the operator happened to choose.
         .arg("-video_track_timescale")
         .arg(profile::VIDEO_TIMESCALE.to_string())
+        // D-206. The *movie* timescale is where an MP4 states a track's length
+        // (its edit list), and FFmpeg's default is 1000: a 119-frame segment,
+        // 3.966667 s, was declared 3.966 s. Harmless alone; the concat demuxer
+        // starts each scene at the previous one's declared end, so 52 of 800
+        // scenes each losing 0.67 ms put a finished 4K film 38 ms short and
+        // the film's own assertion refused it. Same clock as the track.
+        .arg("-movie_timescale")
+        .arg(profile::VIDEO_TIMESCALE.to_string())
         .with_progress()
         .arg(temporary);
 

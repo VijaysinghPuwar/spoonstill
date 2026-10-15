@@ -86,7 +86,7 @@ word boundaries. D-070 and D-071 were Open and
 are now Accepted; they live under "Resolved from the Open list" so the answer is
 as easy to find as the question was. D-054 through D-057 and D-075 through
 D-078 were added during M2: read **D-056** before touching the import path,
-**D-057** before touching concat or transitions, and **D-076/D-077** before
+**D-057** and **D-206** before touching concat, transitions or an encoder flag, and **D-076/D-077** before
 touching the render pool.
 
 **4. Do not invent requirements from the `kenburns-batch` master brief.**

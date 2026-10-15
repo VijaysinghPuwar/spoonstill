@@ -879,3 +879,24 @@ real-time virus scanner over every written file. Same 32-scene project:
 specific overhead to remove here; the time is in the filter graph, where this
 file has always said it is.
 
+
+## 14. The movie timescale rounds every segment to a millisecond — measured 2026-10-10 (D-206)
+
+`-video_track_timescale 90000` (D-040) sets the track's clock. The **movie**
+timescale, where the edit list states each track's length, is a separate
+muxer option and defaults to **1000**. On the author's 800-scene film:
+
+| | |
+|---|---|
+| segments whose edit list declares less than `frames / 30` | **52 of 800**, each by 60 ticks (0.67 ms), video and audio both |
+| sum of segments' declared video durations | 3876.995 087 s |
+| `nb_frames` total / 30 | 3877.033 333 s |
+| film as joined, before | 3876.995 089 s — refused, one frame is 0.033 s |
+| original 800 segments, list with `duration` per entry | **3877.033 333 s** |
+| a 119-frame segment with `-movie_timescale 90000` | 357 000 ticks, exact |
+
+Reproduce: `ffprobe -show_entries stream=duration_ts,nb_frames` on any
+segment; a bad one reads `356940,119`. Thirty concatenated copies of one such
+file drift 19.3 ms; with `duration 3.966667` lines, 22 µs. Whether a segment
+rounds down depends on its filter chain — a bare `testsrc` encode of 3.966 s
+rounds up — so a fixture for this has to state the hazard, not hope for it.

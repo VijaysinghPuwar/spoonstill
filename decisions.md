@@ -10229,3 +10229,87 @@ changes is that each of the three answers now gets the response that fits it:
 the one that an upgrade fixes is reported in a second with the upgrade named,
 the one that waiting fixes is waited out with everything already spoken kept,
 and neither is decided by a hex nonce.
+### D-206 — A segment declares the length it has, and the join is told it rather than asked · Accepted
+
+**Reported 2026-10-10:** "as the video is rendering the user can not see the
+video". The activity log had the whole story. An 800-scene, 4K, captioned
+film rendered all 800 segments, joined them, and was then **refused by its own
+assertion and deleted** — four times in a row, the same number each time:
+
+```
+field=video duration; expected=3877.033333 (+/- 0.033333); actual=3876.995089
+```
+
+`nb_frames` was exact (116 311). Every frame was in the film; only the declared
+length was 38 ms short, and the tolerance is one frame (33 ms).
+
+**Cause, measured on the author's own segments.** An MP4 states a track's
+length in its edit list, in the *movie* timescale — and FFmpeg's default for
+that is **1000**, while D-040 pins the *track* timescale to 90 000. So a
+119-frame segment, 3.966 667 s, was declared `0xf7e` = 3 966 ms. Whether a
+given segment rounds down depends on the whole filter chain (a plain encode of
+the same length rounds up), and 52 of the 800 did, on **both** tracks. The
+concat demuxer starts each file at the previous file's declared end, so each of
+those joins lost 0.67 ms: 52 x 0.667 ms = 34.7 ms, plus sub-millisecond losses
+elsewhere = 38.2 ms. Summing the segments' own declared video durations gives
+**3876.995 087** — the join was faithful; the segments were not. The per-segment
+check could not see it: 0.67 ms is far inside one frame. **It only exists at
+scale**, which is why every gate passed — n=500 is the design point, and this
+broke at n≈800 on a 30 fps film.
+
+**Two halves, because there are two populations of segment.**
+
+1. **New segments are written with `-movie_timescale 90000`**, the track's own
+   clock, so the edit list states the exact length. Same for the film itself.
+2. **The concat list carries a `duration` per entry**, from the frame count
+   each segment was asserted at. The timeline is the frame grid whatever a
+   header says. Boundaries are rounded to the demuxer's microsecond on the
+   *cumulative* position, so no entry is off by more than half a microsecond
+   and the error never accumulates (tested to 80 000 scenes, at 24/25/30/60).
+
+**The segment cache key is deliberately unchanged**, against D-107's instinct
+that what a segment *is* belongs in its key. The flag changes only a header;
+the packets are byte-identical. Half 2 makes every segment cached before the
+fix join exactly — proven on the author's 800 original segments: joined in film
+order with the new list, **3877.033 333 s, 116 311 frames**, against 3876.995
+before. Changing the key would have re-encoded 800 4K scenes (about an hour) to
+fix a number the join no longer reads.
+
+**Measured end to end:** the same project through the fixed `still render`,
+with the window's own settings — `card` subtitles, 2160p, `libx264`, the voice
+the window used — **800 narrations from cache, 800 segments reused, the film
+in 61 s**, 3877.033 333 s video, decoding clean at the head, the middle and the
+tail, audio and video ending within one AAC frame.
+
+**Tests, each run against the code with its half removed first.**
+`join_drift.rs` renders the 119-frame case and asserts it declares 357 000
+ticks (fails without half 1), and joins sixty copies of a segment whose edit
+lists are patched 60 ticks short (fails without half 2). Two dead ends worth
+recording, because both produced a green test that proved nothing: a
+stream-copy remux with `-movie_timescale 1000` **rounds this segment up**, so
+the fixture lost its hazard — the fixture now asserts the length it declares;
+and shortening only the *video* edit list left the audio's true end in charge,
+because the demuxer advances by the longer track — so both are shortened.
+
+**Found on the way, not a defect:** the installed window was v0.1.19 and its
+log said the failing render ran there. A fix in `master` reaches an operator
+only through a release.
+
+**A second defect, found because the gates went red while checking the
+first.** `edge_retry.rs`' `a_stopped_run_does_not_try_again` failed 8 runs in
+15 with the suite in parallel, and passed alone. Timestamped, Stop itself was
+fast — 5–10 ms from the flag to the return — and the 1.3–3.3 s went **before
+the stand-in had started**: macOS checks a freshly written executable before
+its first run, ~0.46 s alone and seconds under twelve parallel tests, and both
+stop tests started their stopwatch before `speak`. They now time from the
+moment Stop is pressed, which is the property their names state. 20 parallel
+runs, 0 failures.
+
+Chasing it found the real one. A Stop that lands **while `edge-tts` is
+mid-request** went through D-045's ladder: write `q` to stdin, wait
+`CANCEL_GRACE`, then kill. That `q` is FFmpeg's — `edge-tts` never reads stdin
+— so every such Stop waited **two seconds for nothing**, and the in-flight test
+allowed fifteen. `wait_until_cancellable_with` states the grace; speech passes
+`Duration::ZERO`, FFmpeg keeps its two seconds. The in-flight test now demands
+under one second from Stop, and with the grace put back it fails:
+*"took 2.008703292s to stop"*.

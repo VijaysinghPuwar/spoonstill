@@ -497,15 +497,36 @@ impl FfmpegChild {
     /// [`MediaError::Cancelled`] if the flag was set, [`MediaError::Timeout`]
     /// if `limit` expired first, and whatever the wait itself reports.
     pub fn wait_until_cancellable(
+        self,
+        limit: Duration,
+        cancel: &Cancel,
+    ) -> Result<Finished, MediaError> {
+        self.wait_until_cancellable_with(limit, cancel, CANCEL_GRACE)
+    }
+
+    /// [`FfmpegChild::wait_until_cancellable`], with the ladder's grace stated.
+    ///
+    /// The grace exists for FFmpeg, which reads the `q` it is sent and needs a
+    /// moment to finish the file it is writing. A program that reads nothing
+    /// on stdin — `edge-tts` — cannot use it, so for that program the grace is
+    /// pure waiting: two seconds after every Stop that lands mid-request
+    /// (found as a flaky test, D-206). Pass `Duration::ZERO` for such a child
+    /// and it is forced at once.
+    ///
+    /// # Errors
+    ///
+    /// As [`FfmpegChild::wait_until_cancellable`].
+    pub fn wait_until_cancellable_with(
         mut self,
         limit: Duration,
         cancel: &Cancel,
+        grace: Duration,
     ) -> Result<Finished, MediaError> {
         let deadline = Instant::now() + limit;
         loop {
             if cancel.is_requested() {
                 let command = self.display.clone();
-                let _ = self.cancel(CANCEL_GRACE);
+                let _ = self.cancel(grace);
                 return Err(MediaError::Cancelled { command });
             }
             match self.child.try_wait() {
