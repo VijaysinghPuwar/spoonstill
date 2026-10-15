@@ -150,6 +150,59 @@ carries `reused_segments`, `reused_audio`, `spoken` and `freed_bytes` — measur
 a cold run reads `spoken=3`, the run after it reads `reused_segments=3;
 reused_audio=3; spoken=0`.
 
+### F-23 · An 800-scene 4K film was withheld by a 1.15-frame duration check — *open, not reproduced*
+
+**From a second Mac's `runs.csv`, read 2026-10-15.** The operator's
+800-scene 4K film (`geometry=3840x2160@30`, FFmpeg **8.1.1**) finished every
+segment and was then refused by `concat::validate`:
+
+```
+field=video duration; expected=3877.033333 (+/- 0.033333); actual=3876.995089
+```
+
+Short by **0.038244 s = 1.147 frames** against a tolerance of exactly one
+frame. **Six attempts over two hours on 2026-10-10, every one identical, and
+no film.** `nb_frames` **matched exactly** (one field in the mismatch list), so
+nothing was dropped, duplicated or reordered — which is the only thing
+`validate`'s own comment says the duration check exists to catch, and the thing
+`nb_frames` catches exactly. On the evidence the film was correct and was
+withheld by a secondary check on container metadata.
+
+**Not reproduced, in five configurations** — 800 scenes each, one encode plus
+800 real joins, all exact to the frame:
+
+| | joins | film | geometry | FFmpeg | video duration |
+|---|---|---|---|---|---|
+| uniform 0.5 s | 800 | 400 s | 720p | 8.0 | exact |
+| uniform 4.8 s | 800 | 3840 s | 720p | 8.0 | exact |
+| 8 non-frame-aligned narrations | 800 | 3736 s | 720p | 8.0 | exact |
+| uniform 0.5 s | 800 | 400 s | **4K** | 8.0 | exact |
+| uniform 4.8 s | 800 | 3840 s | 720p | **8.1.3** | exact |
+
+So it is **not** the join count, **not** total duration, **not** audio whose
+measured length is not a multiple of the frame, **not** 4K, and **not** the
+8.1 muxer on its own.
+
+**What is still untested, in the order worth trying.** The author's render had
+**burned-in subtitles** on every scene (its log carries `subtitles drawn;
+cues=1`/`2` for all 800) and none of the five runs above did — that is the
+largest remaining difference and the one to try first. Then 4K **and**
+3877 s together, which was never run as one case. Then 800 *distinct* real TTS
+narrations rather than eight cycled.
+
+**Deliberately not fixed.** The obvious change is to let the declared duration
+drift with the film's length while `nb_frames` stays exact, and it is probably
+right — `validate`'s comment already makes `nb_frames` the authority, and
+1.147 frames cannot be a missing segment. It is not done because **the cause is
+unexplained**, and loosening a correctness assertion to hide an anomaly nobody
+can account for is how D-110 happened: a check that passed for the wrong reason
+left a project permanently unrenderable. Reproduce it first — the fixture above
+makes each attempt cost one encode and about six minutes.
+
+**Meanwhile, for that machine:** its FFmpeg is **8.1.1** and current stable is
+**9.0.2**. Upgrading is cheap and plausible, and is *not* a verified fix —
+8.1.3 produced an exact film here.
+
 ### F-18 · The join tail tracks the destination volume — *information, not a defect*
 
 Concat start → film complete: **6.4 s** writing to `~/Downloads`, **38.9 s**

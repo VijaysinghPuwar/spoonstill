@@ -28,9 +28,12 @@ narration boundaries. It is **not a video editor** — no timeline, no scrubber.
 - `plan/` holds **10 read-only reference checkouts** (~1.7 GB) plus three
   retired planning documents. Do not build in there and do not edit them.
   It is gitignored; pinned commits are in `refergit.md` §2.
-- **FFmpeg 9.0.1** is installed (Homebrew, **GPL build** — dev only, see D-062).
-  This said 8.0.1 until 2026-09-04: the major version moved underneath the
-  project and nothing noticed (D-151). `ffmpeg-findings.md`'s 8.0.1 is correct
+- **FFmpeg 9.0.2** is installed (Homebrew, **GPL build** — dev only, see D-062).
+  This said 8.0.1 until 2026-09-04 and 9.0.1 until 2026-10-15: the version
+  moves underneath the project and nothing notices, because D-041 asserts a
+  strict profile against whatever it finds and so keeps passing (D-151). On
+  2026-10-15 this machine was actually on **8.0**, not the 9.0.1 written here —
+  the drift happened again, in the other direction. `ffmpeg-findings.md`'s 8.0.1 is correct
   **as provenance** — those numbers were measured on that build — and must not
   be changed. `still doctor` prints the version now, and every render records
   it.
@@ -431,6 +434,38 @@ so one honest run costs about two minutes of sleeping. Measured: **429 → exit 
 in 108 s**; **`STATUS=403` → exit 1 in 1 s, one call, naming the upgrade**. It
 refuses a refusal count below three, because fewer than D-094's three attempts
 never exhausts one line and it would pass against the unfixed code.
+
+**A second Mac's logs were read too, and they hold one open finding worth more
+than the rest: `findings.md` F-23.** 24 724 + 18 357 rows, 2026-08-29 to
+2026-10-15. The live one is an **800-scene 4K film that could not be made** —
+six attempts over two hours on 2026-10-10, every one refused by
+`concat::validate` for a `video duration` **0.038 s = 1.147 frames** short
+against a one-frame tolerance, while **`nb_frames` matched exactly**. So nothing
+was dropped or reordered and the film was almost certainly correct.
+**Not reproduced in five configurations** (800 joins at 400 s and at 3840 s,
+non-frame-aligned narration, 4K, and FFmpeg 8.1.3) — the untested difference is
+**burned-in subtitles**, which that render had on all 800 scenes. **Not fixed,
+deliberately:** loosening a correctness assertion over an unexplained anomaly is
+how D-110 happened. F-23 carries the fixture, which makes each further attempt
+one encode and about six minutes.
+
+Its other clusters are accounted for: **163 `remove_scene` failures on
+2026-10-09** are `.arranging-N-to-N` litter and a dotfile blocking arrange —
+**exactly D-203 and D-204**, which landed 2026-10-13, and no `remove_scene`
+error appears after that date. The 2026-10-13 run that fails with
+`No such file or directory` on `.spoonstill/` paths and then *"is not a project
+folder"* is **the project folder being deleted mid-render** at ~04:04:55, not a
+defect in the render. The rest is the no-audio class and operator
+cancellations.
+
+**Two things on this machine were changed by that session, both deliberate and
+both worth knowing.** `edge-tts` **7.2.8 → 7.3.1**, which is what fixed the
+author's actual failures. And **FFmpeg 8.0 → 9.0.2**: installing `ffmpeg@8` to
+chase F-23 upgraded `libvpx` and orphaned the 8.0 keg, so `ffmpeg` would not
+start at all until it was reinstalled, which brought the current stable.
+`ffmpeg@8` has since been removed. **`cargo test --workspace` is 791/0 on
+9.0.2**, so D-041's strict profile holds across the move — but `make gates`
+has **not** been re-run since it, and this file's FFmpeg line now reads 9.0.2.
 
 **The next thing to do, identified by this session and not done in it: record
 the `edge-tts` version the way D-151 records FFmpeg's.** A version number was
