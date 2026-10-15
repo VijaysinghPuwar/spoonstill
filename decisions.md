@@ -8902,7 +8902,8 @@ assumed.** Every `.sh` blob in the repository is already LF, so a checkout
 there is byte-identical before and after.
 
 **It is not only the linter**, which is why this is worth a decision rather
-than a comment. A trailing `` becomes part of the last token for several
+than a comment. A trailing `
+` becomes part of the last token for several
 `sh` builds — the D-155 class one layer down, a harness that works on one
 platform and not the other for a reason nothing in it mentions. The gates did
 run with CRLF here (M1 8/8, M2 23/23), so nothing was broken; what was broken
@@ -10052,3 +10053,179 @@ measured.
 scenes' files open without `FILE_SHARE_DELETE`, so renaming one is a sharing
 violation and the move fails — with the skip removed it fails on `001.jpeg`,
 *"being used by another process"*. On unix it compares `ctime` as D-187 does.
+### D-205 — A refusal at the door is read by what it says · Accepted
+
+**Read out of the author's own `runs.csv` on 2026-10-15.** Nine renders between
+**05:10:09 and 06:07:21 on 2026-10-14** — fifty-seven minutes, one operator
+pressing Render again and again — each ended after **three attempts in
+seconds** with eight narrations failed and eighty-five scenes never started.
+**790 scenes abandoned across the nine.** Every one of them on the same line:
+
+```
+aiohttp.client_exceptions.WSServerHandshakeError: 403,
+message='Invalid response status',
+url='wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=…'
+```
+
+**`is_refusal` knew two shapes and this was neither.** D-195's is a connection
+the service would not take (`Connect call failed`, an address in it); D-199's is
+one never opened in time (`ConnectionTimeoutError`). A refusal at the websocket
+handshake is the opposite of both: the socket **opened**, and it opened
+**promptly** — the service read the upgrade request and refused it at the door.
+`classify` answered `Transient` correctly (the line carries `aiohttp`), so the
+line *was* retried; it was just never waited through. And `network_hint` had no
+branch for it — 403 is not in `BUSY` (`429`, `503`) and the text matches nothing
+in `NO_ROUTE` or `DROPPED` — so nine renders told the operator **"the voice
+service could not be reached"**, which is the one sentence that is not true. It
+was reached. It said no.
+
+#### The first fix was wrong, and measuring it is what said so
+
+The obvious reading is that this is D-195's throttle in a third shape, and the
+first version of this decision treated it as one: waited out for up to an hour,
+status code deliberately **not** matched on, because *"a refusal at the
+handshake is the service saying no whatever number it picks"*.
+
+Then it was run against the real service, which was refusing this machine at
+the time, and three things came out of that run in order:
+
+1. **It worked as designed** — six attempts over five minutes instead of three
+   in a second, the two unaffected scenes still rendered.
+2. **The same 403 came back from a bare `edge-tts` call** with no spoonstill
+   anywhere in the path. So it was never about our pacing.
+3. **`edge-tts` was 7.2.8, and 7.3.1 had been released on 2026-10-13** — the
+   day before those nine renders. **Upgrading returned 13 680 bytes of audio on
+   the first attempt.**
+
+So a 403 here is the signature of a **stale tool**, not of a rate limit: the
+service changed what anti-abuse token it accepts and the installed `edge-tts`
+had not caught up. It is permanent until the tool is upgraded, and *"wait a
+while and render again"* is advice that can never work for it. The first fix
+replaced a useless sentence with a wrong remedy and five minutes of waiting for
+it — which is worse than it sounds, because the operator believes it.
+
+**So the status code is matched on after all**, and the earlier reasoning is
+recorded above rather than quietly dropped, because it was the obvious call and
+the next person will reach for it too:
+
+| at the handshake | reading | what happens |
+|---|---|---|
+| **403**, **401** | this client is refused — measured: a stale `edge-tts` | **permanent**, in **one second**, naming the upgrade |
+| **429** | a genuine rate limit | **waited out**, D-199's ladder, film still made |
+| anything else | the service's own trouble | ordinary transient, three attempts |
+
+`stale_tool` is `handshake_rejected && (403 or 401)`. `401` is included as the
+same class of answer though only `403` has been seen. The reported error is
+`TtsError::Unavailable` and not `NoAudio`, because nothing is wrong with the
+line — the provider cannot run until it is upgraded, which is precisely what
+that variant is for. The sentence names the upgrade first, because that is what
+was measured to work, and the service-is-refusing reading second, because it is
+the one that would otherwise send someone to reinstall a tool that is current.
+
+#### And the same nine renders held a second defect, which is why they disagree
+
+Five of the nine recorded a `voice service turned this machine away` warning
+and four did not — on *identical* failures. Only `gate.refused` writes that
+warning and only `is_refusal` reaches it, so something was matching. It was
+`reason.contains("429")`: aiohttp quotes the whole synthesis URL inside a
+`WSServerHandshakeError`, and that URL carries two random nonces —
+`Sec-MS-GEC`, 64 hex characters, and `ConnectionId`, 32 — so a three-digit code
+looked for *anywhere in the line* is also looked for inside ninety-six
+characters of noise.
+
+**Measured 2026-10-15**, 400 000 trials: a random nonce pair contains `429`
+**2.21%** of the time. Across the twenty-four requests of one of those failed
+renders that is **41.6%**, against **5 of 9 = 55.6%** observed — the same number
+at n=9. So whether an attempt counted as a refusal, started a cool-down and
+warned the operator was **a coin flip on a nonce**. The live run confirmed the
+mechanism from the other side: its `Sec-MS-GEC` contained no `429`, so under the
+old code that exact failure was not a refusal at all.
+
+`status_says` cuts the line at `url=` before looking for a code. Every shape
+seen here reports the status *before* the URL, so this keeps every real match
+and drops only the accidental ones — and it is what makes the table above
+decidable, since a 403 read out of a nonce would be a stale-tool verdict on a
+dropped socket. `429` and `503` are out of `classify`'s `TRANSIENT` list and
+matched this way instead: a three-digit code is the one marker a hex nonce can
+forge, and every other entry in that list is a class name or prose, which it
+cannot. The test is the collision itself — a dropped socket, which D-195 is
+explicit is *not* a refusal, carrying `429` in its nonce.
+
+#### A third defect, found by watching the first fix work
+
+The live run printed *"This render is waiting for it (**up to an hour**)"* and
+then gave up after **five minutes**. `throttle_warning()` was one fixed string
+and the bound it quoted is `Pace::patience`; the branch it was printed from is
+`Pace::patience_cold`, three minutes, which D-199 chose precisely because *"a
+machine whose firewall drops the service from the first request should not wait
+half an hour to be told so"*. So the sentence overstated its own wait
+twentyfold, in exactly the case where the operator cannot tell a throttle from
+their own network — the message disagreeing with the code (D-151), on a surface
+D-091 calls the same class of defect as a wrong number. `Throttle` carries
+`spoken_any` now, which is the one fact the surface was missing, and the cold
+branch names both readings and the wait it actually takes. The numbers stay in
+`pace.rs`; the wording stays in the surface.
+
+#### And a test that failed for load rather than for a defect
+
+`a_stopped_run_does_not_try_again` asserted that Stop beats D-094's backoff in
+under **two seconds** against a five-second pause, and that ceiling was read off
+an idle machine. Measured: stopping costs **0.44 s** run alone and **2.83 s**
+under a full `cargo test --workspace`, where ten cores are already busy — so the
+suite failed it for being busy, which is the one thing a gate must not do
+(D-130). The pause is sixty seconds now and the ceiling fifteen, both named
+constants: five times the worst latency measured, four times clear of the
+failure it looks for. Proven non-vacuous by putting `std::thread::sleep` back in
+place of `cancel.sleep` — it fails at **60.41 s against a 60 s backoff**, which
+is how the gap was originally found.
+
+#### Checking it
+
+`scripts/throttle-e2e.sh` renders a real project through a stand-in that
+answers the status asked for, and covers both halves:
+
+| run | measured 2026-10-15 |
+|---|---|
+| `throttle-e2e.sh DIR` (429) | **exit 0 in 108 s**, 5 calls, two scenes, 4.021 s against 4.000 expected |
+| `STATUS=403 throttle-e2e.sh DIR` | **exit 1 in 1 s**, **1 call**, naming the upgrade |
+
+The 1 s against 108 s is the whole decision in two numbers. The same 429 run
+started while `make gates` was saturating the machine took **1104 s** — recorded
+because it is the one that would make somebody think it had hung: the cool-downs
+are sleeps, but the render either side of them is not.
+
+**Deliberately not in `make gates`.** The 429 half *means* waiting out D-195's
+ladder — 15 s, 30, 60 — so an honest run costs about two minutes of sleeping,
+which is the right price for a command run when this path changes and the wrong
+one on every `make gates` (D-134's rule, and D-149's reason for leaving a timing
+fix ungated). The script refuses a `refusals` below three, because under D-094's
+budget of three attempts a smaller number never makes one line exhaust its
+attempts and it would pass against the unfixed code — D-116's trap, written into
+the script rather than left for the next person.
+
+**`make gates` is the other half of the evidence.** Before the upgrade the
+suite came out **35 passed, 1 failed, 1 stopped** — the failure M2's gate 7 and
+the stopped one the `unchosen` render, **both of which need the live service**,
+with gate 7's render in the log waiting the refusal out for five minutes and
+naming it. After `pipx upgrade edge-tts` the identical suite is **39/39, exit
+0, M2 23/23**. A red voice gate in this project is worth checking
+`edge-tts --version` against PyPI before reading any of our code.
+
+**Identified and deliberately not done: record the `edge-tts` version the way
+D-151 records FFmpeg's.** The root cause of this entire finding was a version
+number, and **nothing in 16 552 rows of `runs.csv` recorded it** — the
+diagnosis took a `pipx list` and a PyPI lookup by hand. D-151's argument for
+`ffmpeg=` and `ffmpeg_path=` on every render is word for word the argument for
+`edge_tts=`, and `availability_of` already runs `edge-tts --version` and throws
+the output away. It is not done here because `Availability::Ready` carries no
+payload, so threading a version through it touches the trait, both control
+surfaces and their tests — a change worth making on its own and not alongside a
+release. What covers the gap meanwhile is that the operator is now **told** to
+check the tool rather than having to be diagnosed from a log.
+
+**What this does not claim.** It cannot make Microsoft answer a machine it has
+decided to refuse, and it cannot upgrade anybody's `edge-tts` for them. What it
+changes is that each of the three answers now gets the response that fits it:
+the one that an upgrade fixes is reported in a second with the upgrade named,
+the one that waiting fixes is waited out with everything already spoken kept,
+and neither is decided by a hex nonce.

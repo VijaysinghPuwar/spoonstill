@@ -751,6 +751,13 @@ fn classify(stderr: &str) -> Fault {
     if PERMANENT.iter().any(|marker| line.contains(marker)) {
         return Fault::Permanent;
     }
+    // Permanent too, and it has to be decided before the nets below: the line
+    // carries `aiohttp`, so `TRANSIENT` would retry it three times and
+    // `is_refusal` used to wait an hour on it — for a condition that only an
+    // upgrade clears (D-205).
+    if stale_tool(&line) {
+        return Fault::Permanent;
+    }
 
     // Everything the service and the socket can do to us. `WebSocketError`
     // covers the 403 that arrives when the anti-abuse token has moved and the
@@ -771,15 +778,33 @@ fn classify(stderr: &str) -> Fault {
         "socket.gaierror",
         "ssl.SSLError",
         "Temporary failure in name resolution",
-        "429",
-        "503",
     ];
     if TRANSIENT.iter().any(|marker| line.contains(marker)) {
+        return Fault::Transient;
+    }
+    // The two bare status codes are matched separately, outside the quoted
+    // URL (D-205). They are not in the list above because a three-digit code
+    // is the one marker a hex nonce can forge; every other entry there is a
+    // class name or prose, which it cannot.
+    if ["429", "503"].iter().any(|code| status_says(&line, code)) {
         return Fault::Transient;
     }
 
     Fault::Permanent
 }
+
+/// What to say when the service refuses this client at the handshake (D-205).
+///
+/// One sentence an operator can act on, with no traceback and no flags, the
+/// way [`how_to_install`] reads — because the fix is the same button. The
+/// second reading is named after the first, not instead of it: a 403 here was
+/// measured to be a stale tool on 2026-10-15, so that is what it leads with.
+const STALE_TOOL: &str = "Microsoft's voice service turned this request away before it \
+                          started. The speech tool is out of date — Microsoft changed \
+                          what it accepts, and a newer edge-tts is needed. Press Install \
+                          to fetch the current one, or run `pipx upgrade edge-tts`. If it \
+                          is already current, the service is refusing this machine for \
+                          now and will take a while to relent.";
 
 /// What a retry loop remembers when the service answered with silence for a
 /// line that has words in it (D-195).
@@ -807,12 +832,84 @@ fn worth_asking_again(text: &str, voice: &str) -> bool {
 /// timeout, not a read that stalled mid-line, which stays an ordinary
 /// transient failure.
 fn is_refusal(reason: &str) -> bool {
-    turned_away(reason) || reason.contains("429") || never_connected(reason)
+    turned_away(reason) || status_says(reason, "429") || never_connected(reason)
+}
+
+/// Whether the service named a status code — looked for in the exception and
+/// **not** in the request URL it quotes (D-205).
+///
+/// aiohttp puts the whole synthesis URL inside a `WSServerHandshakeError`, and
+/// that URL carries two random nonces: `Sec-MS-GEC`, 64 hex characters, and
+/// `ConnectionId`, 32. A three-digit code looked for anywhere in the line is
+/// therefore also looked for inside ninety-six characters of noise.
+///
+/// **Measured 2026-10-15**, 400 000 trials: a random pair contains `429`
+/// **2.21%** of the time, which across the twenty-four requests of one failed
+/// render is **42%** — and the author's log for 2026-10-14 holds **5 of 9**
+/// renders recording a throttle on a line whose only `429` was in the URL.
+/// That is why those nine renders look inconsistent in `runs.csv`: whether an
+/// attempt counted as a refusal was a coin flip on a nonce.
+///
+/// A status is reported before the URL in every shape seen here —
+/// `WSServerHandshakeError: 403, message=…, url='…'` — so cutting the line at
+/// `url=` keeps every real match and drops the accidental ones.
+fn status_says(reason: &str, code: &str) -> bool {
+    before_url(reason).contains(code)
+}
+
+/// The part of a failure line that is the exception rather than the request it
+/// quotes. The whole line when it quotes none.
+fn before_url(reason: &str) -> &str {
+    match reason.find("url=") {
+        Some(at) => &reason[..at],
+        None => reason,
+    }
 }
 
 /// The connection was not opened in time: DNS answered, and nothing did after.
 fn never_connected(reason: &str) -> bool {
     reason.contains("ConnectionTimeoutError") || reason.contains("Connection timeout to host")
+}
+
+/// The service answered the websocket upgrade and said no at the door (D-205).
+///
+/// Matched on the exception's own class name, in both HTTP libraries
+/// `edge-tts` has shipped against: `WSServerHandshakeError` is aiohttp's and
+/// `InvalidStatus` is the `websockets` package's — one marker, because
+/// `InvalidStatusCode`, the older spelling, contains it.
+///
+/// **What to do about one depends entirely on the status it carries**, which
+/// is why [`stale_tool`] exists rather than this deciding on its own. See its
+/// comment for the measurement that settled it.
+fn handshake_rejected(reason: &str) -> bool {
+    reason.contains("WSServerHandshakeError") || reason.contains("InvalidStatus")
+}
+
+/// A refusal at the door that **waiting cannot cure**: the installed
+/// `edge-tts` is too old for the anti-abuse token the service now wants
+/// (D-205).
+///
+/// **Measured 2026-10-15, and it is the whole reason this is not treated as a
+/// throttle.** The author's nine failed renders of 2026-10-14 all carried
+/// `WSServerHandshakeError: 403`. On this machine the same 403 came back from
+/// a **bare `edge-tts` call** with no spoonstill in the path at all — so it
+/// was never about our pacing — and `edge-tts` was **7.2.8** while **7.3.1 had
+/// been released on 2026-10-13, the day before those renders**. Upgrading
+/// returned 13 680 bytes of audio on the first try.
+///
+/// So a 403 here is the signature of a stale tool, not of a rate limit, and
+/// the two earlier throttles D-195 and D-199 measured arrived in different
+/// shapes entirely (`Connect call failed`, then `ConnectionTimeoutError`).
+/// Telling this operator to *"wait a while and render again"* is advice that
+/// can never work: it is permanent until the tool is upgraded, and reporting
+/// it in seconds with the upgrade named beats waiting an hour first.
+///
+/// `401` is included as the same class of answer — the service rejecting this
+/// client's credentials at the handshake — though only `403` has been seen.
+/// A `429` there is a real rate limit and stays a refusal, via `status_says`;
+/// any other status stays an ordinary transient failure and is retried.
+fn stale_tool(reason: &str) -> bool {
+    handshake_rejected(reason) && (status_says(reason, "403") || status_says(reason, "401"))
 }
 
 /// The service's address would not take the connection. Not a DNS failure
@@ -897,6 +994,17 @@ fn network_hint(reason: &str) -> &'static str {
          does after a few hundred lines. Every line already spoken is kept — \
          wait a while and render again. If this happens before any line is \
          spoken, check your internet connection, VPN or firewall"
+    } else if handshake_rejected(reason) {
+        // D-205. A handshake rejection only reaches here when it is *not* a
+        // 403 or 401 — `stale_tool` takes those out as permanent before any
+        // retry — so what is left is the service saying "not now": a 429, or
+        // its own trouble. Checked before DROPPED and BUSY all the same,
+        // because neither of those lists matches a handshake status, which is
+        // how this fell through to "could not be reached" nine times in an
+        // hour.
+        "Microsoft's voice service refused this machine at the door and did \
+         not say it was the tool — so it is turning this machine away for \
+         now. Every line already spoken is kept; wait a while and render again"
     } else if NO_ROUTE.iter().any(|marker| reason.contains(marker)) {
         "this machine could not reach Microsoft's voice service — check your \
          internet connection, then any VPN or firewall, and try again"
@@ -910,7 +1018,7 @@ fn network_hint(reason: &str) -> &'static str {
         "the voice service answered with silence for this line several times \
          in a row — it has always spoken such a line on a later try, so render \
          again; every line already spoken is kept"
-    } else if BUSY.iter().any(|marker| reason.contains(marker)) {
+    } else if BUSY.iter().any(|marker| status_says(reason, marker)) {
         "the voice service turned this request down for now — waiting a \
          moment and trying again usually clears this"
     } else {
@@ -948,6 +1056,16 @@ fn interpret(error: spoonstill_media::MediaError, voice: &str, text: &str) -> Fa
             let said = last_line(stderr);
             match classify(stderr) {
                 Fault::Transient => Failure::Transient(said),
+                // D-205: the service refused this client at the handshake.
+                // `Unavailable` rather than `NoAudio`, because nothing is
+                // wrong with the line — the provider cannot run until it is
+                // upgraded, which is exactly what that variant is for.
+                Fault::Permanent if stale_tool(&said) => {
+                    Failure::Permanent(TtsError::Unavailable {
+                        provider: ID.to_owned(),
+                        detail: STALE_TOOL.to_owned(),
+                    })
+                }
                 Fault::Permanent if said.contains("Invalid voice") => {
                     Failure::Permanent(TtsError::BadRequest {
                         provider: ID.to_owned(),
@@ -1855,6 +1973,146 @@ mod tests {
         // A read that stalled once the line was under way is still ordinary.
         assert!(!is_refusal("asyncio.exceptions.TimeoutError"));
         assert!(!is_refusal("it did not finish within 60s"));
+    }
+
+    /// Verbatim from the author's runs.csv, 2026-10-14 — nine renders in one
+    /// hour, each of them this (D-205).
+    const REFUSED_AT_DOOR: &str = "aiohttp.client_exceptions.WSServerHandshakeError: 403, \
+                                   message='Invalid response status', \
+                                   url='wss://speech.platform.bing.com/consumer/speech/\
+                                   synthesize/readaloud/edge/v1?TrustedClientToken=[redacted]'";
+
+    /// D-205: whether an attempt counted as a refusal must not depend on a
+    /// random nonce. This is why the author's nine renders on 2026-10-14 look
+    /// inconsistent in `runs.csv` — 5 of them recorded a throttle, 4 did not,
+    /// on the same failure.
+    #[test]
+    fn a_status_code_is_read_from_the_exception_and_not_from_the_url() {
+        // A dropped socket, which D-195 is explicit is *not* a refusal — with
+        // `429` sitting in the Sec-MS-GEC nonce, as it does about one request
+        // in forty-five.
+        let nonce_429 = "aiohttp.client_exceptions.ServerDisconnectedError: Server \
+                         disconnected, url='wss://speech.platform.bing.com/consumer/speech/\
+                         synthesize/readaloud/edge/v1?TrustedClientToken=6A5AA1D4EAFF4E9F\
+                         &Sec-MS-GEC=1B7F429ACD3E55180A6C2F9D4E8B13A7&ConnectionId=9f2c\'";
+        assert!(
+            nonce_429.contains("429"),
+            "the fixture has to carry the collision it is about"
+        );
+        assert!(
+            !is_refusal(nonce_429),
+            "a nonce is not a status code: this started a throttle cool-down on a \
+             dropped socket"
+        );
+        assert!(
+            !network_hint(nonce_429).contains("turned this request down"),
+            "and it is not reported as a rate limit either"
+        );
+
+        // A real one still is, wherever the service puts it.
+        assert!(is_refusal(
+            "aiohttp.client_exceptions.WSServerHandshakeError: 429, message='Too Many \
+             Requests', url='wss://speech.platform.bing.com/…'"
+        ));
+        assert!(is_refusal("edge_tts.exceptions.UnexpectedResponse: 429"));
+
+        // And an unrecognised failure is not retried just because its URL
+        // happens to read like a rate limit.
+        let permanent = "SomeUnknownError: boom, url='wss://host/v1?Sec-MS-GEC=429ABCDE'";
+        assert_eq!(classify(permanent), Fault::Permanent);
+        assert_eq!(
+            classify("edge_tts.exceptions.UnexpectedResponse: 503"),
+            Fault::Transient
+        );
+    }
+
+    /// D-205: a 403 at the door is a stale tool, and waiting cannot cure it.
+    ///
+    /// Measured 2026-10-15: the same 403 came back from a bare `edge-tts`
+    /// call with no spoonstill in the path, `edge-tts` was 7.2.8 against
+    /// 7.3.1 released the day before those renders, and upgrading returned
+    /// audio on the first try.
+    #[test]
+    fn a_403_at_the_door_is_a_stale_tool_and_is_not_waited_out() {
+        assert_eq!(
+            classify(REFUSED_AT_DOOR),
+            Fault::Permanent,
+            "the line carries `aiohttp`, so the transient net would have retried it"
+        );
+        assert!(
+            !is_refusal(REFUSED_AT_DOOR),
+            "waiting an hour cannot cure a tool the service has stopped accepting"
+        );
+        assert!(stale_tool(REFUSED_AT_DOOR));
+
+        // The same answer under the other library `edge-tts` has shipped
+        // against. `InvalidStatusCode` is the older spelling of `InvalidStatus`.
+        for other in [
+            "websockets.exceptions.InvalidStatusCode: server rejected WebSocket \
+             connection: HTTP 403",
+            "websockets.exceptions.InvalidStatus: server rejected WebSocket \
+             connection: HTTP 401",
+        ] {
+            assert!(stale_tool(other), "{other}");
+            assert_eq!(classify(other), Fault::Permanent, "{other}");
+        }
+
+        // And the sentence an operator reads names the fix, not the traceback.
+        assert!(STALE_TOOL.contains("out of date"));
+        assert!(STALE_TOOL.contains("Press Install"));
+        assert!(
+            STALE_TOOL.contains("refusing this machine"),
+            "the second reading is named after the first, not instead of it"
+        );
+        assert!(
+            !STALE_TOOL.contains("aiohttp"),
+            "no Python in a sentence written for an operator (D-105)"
+        );
+    }
+
+    /// The other half of the same status line: a 429 at the door **is** a rate
+    /// limit, and that one is still waited out (D-205).
+    #[test]
+    fn a_429_at_the_door_is_a_throttle_and_is_waited_out() {
+        let busy = "aiohttp.client_exceptions.WSServerHandshakeError: 429, message='Too \
+                    Many Requests', url='wss://speech.platform.bing.com/consumer/speech/\
+                    synthesize/readaloud/edge/v1?TrustedClientToken=6A5AA1D4EAFF4E9F'";
+        assert!(!stale_tool(busy), "429 is not the tool's fault");
+        assert_eq!(classify(busy), Fault::Transient);
+        assert!(is_refusal(busy), "a rate limit is what waiting is for");
+
+        let mut calls = 0;
+        let (outcome, waited) = endure(
+            Retry {
+                attempts: 3,
+                backoff: Duration::ZERO,
+            },
+            |_| {
+                calls += 1;
+                if calls <= 7 {
+                    Err(Failure::Transient(busy.to_owned()))
+                } else {
+                    Ok("spoken")
+                }
+            },
+            |_| {},
+            || true,
+        );
+        assert!(matches!(outcome, Ok("spoken")));
+        assert!(waited, "the streak has to be waited through");
+        assert_eq!(calls, 8, "three rounds of three, the third speaking");
+
+        // A handshake failure that is neither is an ordinary transient: worth
+        // three attempts, not worth an hour.
+        let flaky = "aiohttp.client_exceptions.WSServerHandshakeError: 503, message='Service \
+                     Unavailable', url='wss://speech.platform.bing.com/x'";
+        assert_eq!(classify(flaky), Fault::Transient);
+        assert!(!is_refusal(flaky));
+        assert!(
+            network_hint(flaky).contains("refused this machine at the door"),
+            "{}",
+            network_hint(flaky)
+        );
     }
 
     const THROTTLED: &str = "aiohttp.client_exceptions.ConnectionTimeoutError: \

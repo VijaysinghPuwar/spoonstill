@@ -1262,7 +1262,7 @@ fn watch_voice_service(
             && worth_announcing(told, throttle.episode, now)
         {
             told = Some((throttle.episode, now));
-            let detail = throttle_warning();
+            let detail = throttle_warning(throttle.spoken_any);
             log.record(
                 &Event::warn("render", "voice service turned this machine away")
                     .with("said", throttle.said.clone()),
@@ -1296,11 +1296,26 @@ fn worth_announcing(
 }
 
 /// The sentence [`watch_voice_service`] says.
-const fn throttle_warning() -> &'static str {
-    "Microsoft's voice service has stopped answering for now — it does this \
-     after a few hundred lines. This render is waiting for it (up to an hour) \
-     and keeps rendering every scene whose line is already spoken; \
-     nothing is lost if you stop and render again later"
+const fn throttle_warning(spoken_any: bool) -> &'static str {
+    if spoken_any {
+        "Microsoft's voice service has stopped answering for now — it does this \
+         after a few hundred lines. This render is waiting for it (up to an hour) \
+         and keeps rendering every scene whose line is already spoken; \
+         nothing is lost if you stop and render again later"
+    } else {
+        // D-205: the same sentence said "up to an hour" here too, and this is
+        // the branch where `Pace::patience_cold` applies — measured on
+        // 2026-10-15, a render that printed "up to an hour" gave up after
+        // **five minutes**. A machine that has spoken nothing is far more
+        // likely to be a blocked network than a throttle, which is the whole
+        // reason D-199 gave it a shorter patience; telling it to settle in for
+        // an hour is the message disagreeing with the code (D-151), and it
+        // lands on exactly the operator least able to tell which it is.
+        "Microsoft's voice service is not answering this machine, and no line \
+         has been spoken yet — so this may be a throttle or it may be your \
+         network, VPN or firewall. This render waits a few minutes before \
+         giving up, and keeps every scene whose line is already spoken"
+    }
 }
 
 /// Resolve every narration and render every segment, overlapping the two
@@ -2110,6 +2125,33 @@ impl<F: FnMut(FilmEvent) + Send> SerialEvents<F> {
 mod tests {
     use super::*;
     use spoonstill_core::{Anchor, Aspect, MotionKind};
+
+    /// D-205: the warning must not promise an hour in the branch that waits
+    /// three minutes. Measured on 2026-10-15 against the real service: a
+    /// render printed "up to an hour" and gave up after five.
+    #[test]
+    fn the_throttle_warning_promises_only_what_the_patience_allows() {
+        let warm = throttle_warning(true);
+        assert!(warm.contains("up to an hour"), "{warm}");
+
+        let cold = throttle_warning(false);
+        assert!(
+            !cold.contains("hour"),
+            "this branch waits `patience_cold`, not an hour: {cold}"
+        );
+        assert!(
+            cold.contains("a few minutes"),
+            "and it has to say what it does wait: {cold}"
+        );
+        // A machine that has spoken nothing is as likely blocked as throttled,
+        // which is the reason D-199 gave it a shorter patience at all.
+        assert!(cold.contains("firewall"), "{cold}");
+
+        // Both halves keep the one promise that makes stopping safe.
+        for said in [warm, cold] {
+            assert!(said.contains("already spoken"), "{said}");
+        }
+    }
 
     /// A stand-in for the narration's content key. Any value works; what the
     /// tests care about is that changing it changes the segment key.

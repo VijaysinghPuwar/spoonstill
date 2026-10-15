@@ -367,6 +367,123 @@ be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
 
+### State as of 2026-10-15 — a refusal at the door, read three ways (D-205), `v0.1.24`
+
+**Found by reading the author's own `runs.csv`, then by not believing the first
+fix.** Read **D-205 before touching `is_refusal`, `stale_tool`,
+`handshake_rejected`, `status_says`, `network_hint`'s branches,
+`throttle_warning`, or the backoff constants in `edge_retry.rs`.**
+
+`~/Library/Application Support/spoonstill/runs.csv` holds **16 552 rows**,
+2026-09-05 to 2026-10-15: 16 370 info, 98 warn, **84 error**. Bucketed by date,
+almost every error before 2026-10-07 is already cured by D-195 and D-199. What
+was left is the biggest single line in the file: **nine renders between
+05:10:09 and 06:07:21 on 2026-10-14**, each ending after **three attempts in
+seconds**, eight narrations failed and eighty-five scenes never started — **790
+scenes abandoned**, every one on
+`aiohttp.client_exceptions.WSServerHandshakeError: 403`.
+
+**The first fix was to wait it out like D-199's throttle, and that was wrong.**
+Running it against the real service — which was refusing this machine at the
+time — produced the evidence that overturned it: the same 403 came back from a
+**bare `edge-tts` call** with no spoonstill in the path, and `edge-tts` was
+**7.2.8** against **7.3.1, released 2026-10-13, the day before those renders**.
+**Upgrading returned 13 680 bytes of audio on the first try.** So a 403 there is
+a **stale tool**, not a rate limit, and waiting an hour can never cure it.
+
+| at the handshake | what happens now |
+|---|---|
+| **403**, **401** | permanent, in **one second**, naming the upgrade |
+| **429** | waited out on D-199's ladder, film still made |
+| anything else | ordinary transient, three attempts |
+
+**If a render here fails on speech, check `edge-tts --version` first.** That is
+the single most likely cause of this class of report, and it is not ours.
+
+**A second defect, found by asking why those nine renders disagree with each
+other.** Five logged a throttle and four did not, on identical failures — and
+only `is_refusal` can reach that warning. `reason.contains("429")` was matching
+the **random hex nonce in the quoted URL**: aiohttp puts the whole synthesis URL
+in the exception, carrying `Sec-MS-GEC` (64 hex) and `ConnectionId` (32).
+Measured over 400 000 trials a pair contains `429` **2.21%** of the time, so
+**41.6%** across one render's twenty-four requests against **5 of 9 = 55.6%**
+observed. Whether an attempt counted as a refusal was a coin flip — and it is
+what makes the table above decidable at all. `status_says` cuts the line at
+`url=` first; `429` and `503` left `classify`'s `TRANSIENT` list.
+
+**A third, found by watching the first fix work.** It printed *"waiting for it
+(up to an hour)"* and gave up after **five minutes**: `throttle_warning()` was
+one fixed string quoting `Pace::patience`, printed from the branch where
+`Pace::patience_cold` (three minutes) applies. `Throttle` carries `spoken_any`
+now and the cold branch names both readings.
+
+**And a test that failed for load rather than for a defect.**
+`a_stopped_run_does_not_try_again` gave Stop two seconds to beat a five-second
+backoff, read off an idle machine — **0.44 s alone, 2.83 s under a full
+`cargo test --workspace`**. Sixty seconds and fifteen now, as named constants.
+Every fix was run against the unfixed code and seen to fail, including the stop
+test with `std::thread::sleep` back in place of `cancel.sleep` (**60.41 s against
+a 60 s backoff**).
+
+**`scripts/throttle-e2e.sh` is the re-runnable proof**, both halves, and
+deliberately not a gate — the 429 half means waiting out the 15/30/60 s ladder,
+so one honest run costs about two minutes of sleeping. Measured: **429 → exit 0
+in 108 s**; **`STATUS=403` → exit 1 in 1 s, one call, naming the upgrade**. It
+refuses a refusal count below three, because fewer than D-094's three attempts
+never exhausts one line and it would pass against the unfixed code.
+
+**The next thing to do, identified by this session and not done in it: record
+the `edge-tts` version the way D-151 records FFmpeg's.** A version number was
+the root cause and **none of the 16 552 rows of `runs.csv` held it** — the
+diagnosis needed `pipx list` and PyPI by hand. `availability_of` already runs
+`edge-tts --version` and discards the output; the reason it was not threaded
+through is that `Availability::Ready` carries no payload, so it touches the
+trait, both control surfaces and their tests.
+
+**`picture::fill` was checked and is not a defect.** Five `fill_pictures`
+errors on 2026-10-07 read *"40 pictures, and only 0 scenes from 009 on are
+waiting for one — nothing was changed"*, which looks wrong and is not:
+`NotEnoughWaiting` is D-194's deliberate guard, and every scene from 009 on
+already had a picture. Left alone.
+
+**Measured on macOS 2026-10-15:** `cargo test --workspace` **791 / 0**, fmt
+clean, `clippy --workspace --all-targets -D warnings` clean, `make lint` clean
+(workflows, scripts, window scripts), the **`x86_64-pc-windows-msvc`
+cross-check clean with `-D warnings`**, and `scripts/kill-stress.py` **120
+rounds, 73 killed mid-run, 16 caught mid-rename, 0 failures** — the campaign
+the 2026-10-13 session could not finish.
+
+**`make gates` is 39/39, M2 23/23 — but only on the second run, and the first
+run is the more useful fact.** The first run came out **35 passed, 1 failed, 1
+stopped**: M2's gate 7 (*"a script, a recording and a silent still become one
+film"*) failed and the `unchosen` render was still waiting after fifty minutes.
+**Both need the live voice service, and the stale `edge-tts` above meant
+Microsoft refused this machine for the whole first half of the session.** Gate
+7's render is in that log waiting the refusal out and naming it, which is the
+new code behaving correctly against a service that would not answer. After
+`pipx upgrade edge-tts` the identical suite is **39/39, exit 0**. So: **a
+red voice gate here is worth checking `edge-tts --version` against PyPI before
+reading any of our code.**
+
+**Not pushed, and not released.** One commit and the annotated tag `v0.1.24`
+sit on local `master`, and **the GitHub credential on this machine is dead** —
+`gh auth status` says *"The token in keyring is invalid"* and git answers
+*"Invalid username or token"*. There is no `~/.ssh` and no `GH_TOKEN`, so there
+is no second way round it. **Read** access works, which is how this session
+pulled 62 commits. To finish:
+
+```bash
+gh auth login -h github.com -s repo -w   # interactive; the browser is already signed in
+git push origin master
+git push origin v0.1.24                  # this is what runs release.yml
+```
+
+The release workflow's first step checks the tag against `Cargo.toml` and
+`tauri.conf.json`; all three say `0.1.24`, verified by running that step's own
+shell locally (D-102). **Wait for both CI legs before trusting the release**
+(D-132's rule), and D-138's `--latest` guard means re-pushing an older tag
+cannot steal "latest" from this one.
+
 ### State as of 2026-10-13 — a removal that split its scene, a dotfile that locked arrange (D-203), and a move that renames only what moves (D-204), `v0.1.23`
 
 **Run on Windows 11, the author's machine, FFmpeg now 9.0.2.** Read **D-203

@@ -192,6 +192,7 @@ impl Schedule {
             episode: self.episodes,
             for_how_long: now.saturating_duration_since(since),
             said: self.said.clone(),
+            spoken_any: self.spoken_any,
         })
     }
 }
@@ -206,6 +207,10 @@ pub struct Throttle {
     pub for_how_long: Duration,
     /// What it said the last time, verbatim.
     pub said: String,
+    /// Whether this process has spoken a line at all — which is what decides
+    /// between [`Pace::patience`] and [`Pace::patience_cold`], and so how long
+    /// a render waiting on this streak will actually wait (D-205).
+    pub spoken_any: bool,
 }
 
 /// The process-wide gate every Edge request goes through.

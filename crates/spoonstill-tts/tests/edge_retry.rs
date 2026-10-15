@@ -509,6 +509,17 @@ fn a_stopped_run_does_not_speak_the_line() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// The backoff [`a_stopped_run_does_not_try_again`] interrupts, and the
+/// longest Stop may take to beat it (D-205).
+///
+/// Two numbers rather than one so the margin is visible: an interrupted pause
+/// returns in well under a second on an idle machine and 2.83 s on a loaded
+/// one, while an *uninterrupted* one takes the whole `STOP_BACKOFF`. The
+/// ceiling sits a quarter of the way between, which is five times the worst
+/// latency measured and four times clear of the failure it is looking for.
+const STOP_BACKOFF: Duration = Duration::from_secs(60);
+const STOP_CEILING: Duration = Duration::from_secs(15);
+
 /// And the retry loop stops too, rather than waiting out D-094's backoff.
 ///
 /// The stand-in fails the way a dropped connection does, so the first attempt
@@ -553,13 +564,23 @@ fn a_stopped_run_does_not_try_again() {
         .with_pace(Pace::unpaced())
         .with_retry(Retry {
             attempts: 3,
-            // **Five seconds on purpose.** The run count alone does not
+            // **A minute on purpose.** The run count alone does not
             // distinguish an interruptible pause from an uninterruptible one
             // — the attempt closure catches the flag either way, and the
             // only difference is how long the operator waits. Measured: with
             // `std::thread::sleep` in place of `cancel.sleep` this test
             // passed, which is how that gap was found.
-            backoff: Duration::from_secs(5),
+            //
+            // It was five seconds against a flat two-second ceiling until
+            // D-205, and that ceiling was read off an idle machine. Stopping
+            // costs 0.44 s run alone here and **2.83 s** under a full
+            // `cargo test --workspace`, where ten cores are already busy — so
+            // the suite failed this test for load rather than for a defect,
+            // which is the one thing a gate must not do (D-130). The pause is
+            // now long enough that the two outcomes cannot be confused and
+            // the ceiling is derived from it, rather than being a constant
+            // that has to be re-tuned per machine.
+            backoff: STOP_BACKOFF,
         })
         .speak(
             &Request {
@@ -584,8 +605,8 @@ fn a_stopped_run_does_not_try_again() {
     );
     let waited = started.elapsed();
     assert!(
-        waited < Duration::from_secs(2),
-        "the run took {waited:?} to stop against a five-second backoff — the \
+        waited < STOP_CEILING,
+        "the run took {waited:?} to stop against a {STOP_BACKOFF:?} backoff — the \
          pause between attempts cannot be interrupted, so Stop means waiting \
          out D-094's retry schedule"
     );
