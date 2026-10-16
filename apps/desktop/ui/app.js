@@ -302,6 +302,10 @@ async function checkProvider() {
       await checkProvider();
       await loadFallbackVoice();
     });
+    // Installed is not current (D-207). A tool Microsoft has stopped accepting
+    // still starts, so "ready" here cannot know it is stale — and a render's
+    // refusal tells the operator to come here and press this.
+    if (status.ready) drawUpdate(el("app-provider-fix"), "edge", () => checkProvider());
   } catch (error) {
     state.className = "state missing";
     state.textContent = String(error);
@@ -988,6 +992,27 @@ function drawFix(host, status, onFixed) {
     more.append(summary, detail);
     host.appendChild(more);
   }
+}
+
+// The same button for a tool that works but may be out of date (D-207): it
+// fetches the current one, and says what happened in the same place.
+const STALE_TOOL_MARK = "The speech tool is out of date";
+
+function drawUpdate(host, tool, onFixed) {
+  host.replaceChildren();
+  host.hidden = false;
+  const actions = document.createElement("div");
+  actions.className = "fix-actions";
+  const said = document.createElement("p");
+  said.className = "fix-said";
+  said.hidden = true;
+  const update = document.createElement("button");
+  update.textContent = "Update voice tool";
+  update.title = "Fetch the current edge-tts — the fix when renders say the speech tool is out of date";
+  update.addEventListener("click", () =>
+    guard(runInstall(tool, update, said, onFixed)));
+  actions.appendChild(update);
+  host.append(actions, said);
 }
 
 // Run this machine's own package manager, and say so while it happens.
@@ -1783,6 +1808,14 @@ async function render() {
     el("progress-line").textContent = String(error);
     note(String(error), true);
     setStatus("Stopped. The film file was not written.");
+    // D-205's refusal names the fix; D-207 puts it here rather than in
+    // Settings. The phrase is STALE_TOOL's own, pinned by ui_contract.rs.
+    if (String(error).includes(STALE_TOOL_MARK)) {
+      drawUpdate(el("render-fix"), "edge", async () => {
+        el("render-fix").hidden = true;
+        setStatus("The voice tool is up to date. Press Render to try again.");
+      });
+    }
   } finally {
     rendering = false;
     el("render").hidden = false;

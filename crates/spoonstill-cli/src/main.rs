@@ -1156,7 +1156,12 @@ fn list_voices(args: &VoicesArgs) -> Result<(), String> {
         let ran = provider.install().map_err(|e| e.to_string())?;
         println!("  {ran}");
     } else if args.install {
-        println!("  {} is already installed", provider.id());
+        // Installed is not current: the 403 D-205 reports is a working tool
+        // Microsoft no longer accepts, and this is the command that message
+        // names. So it updates (D-207).
+        println!("  updating {}…", provider.id());
+        let ran = provider.install().map_err(|e| e.to_string())?;
+        println!("  {ran}");
     }
 
     let wanted = args.filter.as_deref().map(str::to_lowercase);

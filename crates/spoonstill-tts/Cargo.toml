@@ -14,6 +14,9 @@ spoonstill-core = { workspace = true }
 # `spoonstill_media::command`, which is where argument vectors, timeouts,
 # retained stderr and the paste-ready command line already live (D-011).
 spoonstill-media = { workspace = true }
+# D-207: the copy of `edge-tts` Install makes lives beside the rest of this
+# machine's state, in the one folder `runs::config_dir` names.
+spoonstill-state = { workspace = true }
 
 [lints]
 workspace = true

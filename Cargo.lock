@@ -3564,6 +3564,7 @@ version = "0.1.24"
 dependencies = [
  "spoonstill-core",
  "spoonstill-media",
+ "spoonstill-state",
 ]
 
 [[package]]

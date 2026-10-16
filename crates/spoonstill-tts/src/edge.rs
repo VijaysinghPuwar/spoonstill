@@ -119,6 +119,146 @@ const INSTALLERS: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// The Pythons that can make the private copy, in order (D-207).
+///
+/// Homebrew's first on macOS because it is current; Apple's `/usr/bin/python3`
+/// is reached through `locate` after it, and is old but able to make a venv.
+#[cfg(target_os = "macos")]
+const PYTHONS: &[(&str, &[&str])] = &[
+    ("/opt/homebrew/bin/python3", &[]),
+    ("/usr/local/bin/python3", &[]),
+    ("python3", &[]),
+];
+
+#[cfg(target_os = "windows")]
+const PYTHONS: &[(&str, &[&str])] = &[("python", &[]), ("py", &["-3"]), ("python3", &[])];
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const PYTHONS: &[(&str, &[&str])] = &[("python3", &[])];
+
+/// The folder Install puts this application's own copy of `edge-tts` in
+/// (D-207): a Python virtual environment beside `runs.csv`.
+///
+/// A copy a package manager owns is updated when that package manager says so,
+/// and on 2026-10-15 Homebrew's `edge-tts` was 7.2.7 while Microsoft refused
+/// everything older than 7.3 — so "update the tool" had no answer on a machine
+/// whose copy came from Homebrew. A venv this application owns is updated by
+/// this application, from PyPI, the moment Install is pressed.
+#[must_use]
+pub fn private_root() -> Option<PathBuf> {
+    spoonstill_state::runs::config_dir().map(|dir| dir.join("edge-tts"))
+}
+
+/// A program inside a virtual environment, spelled the way the platform lays
+/// one out.
+fn in_venv(root: &Path, program: &str) -> PathBuf {
+    if cfg!(windows) {
+        root.join("Scripts").join(format!("{program}.exe"))
+    } else {
+        root.join("bin").join(program)
+    }
+}
+
+/// The private copy, when there is one that can still start.
+///
+/// `exists()` follows links, so a venv whose interpreter was removed from
+/// under it — a Homebrew Python upgraded from 3.12 to 3.13 — answers `false`
+/// here and the package manager's copy is used instead, rather than a broken
+/// copy being preferred over a working one. No process is spawned: this runs
+/// every time a provider is built.
+fn usable_private_copy(root: &Path) -> Option<PathBuf> {
+    let program = in_venv(root, PROGRAM);
+    (program.is_file() && in_venv(root, "python").exists()).then_some(program)
+}
+
+/// Make or refresh the private copy, and say what ran (D-207).
+///
+/// Always asks pip for the **newest** `edge-tts`, so pressing Install on a
+/// working-but-stale copy is the update a 403 asks for. A venv whose
+/// interpreter has gone is rebuilt once rather than reported.
+fn install_private(root: &Path) -> Result<String, String> {
+    let mut tried: Vec<String> = Vec::new();
+    for attempt in 0..2 {
+        if !in_venv(root, "python").exists() {
+            // A venv left half-made, or one whose interpreter has gone, is
+            // replaced whole: `python -m venv` over it keeps the dead links.
+            if root.exists() {
+                std::fs::remove_dir_all(root)
+                    .map_err(|e| format!("could not clear {}: {e}", root.display()))?;
+            }
+            make_venv(root, &mut tried)?;
+        }
+        let mut command = FfmpegCommand::new(in_venv(root, "python"));
+        command.args([
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--disable-pip-version-check",
+            "--quiet",
+            "edge-tts",
+        ]);
+        let shown = command.display();
+        match command.spawn().and_then(|c| c.wait_until(INSTALL_TIMEOUT)) {
+            Ok(finished) if finished.status.success() => return Ok(shown),
+            Ok(finished) => tried.push(format!(
+                "`{shown}` exited {}: {}",
+                finished.status.code().unwrap_or(-1),
+                last_line(&finished.stderr)
+            )),
+            Err(error) => tried.push(describe_failure("python", &error)),
+        }
+        if attempt == 0 {
+            // One rebuild: whatever pip's failure was, a fresh venv is the
+            // cheapest thing that could clear it.
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+    Err(tried.join("; "))
+}
+
+/// Create the virtual environment with the first Python that can.
+fn make_venv(root: &Path, tried: &mut Vec<String>) -> Result<(), String> {
+    if let Some(parent) = root.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+    }
+    for (program, prefix) in PYTHONS {
+        let path = if Path::new(program).is_absolute() {
+            if !Path::new(program).is_file() {
+                continue;
+            }
+            PathBuf::from(program)
+        } else {
+            locate(program)
+        };
+        let mut command = FfmpegCommand::new(path);
+        command.args(*prefix).args(["-m", "venv"]).arg(root);
+        let shown = command.display();
+        match command.spawn().and_then(|c| c.wait_until(INSTALL_TIMEOUT)) {
+            Ok(finished) if finished.status.success() => return Ok(()),
+            Ok(finished) => tried.push(format!(
+                "`{shown}` exited {}: {}",
+                finished.status.code().unwrap_or(-1),
+                last_line(&finished.stderr)
+            )),
+            Err(error) => tried.push(describe_failure(program, &error)),
+        }
+        // The next Python starts from nothing, not from this one's half.
+        let _ = std::fs::remove_dir_all(root);
+    }
+    Err(tried.join("; "))
+}
+
+/// Which `edge-tts` runs when nobody has named one: this application's own
+/// copy when Install has made one that can start, else whatever the package
+/// managers put on the machine (D-207, D-104).
+fn default_program() -> PathBuf {
+    private_root()
+        .and_then(|root| usable_private_copy(&root))
+        .unwrap_or_else(|| locate(PROGRAM))
+}
+
 /// The last thing a failing tool said, which is the part that names the cause.
 ///
 /// A Python traceback is twenty lines of our own irrelevance and one line of
@@ -802,7 +942,8 @@ fn classify(stderr: &str) -> Fault {
 const STALE_TOOL: &str = "Microsoft's voice service turned this request away before it \
                           started. The speech tool is out of date — Microsoft changed \
                           what it accepts, and a newer edge-tts is needed. Press Install \
-                          to fetch the current one, or run `pipx upgrade edge-tts`. If it \
+                          in Settings to fetch the current one, or run `still voices \
+                          --install`. If it \
                           is already current, the service is refusing this machine for \
                           now and will take a while to relent.";
 
@@ -1179,7 +1320,7 @@ impl Edge {
     #[must_use]
     pub fn from_env() -> Self {
         Edge {
-            program: std::env::var_os(EDGE_TTS_ENV).map_or_else(|| locate(PROGRAM), PathBuf::from),
+            program: std::env::var_os(EDGE_TTS_ENV).map_or_else(default_program, PathBuf::from),
             retry: Retry::default(),
             pace: Pace::service(),
         }
@@ -1481,14 +1622,46 @@ impl Provider for Edge {
     /// one that both exists and succeeds wins. Nothing is downloaded from us
     /// (D-062, D-012): every candidate is the platform's own package manager,
     /// run because a button that says install was pressed.
+    ///
+    /// **Install is also Update** (D-207). It used to return "already
+    /// installed" whenever the tool would start — so on the day Microsoft
+    /// began refusing `edge-tts` 7.2.7, the button D-205's message pointed at
+    /// did nothing and said it had succeeded. It now makes or refreshes this
+    /// application's own copy from PyPI first, which is current whatever
+    /// Homebrew's formula says, and only falls back to a package manager when
+    /// there is no Python to make it with and no working tool at all.
     fn install(&self) -> Result<String, TtsError> {
-        // Already there. Five minutes of a package manager re-resolving a
-        // dependency tree is not what a button press asked for.
-        if self.availability() == Availability::Ready {
-            return Ok(format!("{} is already installed", self.program.display()));
+        let mut tried: Vec<String> = Vec::new();
+
+        if let Some(root) = private_root() {
+            match install_private(&root) {
+                Ok(shown) => {
+                    let installed = in_venv(&root, PROGRAM);
+                    match availability_of(&installed) {
+                        Availability::Ready => return Ok(shown),
+                        Availability::Missing(remedy) => tried.push(format!(
+                            "`{shown}` succeeded but {} will not run: {}",
+                            installed.display(),
+                            remedy.detail
+                        )),
+                    }
+                }
+                Err(why) => tried.push(why),
+            }
         }
 
-        let mut tried: Vec<String> = Vec::new();
+        // A working copy and no way to update it: running a package manager's
+        // `install` over it changes nothing, so say what failed instead.
+        if self.availability() == Availability::Ready {
+            return Err(TtsError::Unavailable {
+                provider: ID.to_owned(),
+                detail: format!(
+                    "{} works but could not be updated. {}",
+                    self.program.display(),
+                    tried.join("; ")
+                ),
+            });
+        }
 
         for (program, args) in INSTALLERS {
             // Located, not named. A package manager is exactly as invisible to
@@ -1947,6 +2120,52 @@ fn parse_voices(table: &str) -> Vec<Voice> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D-207: this application's own `edge-tts` is preferred only while it can
+    /// start. A venv whose interpreter has gone must lose to the package
+    /// manager's working copy, or one Python upgrade silences every render.
+    #[test]
+    fn the_private_copy_is_used_only_while_its_python_exists() {
+        let root = std::env::temp_dir().join(format!(
+            "spoonstill-private-edge-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let bin = in_venv(&root, PROGRAM);
+        std::fs::create_dir_all(bin.parent().expect("a venv has a bin folder")).expect("mkdir");
+
+        assert_eq!(usable_private_copy(&root), None, "nothing there yet");
+
+        std::fs::write(&bin, b"").expect("write edge-tts");
+        assert_eq!(usable_private_copy(&root), None, "no interpreter beside it");
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("gone/python3.12"), in_venv(&root, "python"))
+                .expect("symlink");
+            assert_eq!(
+                usable_private_copy(&root),
+                None,
+                "an interpreter link that leads nowhere is a copy that cannot start"
+            );
+            std::fs::remove_file(in_venv(&root, "python")).expect("rm link");
+        }
+
+        std::fs::write(in_venv(&root, "python"), b"").expect("write python");
+        assert_eq!(usable_private_copy(&root), Some(bin));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The private copy lives beside `runs.csv`, in the one folder machine
+    /// state has (D-168), so `with_machine_state` in the gates redirects it too.
+    #[test]
+    fn the_private_copy_lives_with_the_rest_of_machine_state() {
+        assert_eq!(
+            private_root(),
+            spoonstill_state::runs::config_dir().map(|d| d.join("edge-tts"))
+        );
+    }
 
     /// D-195: silence for an ordinary English sentence is asked again; a line
     /// of punctuation, or Hindi to an English voice, is still refused at once.

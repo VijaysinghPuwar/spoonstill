@@ -10313,3 +10313,59 @@ allowed fifteen. `wait_until_cancellable_with` states the grace; speech passes
 `Duration::ZERO`, FFmpeg keeps its two seconds. The in-flight test now demands
 under one second from Stop, and with the grace put back it fails:
 *"took 2.008703292s to stop"*.
+
+### D-207 — Install is also Update, and the copy it makes is this application's own · Accepted
+
+**Reported 2026-10-15**, with a screenshot of the Render screen: every scene of
+a 344-scene project failed with D-205's sentence — *"Microsoft's voice service
+turned this request away before it started. The speech tool is out of date …
+Press Install to fetch the current one, or run `pipx upgrade edge-tts`."* The
+author's `runs.csv` holds 21 such failed renders across two days.
+
+**D-205's diagnosis was right and both of its remedies were dead ends on the
+machine that reported it.** Measured there: the `edge-tts` spoonstill located
+was Homebrew's **7.2.7**, and it answers `WSServerHandshakeError: 403`; PyPI's
+**7.3.1**, installed into a scratch venv, spoke the same line on the first try.
+But:
+
+- **Install did nothing.** `Edge::install` began *"already there — return
+  Ok"* whenever `--version` succeeded, and a stale tool still starts. The
+  button reported success and changed nothing.
+- **Homebrew could not help either.** `brew upgrade edge-tts` was a no-op —
+  the formula was still 7.2.7 — and `/opt/homebrew/bin` is the first directory
+  `locate` searches, so a newer copy elsewhere would be shadowed by it.
+- **`pipx upgrade edge-tts` named a tool that machine did not have.**
+
+**Install now makes or refreshes a virtual environment this application owns**,
+at `config_dir()/edge-tts` beside `runs.csv`, with `python -m venv` and
+`pip install --upgrade edge-tts` — current from PyPI whatever any formula says,
+and the sanctioned answer to PEP 668's externally-managed Python. It runs even
+when a working tool exists, because **installed is not current**. Only when no
+Python can make the venv *and* nothing works does it fall back to the package
+managers, as before; a working-but-unupdatable tool is reported as exactly that
+rather than as a successful no-op.
+
+**The private copy is preferred only while it can start**: `from_env` takes the
+override, then the private copy if its interpreter link still resolves, then
+`locate`. A Homebrew Python upgrade that removes the venv's interpreter makes
+the package manager's copy win again instead of silencing every render — and
+pressing Install rebuilds the venv. Checked with `exists()`, which follows the
+link, so building a provider spawns nothing.
+
+**Not D-012's refusal.** D-012 refuses downloading a *build nobody chose*; this
+is pip fetching the package the operator's own button names, from the index the
+README already sends them to — the same thing the `--user` pip candidate did.
+
+**Surfaces.** `still voices --install` updates rather than printing *"already
+installed"*. Settings shows **Update voice tool** when the service is ready.
+The Render screen draws the same button under a failed render whose error
+carries D-205's sentence — recognised by a phrase `ui_contract.rs` pins against
+`STALE_TOOL` itself, mutation-tested both ways. `STALE_TOOL` now names
+`still voices --install` instead of pipx.
+
+**Measured on the reporting machine:** `still voices --install` took **7.1 s**
+and left 7.3.1 at `~/Library/Application Support/spoonstill/edge-tts`; a copy of
+the reported project's first six scenes, rendered with its own settings (4K,
+`card` subtitles, `en-US-AndrewMultilingualNeural`), spoke all six lines and
+produced **35.021 s against 35.000 s expected**. Homebrew's 7.2.7 is untouched
+and still answers 403 — it is simply no longer the one used.

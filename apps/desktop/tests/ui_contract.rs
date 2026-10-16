@@ -1129,3 +1129,41 @@ fn an_answer_from_rust_cannot_paint_over_a_later_one() {
         );
     }
 }
+
+/// D-207: the Render screen offers "Update voice tool" when a render's error
+/// carries D-205's stale-tool sentence, recognised by a phrase. If the Rust
+/// sentence is reworded and the page is not, the button silently never shows —
+/// which is the state that left an operator with a 403 and no way out.
+#[test]
+fn the_render_screen_recognises_the_stale_tool_sentence() {
+    let page = read("app.js");
+    let mark = page
+        .split("const STALE_TOOL_MARK = \"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("app.js defines STALE_TOOL_MARK");
+    let edge = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/spoonstill-tts/src/edge.rs"),
+    )
+    .expect("reading edge.rs");
+    let sentence = edge
+        .split("const STALE_TOOL: &str = \"")
+        .nth(1)
+        .and_then(|rest| rest.split("\";").next())
+        .expect("edge.rs defines STALE_TOOL");
+    // The Rust source continues lines with `\` and indentation; the string
+    // the program prints has neither.
+    let printed: String = sentence
+        .split("\\\n")
+        .map(str::trim_start)
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(
+        printed.contains(mark),
+        "STALE_TOOL no longer contains {mark:?}, so the Update button never appears:\n{printed}"
+    );
+    assert!(
+        page.contains("STALE_TOOL_MARK)) {") && page.contains("drawUpdate(el(\"render-fix\")"),
+        "the render failure path no longer offers the update"
+    );
+}

@@ -370,6 +370,24 @@ be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
 
+### State as of 2026-10-16 — the button D-205 pointed at did nothing (D-207), and the join tells segments their length (D-206), `v0.1.25`
+
+**Read D-207 before touching `Edge::install`, `private_root`,
+`usable_private_copy`, `install_private`, `default_program`, `STALE_TOOL`, or
+the window's `drawUpdate` / `STALE_TOOL_MARK`.** On the author's Mac every render
+of a 344-scene project failed with D-205's *"the speech tool is out of date"*:
+Homebrew's `edge-tts` was 7.2.7 (403) and **Homebrew had nothing newer**, while
+Install returned "already installed" for any tool that starts. Install now makes
+or refreshes a venv spoonstill owns at `config_dir()/edge-tts` from PyPI, and
+`from_env` prefers it while its interpreter link resolves. On that machine
+`still voices --install` took 7 s and the project's scenes spoke again.
+**Homebrew's 7.2.7 is still installed there and still answers 403** — it is
+just no longer used. Under `with_machine_state` the gates do not see the private
+copy, so gate 7 there speaks through Homebrew's.
+
+D-206 is the join-drift work from 2026-10-10, written locally as "D-203" while
+upstream took D-203..D-205; renumbered on merge.
+
 ### State as of 2026-10-15 — a refusal at the door, read three ways (D-205), `v0.1.24`
 
 **Found by reading the author's own `runs.csv`, then by not believing the first
