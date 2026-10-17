@@ -170,7 +170,7 @@ cargo build --release -p spoonstill-cli
 ./target/release/still render fixtures/projects/mixed/ --out /tmp/mixed.mp4 \
   --voice en-GB-RyanNeural
 
-# Subtitles, burned into the picture (D-106). Six looks; `still subtitles`
+# Subtitles, burned into the picture (D-106). Ten looks (D-208); `still subtitles`
 # says what each is for. A scene is captioned when it has words — the script it
 # speaks, or a .txt beside its recording.
 ./target/release/still subtitles
@@ -369,6 +369,33 @@ whole suite would have refused to start. It tests what the directory must not
 be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
+
+### State as of 2026-10-16, later — four subtitle looks, one of them copied from a real channel (D-208), `v0.1.26`
+
+**Read D-208 before touching `Weight::Heavy`, the `HEAVY` face stack, a theme
+with `max_lines: 1`, or the widest-line shrink in `render_cue`.** The author
+pointed at a manhwa recap video and asked for its subtitle look plus "some more".
+`recap` (measured off its frames: white Montserrat ExtraBold, `#900010` edge,
+25–28 chars a cue), `bold`, `glow` and `pill` — ten themes now. Montserrat is
+bundled (OFL, 455 KB) **in front of** Inter Bold and Noto Bold, so nothing it
+lacks becomes a box. The six old themes are byte-identical.
+
+**A stress run found an older defect**: one unbreakable word wider than the
+frame never shrank (it is one line) and ran off both edges — in `punch` too.
+Fixed after `balance`; a line that already fit is untouched.
+
+**The video's *motion* is not built and should not be faked**: its pictures are
+image-to-video clips (people walk, faces turn). Accepting a video clip as a
+scene's picture is the honest route and is the author's call (D-208).
+
+**Two machine traps from this session.** Xcode was updated and its licence is
+not accepted, so every link fails with exit 69; `DEVELOPER_DIR=/Library/Developer/CommandLineTools`
+works around it without `sudo`. And the build cache held absolute paths from
+before the repo moved to `Desktop/GitHub/Projects/vidio` — Tauri's build
+scripts failed until those crates were `cargo clean`ed. **And mine:** I
+`git stash`ed to build the previous binary *while* tests and a stress render
+were running on this tree, which invalidated both; they were re-run. Build an
+old binary in a `git worktree`, never in place.
 
 ### State as of 2026-10-16 — the button D-205 pointed at did nothing (D-207), and the join tells segments their length (D-206), `v0.1.25`
 

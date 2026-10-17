@@ -10369,3 +10369,66 @@ the reported project's first six scenes, rendered with its own settings (4K,
 `card` subtitles, `en-US-AndrewMultilingualNeural`), spoke all six lines and
 produced **35.021 s against 35.000 s expected**. Homebrew's 7.2.7 is untouched
 and still answers 403 — it is simply no longer the one used.
+
+### D-208 — Four more subtitle looks, and the one that matched a real channel draws in Montserrat · Accepted
+
+**Asked for 2026-10-16** by the author, pointing at a manhwa recap video
+(`youtu.be/b7NvzLgNEEg`, channel "Manhwa For You"): *"add the effect with the
+subtitle style"*, then *"add some more other subtitle style also"*.
+
+**What that video's subtitle is, measured rather than eyeballed.** A 1080p
+frame and a five-minute sample: white heavy geometric sans (Montserrat's `a`,
+`t` and `y`, not Inter's), a ~3px edge of `#900010` crimson with a soft crimson
+fall below and right, one line, baseline ~84px off the bottom, **25–28
+characters a cue** and about 1.5 s each. No box. Hard cuts between pictures,
+median shot **3.98 s** over 61 cuts.
+
+**Four themes, none of which changes a caption that already exists.**
+
+| theme | face | look |
+|---|---|---|
+| `recap` | Montserrat ExtraBold | white, thin crimson edge, crimson fall, one line, 28 chars |
+| `bold` | Montserrat ExtraBold | white, thick black edge, hard drop shadow, one line |
+| `glow` | Montserrat ExtraBold | white, thin cyan edge, cyan halo with no offset |
+| `pill` | Montserrat ExtraBold | near-black on a white rounded tag, one line |
+
+**Inter could not draw it, so a face was added rather than imitated.** D-106
+holds: no system font, nothing loaded from a path. `Weight::Heavy` is a fourth
+stack — **Montserrat ExtraBold, then Inter Bold, then Noto Sans Devanagari
+Bold** — because Montserrat has no Greek: a Greek word in a `recap` caption
+falls through to Inter rather than to a `.notdef` box, so `undrawable` (which
+asks the Regular stack, Inter + Noto) stays true for every theme. One weight,
+455 KB, OFL 1.1; the licence is in `assets/fonts/LICENSE-Montserrat.txt` and
+in `THIRD-PARTY-NOTICES.md`, and D-124's test now walks three families.
+
+**`max_lines: 1` is the look and is not a truncation.** `cues` lengthens a cue
+that would flicker (D-116), so a one-line theme can be handed more than a line;
+`render_cue` shrinks to `MIN_SHRINK` and then takes a second line rather than
+lose words. Every existing theme keeps two.
+
+**The six old themes are byte-identical**: they draw from the same three Inter
+stacks as before, and D-157's pinned hashes still pass. A segment's key carries
+the theme's *name* (`SubtitleSpec::key_fields`), so nothing already rendered
+re-encodes.
+
+**The other half of "the effect" is deliberately not built here, and why.**
+The video's pictures *move* — people walk past in the background, faces turn —
+which is an image-to-video model (Kling, Veo, Runway), not a camera move. No
+filter over a still produces that, and pretending a stronger Ken Burns is the
+same thing would be a false claim. What spoonstill can already match is the
+rest of it: a hard cut on every narration boundary, a slow push on each
+picture (D-030), and scenes of 3–5 s from the chapter cut (D-196). Taking a
+**video clip** as a scene's picture — so a clip animated in Google Flow can be
+dropped in where a still goes — is the way to the rest, and it touches D-030
+through D-034 and the segment profile; it is the author's call, not slipped in
+under a subtitle change.
+
+**A defect the stress run found, older than this decision.** `render_cue`
+shrinks the type when a cue wraps to more lines than the theme allows — and a
+single word wider than the frame is *one* line, so it never shrank and ran off
+both edges. A 66-letter word did it in `recap`; the same word with the shrink
+removed does it in `punch`, so it was always reachable and the wider face only
+reached it sooner. After balancing, the widest line is measured and the type
+scaled until it fits. A line that already fit is untouched, so no caption that
+rendered whole changes; D-157's pinned hashes still pass.
+`a_word_wider_than_the_frame_is_shrunk_to_fit` fails without the fix.

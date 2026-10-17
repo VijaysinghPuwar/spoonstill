@@ -319,7 +319,7 @@ Off unless you ask, because text burned into pixels cannot be taken out again
 without re-rendering.
 
 ```bash
-still subtitles                                     # six looks, and what each is for
+still subtitles                                     # ten looks, and what each is for
 still render ~/holiday --out ~/film.mp4 --subtitles boxed
 still render ~/holiday --out ~/film.mp4 --subtitle-position top
 still render ~/holiday --out ~/film.mp4 --no-subtitles
@@ -333,13 +333,17 @@ still render ~/holiday --out ~/film.mp4 --no-subtitles
 | `card` | Near-black on a warm off-white card. The one light theme; reads as print. |
 | `punch` | Heavy yellow with a thick black edge. For social video watched muted. |
 | `minimal` | Small, light, shadow only, close to the edge. Understated. |
+| `recap` | Heavy white with a thin crimson edge, a few words at a time. Manhwa recap style. |
+| `bold` | Heavy white, thick black edge, hard shadow, one line. Loud short-form video. |
+| `glow` | Heavy white with a soft cyan neon halo. Night scenes and sci-fi. |
+| `pill` | Heavy dark text on a white rounded tag, a few words at a time. Phone-editor look. |
 
 Every measurement in a theme is a **fraction of the frame**, so one theme is one
 design at 720p and at 4K.
 
 If your pictures already have words drawn into them — captions in the artwork, a
 logo along the bottom — put the subtitles at the **top**. A theme with a plate
-behind it (`boxed`, `band`, `card`) also covers that lettering, where `classic`
+behind it (`boxed`, `band`, `card`, `pill`) also covers that lettering, where `classic`
 and `minimal` let it show through between the lines.
 
 In the window there is a **Subtitles** screen whose preview is **drawn by the
@@ -608,7 +612,7 @@ makes sense.
 | `still render DIR` | Render the whole project to one film. The main command — flags below. |
 | `still render-scene` | Render one `--image` + `--audio` pair to one segment. Useful for trying a `--motion` or a `--preset`. |
 | `still voices [FILTER]` | List a provider's voices. `--install` fetches the provider's tooling first. `--use VOICE` makes one the fallback for every project on this machine, `--forget` clears it. |
-| `still subtitles` | The six themes and what each is for. |
+| `still subtitles` | The ten themes and what each is for. |
 | `still resolutions` | Every size in every shape, with pixel dimensions. Alias: `formats`. |
 | `still doctor` | Every external program this needs, plus the hardware encoders this machine can actually run and which one renders use. `--install` fetches what is missing; `--graphics on\|off` chooses the graphics card or the processor. |
 | `still licences` | The licences of everything built into the binary. Alias: `licenses`. |
@@ -862,9 +866,9 @@ before it is called a test**.
 |---|---|
 | Rust | **~51,700 lines** across 6 crates + a Tauri app · edition 2024, pinned to 1.94 |
 | UI | ~4,800 lines of hand-written HTML/CSS/JS — no framework, no build step |
-| Tests | **819 `#[test]` functions** — 47 unit-test modules, 18 integration suites |
+| Tests | **822 `#[test]` functions** — 47 unit-test modules, 18 integration suites |
 | Exit gates | **39** shell gates that render real media and assert real properties |
-| Decisions | **174 numbered decisions** in `decisions.md`, each Accepted / Open / Superseded |
+| Decisions | **175 numbered decisions** in `decisions.md`, each Accepted / Open / Superseded |
 | Direct dependencies | **12 third-party crates** at runtime (plus one build-time, one dev-only) — and `spoonstill-core` has **none** |
 | `unsafe` | forbidden at the workspace root |
 | CI jobs per push | 6 — advisories, macOS, Windows, both installers executed, and the gates |
@@ -1064,7 +1068,7 @@ Read in this order; later files never override earlier ones.
 
 | File | What it is |
 |---|---|
-| [`decisions.md`](decisions.md) | **Single source of truth.** 174 numbered decisions, each with the evidence that produced it. |
+| [`decisions.md`](decisions.md) | **Single source of truth.** 175 numbered decisions, each with the evidence that produced it. |
 | [`plan.md`](plan.md) | Milestones M0–M5, each with entry conditions, deliverables, and exit gates that are runnable commands. |
 | [`ffmpeg-findings.md`](ffmpeg-findings.md) | Benchmarks measured on real hardware, with reproduction commands. Evidence, not policy. |
 | [`PROCESS.md`](PROCESS.md) | How the work is actually done — reproduce, fix, prove the test fails without the fix. |
@@ -1083,8 +1087,8 @@ the author. The reference checkouts under `plan/` are **not** part of this
 repository.
 
 **Third-party material is a separate question, and it is answered.** Three
-weights of Inter and three weights of Noto Sans Devanagari are compiled into the
-binary to draw subtitles, under the SIL Open Font License — which asks that each
+weights of Inter, three weights of Noto Sans Devanagari and one of Montserrat
+are compiled into the binary to draw subtitles, under the SIL Open Font License — which asks that each
 copy carry its notice. Every release archive contains
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md), the window bundles it, and
 every binary can print it:

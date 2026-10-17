@@ -89,9 +89,9 @@ impl fmt::Display for Rgba {
     }
 }
 
-/// Which of the three bundled weights a theme draws with.
+/// Which bundled face a theme draws with.
 ///
-/// Three, not a numeric axis: the renderer holds three real font files, and a
+/// Named faces, not a numeric axis: the renderer holds real font files, and a
 /// weight that does not exist would otherwise have to be faked by dilating the
 /// glyph mask — which is what makes synthetic bold look like a mistake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -103,6 +103,10 @@ pub enum Weight {
     SemiBold,
     /// For themes whose whole idea is emphasis.
     Bold,
+    /// Montserrat ExtraBold, the one face that is not Inter (D-208): the wide
+    /// geometric caption recap channels use. Inter Bold behind it draws what
+    /// Montserrat has no glyph for, so no character is lost by choosing it.
+    Heavy,
 }
 
 impl Weight {
@@ -113,6 +117,7 @@ impl Weight {
             Weight::Regular => "regular",
             Weight::SemiBold => "semibold",
             Weight::Bold => "bold",
+            Weight::Heavy => "heavy",
         }
     }
 }
@@ -211,19 +216,37 @@ pub enum SubtitleTheme {
     /// Small, light, close to the edge, shadow only. For footage that should
     /// not have to share the frame.
     Minimal,
+    /// Heavy white Montserrat with a thin crimson edge, one short line at a
+    /// time (D-208). The manhwa and story-recap look: a few words per cue, so
+    /// the eye catches the line without leaving the picture.
+    Recap,
+    /// Heavy white with a thick black edge and a hard drop shadow, one line.
+    /// The loud short-form look, in white rather than [`SubtitleTheme::Punch`]'s
+    /// yellow (D-208).
+    Bold,
+    /// Heavy white with a soft cyan halo and no dark edge — a neon sign rather
+    /// than a subtitle. For night scenes and anything sci-fi (D-208).
+    Glow,
+    /// Heavy near-black on a white rounded tag that hugs a few words. The
+    /// phone-editor look: reads over anything, covers little (D-208).
+    Pill,
 }
 
 impl SubtitleTheme {
     /// Every theme, in the order a chooser should offer them.
     ///
     /// [`SubtitleTheme::Classic`] is first because it is the default.
-    pub const ALL: [SubtitleTheme; 6] = [
+    pub const ALL: [SubtitleTheme; 10] = [
         SubtitleTheme::Classic,
         SubtitleTheme::Boxed,
         SubtitleTheme::Band,
         SubtitleTheme::Card,
         SubtitleTheme::Punch,
         SubtitleTheme::Minimal,
+        SubtitleTheme::Recap,
+        SubtitleTheme::Bold,
+        SubtitleTheme::Glow,
+        SubtitleTheme::Pill,
     ];
 
     /// The name in `project.yaml`, on the command line, and in the cache key.
@@ -236,6 +259,10 @@ impl SubtitleTheme {
             SubtitleTheme::Card => "card",
             SubtitleTheme::Punch => "punch",
             SubtitleTheme::Minimal => "minimal",
+            SubtitleTheme::Recap => "recap",
+            SubtitleTheme::Bold => "bold",
+            SubtitleTheme::Glow => "glow",
+            SubtitleTheme::Pill => "pill",
         }
     }
 
@@ -258,6 +285,18 @@ impl SubtitleTheme {
                 "Heavy yellow with a thick black edge. For social video watched muted."
             }
             SubtitleTheme::Minimal => "Small, light, shadow only, close to the edge. Understated.",
+            SubtitleTheme::Recap => {
+                "Heavy white with a thin crimson edge, a few words at a time. Manhwa recap style."
+            }
+            SubtitleTheme::Bold => {
+                "Heavy white, thick black edge, hard shadow, one line. Loud short-form video."
+            }
+            SubtitleTheme::Glow => {
+                "Heavy white with a soft cyan neon halo. Night scenes and sci-fi."
+            }
+            SubtitleTheme::Pill => {
+                "Heavy dark text on a white rounded tag, a few words at a time. Phone-editor look."
+            }
         }
     }
 
@@ -416,6 +455,96 @@ impl SubtitleTheme {
                 max_width: 0.72,
                 max_lines: 2,
                 max_chars: 76,
+            },
+            // Measured off a 1080p frame of the channel the author asked for
+            // (D-208): ascender to baseline ~52px, edge ~3px of #900010 with a
+            // soft crimson fall below and right, baseline ~84px off the bottom, and
+            // 25-28 characters a line over a five-minute sample.
+            SubtitleTheme::Recap => ThemeStyle {
+                weight: Weight::Heavy,
+                size: 0.058,
+                line_spacing: 1.15,
+                fill: Rgba::new(255, 255, 255, 255),
+                outline: Rgba::new(144, 0, 16, 255),
+                outline_width: 0.055,
+                shadow: Rgba::new(144, 0, 16, 200),
+                shadow_offset: 0.045,
+                shadow_blur: 0.035,
+                backdrop: Backdrop::None,
+                backdrop_fill: Rgba::NONE,
+                padding_x: 0.0,
+                padding_y: 0.0,
+                radius: 0.0,
+                margin: 0.060,
+                max_width: 0.80,
+                // One line is the look. A cue `cues` had to lengthen so it is
+                // not a flicker shrinks a little, then takes a second line,
+                // rather than losing words (MIN_SHRINK's rule).
+                max_lines: 1,
+                max_chars: 28,
+            },
+            SubtitleTheme::Bold => ThemeStyle {
+                weight: Weight::Heavy,
+                size: 0.066,
+                line_spacing: 1.12,
+                fill: Rgba::new(255, 255, 255, 255),
+                outline: Rgba::new(0, 0, 0, 255),
+                outline_width: 0.14,
+                // Hard, not soft: a sticker's drop, not a glow.
+                shadow: Rgba::new(0, 0, 0, 210),
+                shadow_offset: 0.09,
+                shadow_blur: 0.0,
+                backdrop: Backdrop::None,
+                backdrop_fill: Rgba::NONE,
+                padding_x: 0.0,
+                padding_y: 0.0,
+                radius: 0.0,
+                margin: 0.085,
+                max_width: 0.82,
+                max_lines: 1,
+                max_chars: 22,
+            },
+            SubtitleTheme::Glow => ThemeStyle {
+                weight: Weight::Heavy,
+                size: 0.058,
+                line_spacing: 1.16,
+                fill: Rgba::new(255, 255, 255, 255),
+                // A thin edge in the glow's own colour is what keeps white
+                // letters readable over a pale sky; the halo alone is not.
+                outline: Rgba::new(40, 210, 255, 255),
+                outline_width: 0.07,
+                shadow: Rgba::new(0, 200, 255, 255),
+                shadow_offset: 0.0,
+                shadow_blur: 0.16,
+                backdrop: Backdrop::None,
+                backdrop_fill: Rgba::NONE,
+                padding_x: 0.0,
+                padding_y: 0.0,
+                radius: 0.0,
+                margin: 0.075,
+                max_width: 0.80,
+                max_lines: 1,
+                max_chars: 26,
+            },
+            SubtitleTheme::Pill => ThemeStyle {
+                weight: Weight::Heavy,
+                size: 0.052,
+                line_spacing: 1.18,
+                fill: Rgba::new(20, 20, 24, 255),
+                outline: Rgba::NONE,
+                outline_width: 0.0,
+                shadow: Rgba::new(0, 0, 0, 110),
+                shadow_offset: 0.08,
+                shadow_blur: 0.16,
+                backdrop: Backdrop::Fitted,
+                backdrop_fill: Rgba::new(255, 255, 255, 245),
+                padding_x: 0.55,
+                padding_y: 0.26,
+                radius: 0.5,
+                margin: 0.075,
+                max_width: 0.80,
+                max_lines: 1,
+                max_chars: 24,
             },
         }
     }

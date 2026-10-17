@@ -67,6 +67,16 @@ const DEVA_REGULAR: &[u8] = include_bytes!("../assets/fonts/NotoSansDevanagari-R
 const DEVA_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/NotoSansDevanagari-SemiBold.ttf");
 const DEVA_BOLD: &[u8] = include_bytes!("../assets/fonts/NotoSansDevanagari-Bold.ttf");
 
+/// Montserrat ExtraBold, the `recap` theme's face (D-208), SIL Open Font
+/// License 1.1. The licence travels with the file, in
+/// `assets/fonts/LICENSE-Montserrat.txt`, and is named in
+/// `THIRD-PARTY-NOTICES.md` (D-124).
+///
+/// It is *in front of* Inter Bold, not instead of it: Montserrat has no Greek,
+/// so a Greek word in a `recap` caption falls through to Inter rather than to a
+/// `.notdef` box, and [`undrawable`] stays true for every theme at once.
+const HEAVY: &[u8] = include_bytes!("../assets/fonts/Montserrat-ExtraBold.ttf");
+
 /// Smallest the type may be shrunk to when a cue will not fit in
 /// [`ThemeStyle::max_lines`], as a fraction of the theme's own size.
 ///
@@ -512,16 +522,30 @@ impl Face {
 ///
 /// Parsing a 320 KB TTF is not free, and `render_cue` is called once per cue —
 /// several times per scene, five hundred scenes at the design point. Parsing
-/// per cue cost measured seconds across a hundred-scene film. There are six of
-/// these and they never change, so each is parsed at most once.
+/// per cue cost measured seconds across a hundred-scene film. These never
+/// change, so each stack is parsed at most once.
 fn faces(weight: Weight) -> &'static [Face] {
     use std::sync::OnceLock;
-    static FACES: [OnceLock<Vec<Face>>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    static FACES: [OnceLock<Vec<Face>>; 4] = [
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+    ];
 
     let (slot, latin, devanagari) = match weight {
         Weight::Regular => (&FACES[0], REGULAR, DEVA_REGULAR),
         Weight::SemiBold => (&FACES[1], SEMIBOLD, DEVA_SEMIBOLD),
         Weight::Bold => (&FACES[2], BOLD, DEVA_BOLD),
+        Weight::Heavy => {
+            return FACES[3].get_or_init(|| {
+                vec![
+                    Face::parse(HEAVY, false),
+                    Face::parse(BOLD, false),
+                    Face::parse(DEVA_BOLD, true),
+                ]
+            });
+        }
     };
     slot.get_or_init(|| vec![Face::parse(latin, false), Face::parse(devanagari, true)])
 }
@@ -860,8 +884,21 @@ pub fn render_cue(
         px = (px * 0.94).max(base_px * MIN_SHRINK);
         lines = wrap(&fonts, text, px as f32, limit);
     }
-    let px_f = px as f32;
+    let mut px_f = px as f32;
     let mut lines = balance(&fonts, text, px_f, limit, lines.len());
+
+    // A single word wider than the frame is one line, so the loop above never
+    // shrinks for it and it ran off both edges (D-208: found by a stress run's
+    // 66-letter word in `recap`, and reachable in every theme with a longer
+    // one). Shrink until the widest line fits. A line that already fits is
+    // untouched, so no caption that rendered whole changes by a pixel.
+    let widest = lines
+        .iter()
+        .map(|line| fonts.measure(line, px_f))
+        .fold(0.0_f32, f32::max);
+    if widest > limit && widest > 0.0 {
+        px_f = (px_f * limit / widest * 0.99).max(8.0);
+    }
 
     // The loop above tries to reach `max_lines` by shrinking the type and gives
     // up at `MIN_SHRINK`. Nothing then stopped `draw` from allocating a band as
@@ -1772,6 +1809,107 @@ mod tests {
         );
     }
 
+    /// D-208. The heavy themes draw in Montserrat, and lose nothing by it.
+    ///
+    /// Montserrat covers less than Inter. A stack of Montserrat alone would
+    /// draw some character of a `recap` caption as a `.notdef` box while
+    /// [`undrawable`] — which asks the Regular stack — said nothing, so the
+    /// warning and the frame would disagree. Inter Bold behind it is what keeps
+    /// them agreeing, and this asserts it over every character Inter draws
+    /// rather than over one example a font update could quietly add.
+    #[test]
+    fn a_heavy_theme_draws_in_montserrat_and_falls_back_to_inter() {
+        let fonts = Fonts::for_weight(Weight::Heavy);
+        assert_eq!(fonts.face_for('a'), 0, "Latin is Montserrat's");
+
+        let inter = Fonts::for_weight(Weight::Bold);
+        let mut fell_through = 0usize;
+        for ch in (0x20u32..0x3000).filter_map(char::from_u32) {
+            if !inter.faces[0].has(ch) {
+                continue;
+            }
+            let face = fonts.face_for(ch);
+            assert!(
+                fonts.faces[face].has(ch),
+                "{ch:?} is Inter's and fell to a box"
+            );
+            fell_through += usize::from(face > 0);
+        }
+        assert!(
+            fell_through > 0,
+            "Montserrat now covers everything Inter does; the fallback is untested"
+        );
+        assert!(
+            fonts.faces[fonts.face_for('न')].has('न'),
+            "Devanagari fell to a box"
+        );
+
+        for theme in [
+            SubtitleTheme::Recap,
+            SubtitleTheme::Bold,
+            SubtitleTheme::Glow,
+            SubtitleTheme::Pill,
+        ] {
+            assert_eq!(theme.style().weight, Weight::Heavy, "{theme}");
+            let image = render_cue("λόγος и नमस्ते", theme, Placement::Bottom, out());
+            assert!(
+                image.canvas.bytes().chunks_exact(4).any(|p| p[3] > 0),
+                "{theme} drew nothing"
+            );
+        }
+    }
+
+    /// D-208. A one-line theme keeps every word of a cue too long for a line.
+    ///
+    /// `cues` lengthens a cue rather than let it flicker (D-116), so a theme
+    /// that asks for one line can be handed three lines' worth. The band must
+    /// then grow, not clip: the same text drawn at a wider frame fits in fewer
+    /// lines, so a narrow frame's band is the taller one.
+    #[test]
+    fn a_one_line_theme_takes_a_second_line_rather_than_losing_words() {
+        let long =
+            "Only three players worldwide were chosen to test the experimental neural system";
+        let one = render_cue(
+            "Only three players",
+            SubtitleTheme::Recap,
+            Placement::Bottom,
+            out(),
+        );
+        let many = render_cue(long, SubtitleTheme::Recap, Placement::Bottom, out());
+        assert!(
+            many.canvas.height() > one.canvas.height(),
+            "a cue longer than one line drew in a band no taller than one line \
+             ({} against {}) — words were lost",
+            many.canvas.height(),
+            one.canvas.height()
+        );
+    }
+
+    /// D-208. A word wider than the frame is shrunk to fit, not cut off.
+    ///
+    /// Wrapping breaks between words, so one unbroken word is one line however
+    /// long it is, and the line-count shrink never saw it. Asserted as ink on
+    /// the band's two outer columns, which is where a clipped word shows.
+    #[test]
+    fn a_word_wider_than_the_frame_is_shrunk_to_fit() {
+        let word = "Supercalifragilisticexpialidociousandthensomemorewithoutanyspaces";
+        for theme in SubtitleTheme::ALL {
+            let image = render_cue(word, theme, Placement::Bottom, out());
+            let (w, h) = (
+                image.canvas.width() as usize,
+                image.canvas.height() as usize,
+            );
+            let bytes = image.canvas.bytes();
+            if theme.style().backdrop == Backdrop::Band {
+                continue; // a band is meant to touch both edges
+            }
+            for x in [0, w - 1] {
+                let inked = (0..h).any(|y| bytes[(y * w + x) * 4 + 3] > 0);
+                assert!(!inked, "{theme}: the word runs off the frame at x={x}");
+            }
+        }
+    }
+
     /// D-157. Adding a script did not move a caption that already exists.
     ///
     /// These three numbers were taken from the build **before** the face stack
@@ -1868,22 +2006,28 @@ mod tests {
         // OFL names separately from the licence body. A second family was
         // added by D-157, and the point of the loop is that a third cannot be
         // added without its licence following it.
-        for (licence, copyright, weights) in [
+        let families: [(&str, &str, &[&str]); 3] = [
             (
                 "LICENSE-Inter.txt",
                 "Copyright 2020 The Inter Project Authors",
-                ["Inter-Regular.ttf", "Inter-SemiBold.ttf", "Inter-Bold.ttf"],
+                &["Inter-Regular.ttf", "Inter-SemiBold.ttf", "Inter-Bold.ttf"],
             ),
             (
                 "LICENSE-NotoSansDevanagari.txt",
                 "Copyright 2022 The Noto Project Authors",
-                [
+                &[
                     "NotoSansDevanagari-Regular.ttf",
                     "NotoSansDevanagari-SemiBold.ttf",
                     "NotoSansDevanagari-Bold.ttf",
                 ],
             ),
-        ] {
+            (
+                "LICENSE-Montserrat.txt",
+                "Copyright 2024 The Montserrat.Git Project Authors",
+                &["Montserrat-ExtraBold.ttf"],
+            ),
+        ];
+        for (licence, copyright, weights) in families {
             let text = std::fs::read_to_string(fonts.join(licence))
                 .unwrap_or_else(|e| panic!("the fonts ship with {licence}: {e}"));
             assert!(
