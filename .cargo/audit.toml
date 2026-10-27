@@ -17,6 +17,11 @@
 # Re-run 2026-10-13: one new warning, RUSTSEC-2024-0449 (`unsafe-libyaml`),
 # recorded below rather than fixed, and the entry says why. Nineteen now.
 #
+# Re-run 2026-10-27 (v0.1.27's CI): four new. RUSTSEC-2026-0386, `tokio`
+# unsound (`AsyncFd` constructors), reaches every shipped target and has a fix:
+# `cargo update -p tokio` to 1.54.1, **not** ignored. The other three are the
+# D-Bus stack below, Linux only. Twenty-two now.
+#
 # The two targets this project ships are macOS and Windows (D-071, and the five
 # `target:` entries in .github/workflows/release.yml). There is no Linux build.
 # That is not a reason to ignore a Linux-only advisory forever — it is the
@@ -50,6 +55,16 @@ ignore = [
     # every target we publish. If a Linux build is ever added, this is the entry
     # to deal with first, because unsound is a different word from unmaintained.
     "RUSTSEC-2024-0429", # glib            unsound
+
+    # --- The D-Bus stack -------------------------------------------------------
+    #
+    # Linux only, through `tauri-plugin-opener` -> `zbus` (how it asks the
+    # desktop to open a file there). `cargo tree --target <triple> -e normal -i
+    # zvariant` finds it on x86_64-unknown-linux-gnu and on neither macOS triple
+    # nor x86_64-pc-windows-msvc, checked 2026-10-27. The fix is upstream.
+    "RUSTSEC-2026-0370", # zvariant        unmaintained
+    "RUSTSEC-2026-0371", # zbus_names      unmaintained
+    "RUSTSEC-2026-0372", # zvariant_derive unmaintained
 
     # --- Build-time only ------------------------------------------------------
     #
