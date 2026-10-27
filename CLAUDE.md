@@ -370,6 +370,38 @@ be now, never where it is. **If the suite exits immediately on Windows saying
 "refusing to run", that is this guard and it is ours.**
 
 
+### State as of 2026-10-27 — two machines' logs read, three defects fixed, one found by stress (D-209..D-212), `v0.1.27`
+
+**Read D-209 and D-212 before touching `still_worth_waiting`, `ANSWERING`,
+`LINE_CEILING`, `worth_a_round`, `lost_network`, `endure`'s `waits_for`,
+`Gate::answered_within`/`has_spoken`, or `LOST_NETWORK_WARNING`; D-210 before
+touching `project_root`; D-211 before touching the close handler.**
+
+The author sent `runs.csv` and `runs-previous.csv` from the Mac mini (37 916
+rows, 2026-09-21 to 10-27) and the Windows machine (56 615 rows, 10-07 to
+10-27). Everything up to 10-15 was already accounted for by D-195..D-207. What
+was new:
+
+| | found | fixed |
+|---|---|---|
+| D-209 | Windows 10-12: one line's own one-hour clock failed a 687-scene render **while seven other lines had spoken in the previous 22 s**; 181 scenes never started | a line's clock yields while the service is answering others, up to 3 hours |
+| D-210 | Mac 10-22: project renamed in Finder while open; drops refused with "…/ch 1-50 is not a folder" | `project_root` names it as moved and says to reopen from Home |
+| D-211 | Windows 10-10 and 10-13: renders end mid-run with **no row at all** | closing the window mid-render writes a row first |
+| D-212 | **this session's stress run**: 184 lines spoken, one minute of DNS failure, render dead with 237 scenes unstarted — and the same on Windows 10-16 05:36 | once lines have spoken, a lost network is waited out like a throttle; cold, it still fails in seconds |
+
+**Microsoft's limit, measured across every episode in both logs: 386–410 lines,
+then ~35 minutes to ~1¾ hours of connection timeouts** (Windows 10-10, -12,
+-22, -27). No pace avoids it (D-199). The only lever left is fewer requests —
+several scenes per request, cut at sentence boundaries — which is D-193's open
+voice question and the author's call. Not built.
+
+**Not defects, checked:** `[Host: Kairo]`-style bracketed lines that came back
+silent on 10-13 speak fine today (a passing fault, D-195's retry class);
+`super_chapter_1.md` "pairs with no image" is D-152 working; every `cancelled`
+row is an operator Stop; the 10-16 `ch 6-10` re-encode was a second copy of the
+folder under another parent; the remaining errors are gate runs and the
+2026-10-13 kill-stress session.
+
 ### State as of 2026-10-16, later — four subtitle looks, one of them copied from a real channel (D-208), `v0.1.26`
 
 **Read D-208 before touching `Weight::Heavy`, the `HEAVY` face stack, a theme

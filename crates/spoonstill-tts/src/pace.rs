@@ -115,6 +115,10 @@ pub struct Schedule {
     episodes: u64,
     /// Whether this process has spoken a line at all.
     spoken_any: bool,
+    /// When the last line was spoken, so a line that has waited its own
+    /// patience can tell a service that is answering again from one that is
+    /// not (D-209).
+    last_spoke: Option<Instant>,
     /// What the service said the last time it turned this machine away, so
     /// the log can say it while a render waits rather than only when a line
     /// finally gives up (D-016).
@@ -168,10 +172,18 @@ impl Schedule {
     }
 
     /// A line was spoken: the service is answering again.
-    pub fn spoke(&mut self) {
+    pub fn spoke(&mut self, now: Instant) {
         self.refusals = 0;
         self.streak_since = None;
         self.spoken_any = true;
+        self.last_spoke = Some(now);
+    }
+
+    /// Whether some line was spoken within `window` of `now` — the service is
+    /// answering this machine, whatever one unlucky line has been told (D-209).
+    pub fn answered_within(&self, window: Duration, now: Instant) -> bool {
+        self.last_spoke
+            .is_some_and(|at| now.saturating_duration_since(at) < window)
     }
 
     /// Whether a line turned away now should keep waiting rather than give up:
@@ -313,7 +325,23 @@ impl Gate {
         self.schedule
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .spoke();
+            .spoke(Instant::now());
+    }
+
+    /// Whether this process has spoken a line at all (D-212).
+    pub fn has_spoken(&self) -> bool {
+        self.schedule
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .spoken_any
+    }
+
+    /// Whether this process spoke a line within `window` (D-209).
+    pub fn answered_within(&self, window: Duration) -> bool {
+        self.schedule
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .answered_within(window, Instant::now())
     }
 }
 
@@ -394,7 +422,7 @@ mod tests {
         assert_eq!(s.refused(PACE, t0), Duration::from_secs(60));
         assert_eq!(s.refused(PACE, t0), Duration::from_secs(120));
         assert_eq!(s.refused(PACE, t0), Duration::from_secs(120), "capped");
-        s.spoke();
+        s.spoke(t0);
         assert_eq!(s.refused(PACE, t0), Duration::from_secs(15), "reset");
     }
 
@@ -413,7 +441,7 @@ mod tests {
         assert!(!s.keep_waiting(PACE, t0 + Duration::from_secs(181)));
 
         // Once a line has been spoken in this process, the long one does.
-        s.spoke();
+        s.spoke(t0);
         assert!(s.throttle(t0).is_none(), "speaking ends the streak");
         let t1 = t0 + Duration::from_secs(600);
         s.refused(PACE, t1);
@@ -426,13 +454,29 @@ mod tests {
     }
 
     #[test]
+    fn the_gate_remembers_when_the_service_last_answered() {
+        let t0 = Instant::now();
+        let mut s = Schedule::default();
+        let window = Duration::from_secs(300);
+        assert!(!s.answered_within(window, t0), "nothing spoken yet");
+        s.spoke(t0);
+        assert!(s.answered_within(window, t0 + Duration::from_secs(299)));
+        assert!(!s.answered_within(window, t0 + Duration::from_secs(300)));
+        s.refused(PACE, t0 + Duration::from_secs(10));
+        assert!(
+            s.answered_within(window, t0 + Duration::from_secs(20)),
+            "a refusal does not erase that the service answered"
+        );
+    }
+
+    #[test]
     fn each_streak_is_a_new_episode_and_repeated_refusals_are_not() {
         let t0 = Instant::now();
         let mut s = Schedule::default();
         s.refused(PACE, t0);
         s.refused(PACE, t0);
         assert_eq!(s.throttle(t0).map(|t| t.episode), Some(1));
-        s.spoke();
+        s.spoke(t0);
         s.refused(PACE, t0 + Duration::from_secs(5));
         let throttle = s.throttle(t0 + Duration::from_secs(65)).expect("a streak");
         assert_eq!(throttle.episode, 2);

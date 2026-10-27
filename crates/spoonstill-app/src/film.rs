@@ -1262,10 +1262,22 @@ fn watch_voice_service(
             && worth_announcing(told, throttle.episode, now)
         {
             told = Some((throttle.episode, now));
-            let detail = throttle_warning(throttle.spoken_any);
+            let offline = spoonstill_tts::edge::lost_network(&throttle.said);
+            let detail = if offline {
+                LOST_NETWORK_WARNING
+            } else {
+                throttle_warning(throttle.spoken_any)
+            };
             log.record(
-                &Event::warn("render", "voice service turned this machine away")
-                    .with("said", throttle.said.clone()),
+                &Event::warn(
+                    "render",
+                    if offline {
+                        "this machine lost its connection to the voice service"
+                    } else {
+                        "voice service turned this machine away"
+                    },
+                )
+                .with("said", throttle.said.clone()),
             );
             on_event(FilmEvent::Warned {
                 detail: detail.to_owned(),
@@ -1294,6 +1306,14 @@ fn worth_announcing(
         }
     }
 }
+
+/// What [`watch_voice_service`] says when the network went, not the service
+/// (D-212). Only reachable once a line has been spoken: before that a lost
+/// network fails the render in seconds, as it always has.
+const LOST_NETWORK_WARNING: &str = "This machine lost its connection to Microsoft's voice \
+     service partway through. This render is waiting for it to come back (up to an \
+     hour) and keeps rendering every scene whose line is already spoken; nothing is \
+     lost if you stop and render again later";
 
 /// The sentence [`watch_voice_service`] says.
 const fn throttle_warning(spoken_any: bool) -> &'static str {
@@ -2147,8 +2167,14 @@ mod tests {
         // which is the reason D-199 gave it a shorter patience at all.
         assert!(cold.contains("firewall"), "{cold}");
 
-        // Both halves keep the one promise that makes stopping safe.
-        for said in [warm, cold] {
+        // D-212: a network that went partway through is named as the network,
+        // not blamed on Microsoft, and is waited for as long as a throttle.
+        assert!(LOST_NETWORK_WARNING.contains("lost its connection"));
+        assert!(LOST_NETWORK_WARNING.contains("up to an hour"));
+        assert!(!LOST_NETWORK_WARNING.contains("few hundred lines"));
+
+        // Every sentence keeps the one promise that makes stopping safe.
+        for said in [warm, cold, LOST_NETWORK_WARNING] {
             assert!(said.contains("already spoken"), "{said}");
         }
     }

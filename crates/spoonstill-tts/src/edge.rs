@@ -836,21 +836,22 @@ fn persevere<T>(
 ///
 /// The pause that makes the next round worth starting is not in here: each
 /// attempt enters the gate, which holds it for the cool-down a refusal began.
-/// Only a refusal starts another round. A permanent failure, an ordinary
-/// transient one, and a cancellation all end it exactly as `persevere` does.
+/// Only a failure `waits_for` accepts starts another round — a refusal, and
+/// since D-212 a lost network once this process has spoken. A permanent
+/// failure, an ordinary transient one, and a cancellation all end it exactly
+/// as `persevere` does.
 fn endure<T>(
     policy: Retry,
     mut attempt: impl FnMut(u32) -> Result<T, Failure>,
     mut rest: impl FnMut(Duration),
+    waits_for: impl Fn(&str) -> bool,
     mut keep_waiting: impl FnMut() -> bool,
 ) -> (Result<T, (u32, Failure)>, bool) {
     let mut before = 0u32;
     let mut waited = false;
     loop {
         match persevere(policy, &mut attempt, &mut rest) {
-            Err((attempts, Failure::Transient(reason)))
-                if is_refusal(&reason) && keep_waiting() =>
-            {
+            Err((attempts, Failure::Transient(reason))) if waits_for(&reason) && keep_waiting() => {
                 before = before.saturating_add(attempts);
                 waited = true;
             }
@@ -1005,6 +1006,40 @@ fn before_url(reason: &str) -> &str {
         Some(at) => &reason[..at],
         None => reason,
     }
+}
+
+/// Whether a failed line starts another round of waiting rather than giving up
+/// after its three attempts (D-199, D-212): the service turned this machine
+/// away — or this machine lost its network, **after** this process had spoken
+/// lines, which proves the network worked a moment ago.
+///
+/// Before any line is spoken a lost network still fails in seconds, because an
+/// offline machine should be told so (D-195). After, it is a blip until shown
+/// otherwise: on 2026-10-16 a Windows render had spoken 262 lines when one
+/// `getaddrinfo failed` ended it, and the 2026-10-27 stress render on the Mac
+/// lost DNS for about a minute after 184 lines and failed with 237 scenes not
+/// started. Every line it was waiting on spoke on the next run.
+fn worth_a_round(reason: &str, spoken_any: bool) -> bool {
+    is_refusal(reason) || (spoken_any && lost_network(reason))
+}
+
+/// This machine could not resolve or route to the service at all — DNS, or no
+/// route (D-212). Not a proxy error: a proxy that refuses is the operator's
+/// configuration, which waiting does not change.
+#[must_use]
+pub fn lost_network(reason: &str) -> bool {
+    !reason.contains("ClientProxyConnectionError")
+        && [
+            "ClientConnectorDNSError",
+            "socket.gaierror",
+            "nodename nor servname provided",
+            "Temporary failure in name resolution",
+            "getaddrinfo failed",
+            "Network is unreachable",
+            "No route to host",
+        ]
+        .iter()
+        .any(|marker| reason.contains(marker))
 }
 
 /// The connection was not opened in time: DNS answered, and nothing did after.
@@ -1502,7 +1537,7 @@ impl Edge {
                 drop(slot);
                 match &outcome {
                     Ok(_) => gate.spoke(self.pace),
-                    Err(Failure::Transient(reason)) if is_refusal(reason) => {
+                    Err(Failure::Transient(reason)) if worth_a_round(reason, gate.has_spoken()) => {
                         gate.refused(self.pace, reason);
                     }
                     Err(_) => {}
@@ -1510,15 +1545,24 @@ impl Edge {
                 outcome
             },
             |pause| cancel.sleep(pause),
+            |reason| worth_a_round(reason, gate.has_spoken()),
             // Two clocks. The streak's says the service is still turning this
             // machine away; the line's own bounds the whole wait, because a
             // service that lets one line through every few minutes resets the
             // streak each time — measured on the author's 431 scenes on
             // 2026-10-07 — and without it a render could wait for hours.
+            //
+            // **And the line's clock yields to a service that is answering
+            // (D-209).** On 2026-10-12 a Windows render waited out a throttle
+            // for 61 minutes and gave up on scene 489 at 06:26:50 — while seven
+            // other lines had been spoken in the 22 seconds before it. One
+            // unlucky line failed the render and 181 scenes never started,
+            // just as the service came back.
             || {
                 still_worth_waiting(
                     cancel.is_requested(),
                     gate.keep_waiting(self.pace),
+                    gate.answered_within(ANSWERING),
                     started.elapsed(),
                     self.pace,
                 )
@@ -1550,16 +1594,35 @@ impl Edge {
     }
 }
 
+/// How recently some line must have been spoken for the service to count as
+/// answering this machine (D-209). The gate's longest cool-down is two
+/// minutes, so a service that is letting lines through speaks one well inside
+/// this; one that is still refusing does not.
+const ANSWERING: Duration = Duration::from_secs(5 * 60);
+
+/// How many patiences a single line may wait in all, however often the
+/// service answers others (D-209). A refusal is about the connection, not the
+/// words, so a line refused while others are spoken is unlucky rather than
+/// doomed — but nothing here waits for ever.
+const LINE_CEILING: u32 = 3;
+
 /// Whether a line the service turned away starts another round (D-199): not
 /// cancelled, the streak is young enough by the gate's clock, and this line has
-/// not waited a whole patience by its own.
+/// not waited a whole patience by its own — or it has, but the service is
+/// answering other lines right now and the line is inside its ceiling (D-209).
 fn still_worth_waiting(
     cancelled: bool,
     streak_is_young: bool,
+    service_answering: bool,
     this_line_waited: Duration,
     pace: Pace,
 ) -> bool {
-    !cancelled && streak_is_young && this_line_waited < pace.patience
+    let own_clock = if service_answering {
+        pace.patience.saturating_mul(LINE_CEILING)
+    } else {
+        pace.patience
+    };
+    !cancelled && streak_is_young && this_line_waited < own_clock
 }
 
 /// How long a line waited out a throttle before it gave up, as the tail of
@@ -2322,6 +2385,7 @@ mod tests {
                 }
             },
             |_| {},
+            is_refusal,
             || true,
         );
         assert!(matches!(outcome, Ok("spoken")));
@@ -2364,6 +2428,7 @@ mod tests {
                 }
             },
             |_| {},
+            is_refusal,
             || true,
         );
         assert!(matches!(outcome, Ok("spoken")));
@@ -2381,6 +2446,7 @@ mod tests {
             },
             |_| Err(Failure::Transient(THROTTLED.to_owned())),
             |_| {},
+            is_refusal,
             || {
                 rounds_allowed -= 1;
                 rounds_allowed >= 0
@@ -2407,16 +2473,89 @@ mod tests {
     fn a_line_stops_waiting_after_its_own_patience_even_if_the_streak_is_young() {
         let pace = Pace::service();
         let minute = Duration::from_secs(60);
-        assert!(still_worth_waiting(false, true, 59 * minute, pace));
+        assert!(still_worth_waiting(false, true, false, 59 * minute, pace));
         assert!(
-            !still_worth_waiting(false, true, 60 * minute, pace),
+            !still_worth_waiting(false, true, false, 60 * minute, pace),
             "the line's own clock"
         );
         assert!(
-            !still_worth_waiting(false, false, minute, pace),
+            !still_worth_waiting(false, false, false, minute, pace),
             "the streak's clock"
         );
-        assert!(!still_worth_waiting(true, true, minute, pace), "Stop");
+        assert!(
+            !still_worth_waiting(true, true, false, minute, pace),
+            "Stop"
+        );
+    }
+
+    /// D-209, the render in the Windows log of 2026-10-12: scene 489 had
+    /// waited 61 minutes, and seven other lines had just been spoken. It must
+    /// try again rather than fail the render — and still give up eventually,
+    /// and still obey Stop and the streak's own clock.
+    #[test]
+    fn a_line_that_waited_its_patience_keeps_going_while_the_service_answers_others() {
+        let pace = Pace::service();
+        let minute = Duration::from_secs(60);
+        assert!(
+            still_worth_waiting(false, true, true, 61 * minute, pace),
+            "the service is answering: this line was unlucky, not doomed"
+        );
+        assert!(
+            !still_worth_waiting(false, true, true, 180 * minute, pace),
+            "the ceiling"
+        );
+        assert!(
+            !still_worth_waiting(true, true, true, 61 * minute, pace),
+            "Stop"
+        );
+        assert!(
+            !still_worth_waiting(false, false, true, 61 * minute, pace),
+            "the streak's clock still applies"
+        );
+    }
+
+    /// D-212: a lost network is waited out once this process has spoken —
+    /// the network worked a moment ago — and still fails in seconds before,
+    /// because a machine that is simply offline should be told so (D-195).
+    #[test]
+    fn a_lost_network_is_waited_out_only_once_lines_have_been_spoken() {
+        let mac = "aiohttp.client_exceptions.ClientConnectorDNSError: Cannot connect to host \
+                   speech.platform.bing.com:443 ssl:<ssl.SSLContext object at 0x10965ca10> \
+                   [nodename nor servname provided, or not known]";
+        let windows = "aiohttp.client_exceptions.ClientConnectorDNSError: Cannot connect to \
+                       host speech.platform.bing.com:443 ssl:<ssl.SSLContext object at \
+                       0x000002DD17FACA50> [getaddrinfo failed]";
+        for reason in [mac, windows] {
+            assert!(lost_network(reason), "{reason}");
+            assert!(!worth_a_round(reason, false), "cold: say so in seconds");
+            assert!(worth_a_round(reason, true), "warm: a blip, wait for it");
+
+            let mut calls = 0;
+            let (outcome, waited) = endure(
+                Retry {
+                    attempts: 3,
+                    backoff: Duration::ZERO,
+                },
+                |_| {
+                    calls += 1;
+                    if calls <= 4 {
+                        Err(Failure::Transient(reason.to_owned()))
+                    } else {
+                        Ok("spoken")
+                    }
+                },
+                |_| {},
+                |r| worth_a_round(r, true),
+                || true,
+            );
+            assert!(matches!(outcome, Ok("spoken")), "{reason}");
+            assert!(waited);
+            assert_eq!(calls, 5);
+        }
+        let proxy = "aiohttp.client_exceptions.ClientProxyConnectionError: Cannot connect \
+                     to host proxy:8080 [getaddrinfo failed]";
+        assert!(!lost_network(proxy), "a proxy is configuration, not a blip");
+        assert!(!worth_a_round("ServerDisconnected", true));
     }
 
     #[test]
@@ -2436,6 +2575,7 @@ mod tests {
                     Err(Failure::Transient(reason.to_owned()))
                 },
                 |_| {},
+                is_refusal,
                 || true,
             );
             assert!(
@@ -2455,6 +2595,7 @@ mod tests {
                 }))
             },
             |_| {},
+            is_refusal,
             || true,
         );
         assert!(matches!(outcome, Err((1, Failure::Permanent(_)))));

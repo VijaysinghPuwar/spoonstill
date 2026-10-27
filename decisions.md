@@ -10432,3 +10432,104 @@ reached it sooner. After balancing, the widest line is measured and the type
 scaled until it fits. A line that already fit is untouched, so no caption that
 rendered whole changes; D-157's pinned hashes still pass.
 `a_word_wider_than_the_frame_is_shrunk_to_fit` fails without the fix.
+
+### D-209 — A line's own patience yields to a service that is answering other lines · Accepted
+
+**Found in the Windows machine's `runs.csv`, 2026-10-12.** A 687-scene render
+was throttled at 05:23 after ~410 lines in an hour (D-199's count, again). It
+waited correctly, trickling a line every few minutes, and at **06:26:50** gave
+up on scene 489 after *"12 times over 61 minutes of waiting"* — which failed
+the render with **181 scenes not started**. In the 22 seconds before that,
+**seven other lines had been spoken** (06:26:28 … 06:26:50): the service had
+come back, and one unlucky line's clock ran out at the moment it did. The
+operator pressed Render again at 07:06 and it finished.
+
+D-199 gave every line its own clock because a trickling service resets the
+streak each time it lets a line through, and without a second clock a render
+could wait for hours. That reason stands. What it did not distinguish is a
+service that is **still refusing** from one that is **answering other lines**.
+A refusal is about the connection, never about the words, so a line turned
+away while others are being spoken is unlucky rather than doomed.
+
+`Schedule` now remembers when a line was last spoken; `still_worth_waiting`
+lets a line past its own patience while some line was spoken in the last five
+minutes (`ANSWERING` — the gate's longest cool-down is two), up to
+`LINE_CEILING` = three patiences, so nothing waits for ever. Stop and the
+streak's own clock are unchanged. With the service still refusing, a line gives
+up after an hour exactly as before.
+
+`a_line_that_waited_its_patience_keeps_going_while_the_service_answers_others`
+fails against the old rule with the reason in its message.
+
+**What the same logs say and this does not change.** Every throttle in them
+follows the same count: **386–410 lines**, then the service times out
+connections for **~35 minutes to ~1¾ hours** (2026-10-10, -12, -22, -27 on
+Windows; D-199's three before). It is Microsoft's limit, per machine, and no
+pace avoids it (D-199). The only lever left is **fewer requests** — speaking
+several scenes' lines in one request and cutting the audio at sentence
+boundaries — which is D-193's open voice question and the author's call. Until
+then a 680-scene project spends one throttle waiting, and the film is still
+made.
+
+### D-210 — A project folder renamed while the window has it open is named as moved · Accepted
+
+**Found in the Mac mini's `runs.csv`, 2026-10-22.** `ch 1-50` was opened, a
+chapter imported into it, and the folder later renamed to `ch 1-5` in Finder.
+The next two photo drops were refused with *"…/ch 1-50 is not a folder"* — true,
+and no help: it reads as a fault in what was dropped, and nothing on screen said
+the window was looking at a name that no longer exists. The operator found the
+way out by reopening it.
+
+`project_root` — the one gate every write command in the window passes through
+(D-127) — now checks the open folder still exists and, if not, says it was
+*moved, renamed or deleted after this window opened it*, that nothing was
+changed, and to open it from Home where it is now. Nothing re-creates the old
+folder. The CLI is unaffected: it names its folder on every command, so there is
+no remembered path to go stale.
+
+### D-211 — Closing the window during a render is written down · Accepted
+
+**Found in the Windows machine's `runs.csv`.** Two renders — `ball` on
+2026-10-10 at 09:39 and on 2026-10-13 at 06:24 — end mid-run with no row
+saying why: no `film complete`, no failure, no cancellation. D-115's close
+handler requests cancellation, but the process exits before the render can
+record it, so a closed window and a crash look identical in the log. The one
+file meant to answer "what went wrong" (D-093) could not.
+
+The close handler now writes one `warn` row — *"window closed during a
+render"* — to the machine log and the project's own, before the process goes.
+It is written only when a render is actually running. GUI automation is still
+absent (D-131), so the handler firing is not clicked in a test; the row is a
+single `record` call beside the `cancel.request()` that D-115's test already
+covers.
+
+### D-212 — A lost network partway through a render is waited out, not fatal · Accepted
+
+**Found by this session's own stress run, then found again in the Windows
+log.** The author's 431-scene fixture rendered cold on the Mac on 2026-10-27:
+184 lines spoke in 3 m 41 s, then DNS for `speech.platform.bing.com` failed
+for about a minute (`ClientConnectorDNSError … nodename nor servname
+provided`), eight lines used their three attempts in seconds, and the render
+failed with **237 scenes not started**. DNS answered normally when checked a
+minute later. The Windows log has the same ending on 2026-10-16 at 05:36: render
+`hp new`, lines already spoken, one `getaddrinfo failed`, render over.
+
+D-195 decided a DNS failure is *not* a throttle so that **an offline machine is
+told in seconds**, and that stays right for a machine that has spoken nothing.
+It is the wrong reading once this process has spoken lines: the network worked
+a moment ago, so the likeliest cause is a blip — a Wi-Fi hand-off, a router, a
+VPN reconnecting — and failing a long render over it costs the operator a
+re-run.
+
+`worth_a_round(reason, spoken_any)` is the rule now: a refusal as before, **or**
+`lost_network` (DNS failure, no route; never a proxy, which is configuration)
+once the gate has seen a line spoken. It goes through the same gate and the
+same patience as a throttle — every worker backs off together, the segment pool
+keeps encoding, Stop is obeyed, and an hour without the network still ends it.
+The render's warning names the network rather than Microsoft (*"This machine
+lost its connection to Microsoft's voice service partway through"*), and the
+log row says the same. Cold, nothing changed: an offline machine is still told
+in seconds.
+
+`a_lost_network_is_waited_out_only_once_lines_have_been_spoken` covers both
+platforms' wording and the proxy exclusion, and fails against the old rule.

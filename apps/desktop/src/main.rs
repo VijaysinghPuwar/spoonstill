@@ -839,11 +839,28 @@ fn project_root(session: &Session, claimed: &str) -> Result<PathBuf, String> {
         .is_some_and(|(a, b)| a == b)
         || open.as_path() == std::path::Path::new(claimed);
 
-    if same {
-        Ok(open)
-    } else {
-        Err("that is not the project this window has open".to_owned())
+    if !same {
+        return Err("that is not the project this window has open".to_owned());
     }
+    // D-210: on 2026-10-22 a project was renamed in Finder while the window had
+    // it open, and the next drop said "…/ch 1-50 is not a folder" twice — true,
+    // and no help, because it reads as a fault in what was dropped. Say what
+    // happened and the one way out.
+    if !open.is_dir() {
+        return Err(moved_away(&open));
+    }
+    Ok(open)
+}
+
+/// The sentence for a project folder that is no longer where the window
+/// opened it (D-210).
+fn moved_away(open: &std::path::Path) -> String {
+    format!(
+        "{} is no longer there — it was moved, renamed or deleted after this \
+         window opened it. Nothing was changed. Go back to Home and open the \
+         project from where it is now.",
+        open.display()
+    )
 }
 
 /// What the window is looking at, remembered on the Rust side.
@@ -2496,6 +2513,19 @@ fn main() {
                     && let Some(cancel) = slot.as_ref()
                 {
                     cancel.request();
+                    // D-211: the process usually exits before the render can
+                    // record that it was stopped, so the log ended mid-render
+                    // with nothing to say why — twice in the Windows log.
+                    let root = window
+                        .try_state::<Session>()
+                        .and_then(|session| session.root.lock().ok()?.clone());
+                    spoonstill_app::Journal::for_surface(root.as_deref()).record(
+                        &Event::warn("render_project", "window closed during a render").with(
+                            "detail",
+                            "the render was stopped; finished segments are kept, \
+                                 so the next run resumes from them",
+                        ),
+                    );
                 }
             }
         })
@@ -2737,6 +2767,35 @@ mod tests {
             project_root(&session, &spelled.display().to_string()).expect("same folder"),
             open
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D-210, from the Mac's log of 2026-10-22: the open project's folder was
+    /// renamed in Finder, and the next drop was refused with "… is not a
+    /// folder". Every command that writes says what happened instead — and
+    /// does nothing, including not re-creating the old folder.
+    #[test]
+    fn a_project_renamed_while_open_is_named_as_moved_not_as_not_a_folder() {
+        let dir = std::env::temp_dir().join(format!("spoonstill-moved-{}", std::process::id()));
+        let open = dir.join("ch 1-50");
+        let renamed = dir.join("ch 1-5");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&open).expect("scratch");
+
+        let session = Session::default();
+        *session.root.lock().unwrap() = Some(open.clone());
+        std::fs::rename(&open, &renamed).expect("rename, as Finder would");
+
+        let error =
+            project_root(&session, &open.display().to_string()).expect_err("the folder is gone");
+        assert!(error.contains("is no longer there"), "{error}");
+        assert!(
+            error.contains("open the project from where it is now"),
+            "{error}"
+        );
+        assert!(!error.ends_with("is not a folder"), "{error}");
+        assert!(!open.exists(), "nothing re-created the old folder");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
