@@ -1072,7 +1072,6 @@ Read in this order; later files never override earlier ones.
 | [`plan.md`](plan.md) | Milestones M0–M5, each with entry conditions, deliverables, and exit gates that are runnable commands. |
 | [`ffmpeg-findings.md`](ffmpeg-findings.md) | Benchmarks measured on real hardware, with reproduction commands. Evidence, not policy. |
 | [`PROCESS.md`](PROCESS.md) | How the work is actually done — reproduce, fix, prove the test fails without the fix. |
-| [`CLAUDE.md`](CLAUDE.md) | Orientation for anyone — or anything — picking the work up cold. |
 | [`findings.md`](findings.md) | The open defect list, and what has been read out of production logs. |
 
 If you are about to propose a design, read `decisions.md` first.

@@ -40,3 +40,7 @@ Icon?
 
 # Personal learning notes (never committed). Destined for an Obsidian vault.
 /learning/
+
+# Agent notes (kept local)
+CLAUDE.md
+AGENTS.md
