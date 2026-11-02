@@ -10533,3 +10533,51 @@ in seconds.
 
 `a_lost_network_is_waited_out_only_once_lines_have_been_spoken` covers both
 platforms' wording and the proxy exclusion, and fails against the old rule.
+
+### D-213 — A throttle is shown as waiting, the voice list survives one, and a removal can be undone · Accepted
+
+**Found in the author's `runs.csv` for 2026-11-01**, which holds 29 of the
+file's 32 errors since 2026-10-15. F01 spoke 299 lines in six minutes and F02
+another 107 straight after, and at about 400 lines Microsoft stopped accepting
+connections from this machine (`Connect call failed`) — D-199's count, again.
+Nothing in the render was wrong: each run waited, as D-199 says it should, and
+F01 finished by itself once the service came back. What failed was everything
+the operator could see.
+
+- **F02 was started twelve times in under three hours and the window was
+  closed on it every time**, after 9 s to 8 min. The throttle was one warning
+  line in a list, and the counter beside it sat at `107 of 300`. A counter that
+  stops with nothing beside it is a frozen window to the person looking at it.
+  `FilmEvent::VoiceWaiting { seconds }` is the *state*: sent when a streak
+  begins, every 15 s while it lasts and once with `None` when it ends, and the
+  window draws it on the progress line itself — *"107 of 300 — waiting for
+  Microsoft's voice service (4 min so far). It carries on by itself; stopping
+  loses nothing."* The sentence-once-per-streak warning (D-199) is unchanged;
+  the terminal, which has already printed it, ignores the state.
+- **The Voice screen failed fourteen times in four hours**, because
+  `--list-voices` crosses the same network as speech, so choosing a voice —
+  which needs no network — was unavailable for exactly as long as the render
+  was. `spoonstill_app::catalogue` writes each catalogue that arrives to
+  `voices-<provider>.tsv` beside `settings.yaml` and answers from it when the
+  provider cannot, **saying so** on both surfaces. It never invents a voice: a
+  machine that has never fetched a list still gets the error. Settings'
+  fallback-voice list had the sibling defect — every failure, a throttle
+  included, read *"Install the voice service first"* over an installed one —
+  and now says what actually happened.
+- **Scene 601 was removed twice in two seconds** (a double-click arms and then
+  confirms D-100's two-step Remove), the second removal taking what had been
+  602, and **Undo was pressed six times** to be told *"There is nothing to
+  undo."* — Undo covered pictures only (D-194). `arrange::restore` puts a
+  removed scene back: its files return as a new last scene and `move_to` takes
+  it to its old position through the journalled renumber, so an interruption
+  leaves it whole at the end, never split. Not through `renumber` directly: a
+  bin file called `601.jpg` already *has* the name position 601 wants, so
+  `already_named` would leave it in `removed/`. A removal is
+  `picture::Change::SceneRemoved` on the same undo stack, refused if a removed
+  file's content has changed. And the page's `arrange()` holds `pictureBusy`
+  now, so a second click cannot start a second renumber of the same folder
+  while the first is running.
+
+Not changed, deliberately: how many lines a machine may speak, and how long a
+render waits. Both are D-195/D-199's and were right here; the voice service
+answered normally the next morning (checked 2026-11-02).

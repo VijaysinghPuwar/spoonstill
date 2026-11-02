@@ -703,6 +703,15 @@ struct VoiceView {
     note: String,
 }
 
+/// A provider's catalogue as the Voice screen draws it (D-213).
+#[derive(Debug, Clone, Serialize)]
+struct CatalogueView {
+    voices: Vec<VoiceView>,
+    /// Why this is the list saved last time rather than a fresh one; absent
+    /// when the provider answered just now.
+    remembered: Option<String>,
+}
+
 /// The finished film.
 #[derive(Debug, Clone, Serialize)]
 struct FilmView {
@@ -740,6 +749,11 @@ enum ProgressView {
     /// Something validation found that does not stop the render (F-13).
     Warned {
         detail: String,
+    },
+    /// Waiting on the voice service for this many seconds, or no longer
+    /// waiting (D-213).
+    VoiceWaiting {
+        seconds: Option<u64>,
     },
     Audio {
         index: usize,
@@ -1765,19 +1779,31 @@ async fn remove_scene_inner(
     scene: String,
 ) -> Result<String, String> {
     let root = project_root(&session, &root)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let removed = spoonstill_app::arrange::remove(std::path::Path::new(&root), &scene)
+    let worked_in = root.clone();
+    let (said, change) = tauri::async_runtime::spawn_blocking(move || {
+        let removed = spoonstill_app::arrange::remove(std::path::Path::new(&worked_in), &scene)
             .map_err(|e| e.to_string())?;
-        Ok(format!(
-            "Scene {} removed — its {} file{} moved to {}/, not deleted.",
-            removed.id,
-            removed.files,
-            if removed.files == 1 { "" } else { "s" },
-            spoonstill_app::arrange::REMOVED_DIR
+        // Undoable like a picture change (D-213). A removal whose files cannot
+        // be read back to record them is still a removal — it is only not on
+        // the undo list, and `removed/` still holds every file.
+        let change = spoonstill_app::picture::Change::scene_removed(&removed).ok();
+        Ok::<_, String>((
+            format!(
+                "Scene {} removed — its {} file{} moved to {}/, not deleted.",
+                removed.id,
+                removed.files,
+                if removed.files == 1 { "" } else { "s" },
+                spoonstill_app::arrange::REMOVED_DIR
+            ),
+            change,
         ))
     })
     .await
-    .map_err(|e| format!("the removal failed: {e}"))?
+    .map_err(|e| format!("the removal failed: {e}"))??;
+    if let Some(change) = change {
+        remember_change(&session, &root, change);
+    }
+    Ok(said)
 }
 
 /// Move a scene to another position in the film (D-100).
@@ -1822,27 +1848,34 @@ async fn move_scene_inner(
 
 /// Every voice a provider offers, or the sentence that says why there are none.
 #[tauri::command]
-async fn voices(provider: String) -> Result<Vec<VoiceView>, String> {
+async fn voices(provider: String) -> Result<CatalogueView, String> {
     journalled("voices", None, voices_inner(provider).await)
 }
 
-async fn voices_inner(provider: String) -> Result<Vec<VoiceView>, String> {
+async fn voices_inner(provider: String) -> Result<CatalogueView, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let engine = spoonstill_app::tts::provider(&provider).map_err(|e| e.to_string())?;
         if let spoonstill_app::tts::Availability::Missing(remedy) = engine.availability() {
             return Err(remedy.to_string());
         }
-        Ok(engine
-            .voices()
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .map(|v| VoiceView {
-                id: v.id,
-                locale: v.locale,
-                gender: v.gender,
-                note: v.note,
-            })
-            .collect())
+        // Remembered from the last fetch when the service will not answer
+        // (D-213): fourteen of these failed on 2026-11-01 while a render was
+        // waiting out a throttle, and choosing a voice needs no network.
+        let catalogue =
+            spoonstill_app::catalogue::voices(engine.as_ref()).map_err(|e| e.to_string())?;
+        Ok(CatalogueView {
+            remembered: catalogue.remembered,
+            voices: catalogue
+                .voices
+                .into_iter()
+                .map(|v| VoiceView {
+                    id: v.id,
+                    locale: v.locale,
+                    gender: v.gender,
+                    note: v.note,
+                })
+                .collect(),
+        })
     })
     .await
     .map_err(|e| format!("the voice list failed: {e}"))?
@@ -2443,6 +2476,7 @@ fn view_of(event: FilmEvent) -> ProgressView {
             reused,
         },
         FilmEvent::Failed { index, id, detail } => ProgressView::Failed { index, id, detail },
+        FilmEvent::VoiceWaiting { seconds } => ProgressView::VoiceWaiting { seconds },
         FilmEvent::Joining { segments } => ProgressView::Joining { segments },
     }
 }

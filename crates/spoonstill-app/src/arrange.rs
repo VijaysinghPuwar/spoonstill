@@ -156,6 +156,11 @@ pub struct Removed {
     pub files: usize,
     /// How many scenes are left.
     pub remaining: usize,
+    /// Where each file went in `removed/`, so the window can take the removal
+    /// back (D-213).
+    pub binned: Vec<PathBuf>,
+    /// Where the scene was, counting from one.
+    pub position: usize,
 }
 
 /// Every scene in the folder, in render order.
@@ -298,8 +303,9 @@ pub fn remove(root: &Path, id: &str) -> Result<Removed, ArrangeError> {
     // doing, so `recover` finishes the removal rather than leaving a scene in
     // two places.
     let parked = park_for_removal(root, scene)?;
+    let mut binned = Vec::with_capacity(parked.len());
     for path in &parked {
-        finish_removal(root, path)?;
+        binned.push(finish_removal(root, path)?);
     }
 
     renumber(root, &kept)?;
@@ -309,7 +315,66 @@ pub fn remove(root: &Path, id: &str) -> Result<Removed, ArrangeError> {
         moved_to: bin,
         files: scene.files.len(),
         remaining: kept.len(),
+        binned,
+        position: at + 1,
     })
+}
+
+/// Put a removed scene back where it was (D-213) — the other half of
+/// [`remove`], so that a Remove pressed on the wrong row, or twice, is one
+/// keystroke from undone rather than a search through `removed/`.
+///
+/// On 2026-11-01 the author removed scene 601, removed "601" again two
+/// seconds later — which after the renumber was the scene that had been 602 —
+/// and pressed Undo six times to be told there was nothing to undo.
+///
+/// Two steps, each one a rename this module already trusts: the files come
+/// back as a new **last** scene, and then [`move_to`] takes that scene to
+/// `position` through the journalled renumber (D-121, D-201). An interruption
+/// between them leaves the scene whole at the end of the film, never split
+/// and never over another file. Restoring through `renumber` directly would
+/// be wrong in a quiet way: a bin file called `601.jpg` already *has* the name
+/// position 601 wants, so `already_named` would leave it in `removed/`.
+///
+/// # Errors
+///
+/// [`ArrangeError::Occupied`] when the new last scene's name is taken — by a
+/// file belonging to no scene — and nothing has moved; [`ArrangeError::Io`]
+/// when a removed file is gone or the filesystem refuses.
+pub fn restore(root: &Path, binned: &[PathBuf], position: usize) -> Result<Moved, ArrangeError> {
+    let all = scenes(root)?;
+    let width = all
+        .iter()
+        .map(|scene| scene.id.len())
+        .max()
+        .unwrap_or(MIN_WIDTH)
+        .max(MIN_WIDTH)
+        .max((all.len() + 1).to_string().len());
+    let last = all.iter().map(|scene| scene.number).max().unwrap_or(0) + 1;
+    let stem = format!("{last:0width$}");
+
+    // Every question asked before the first rename, so a refusal has changed
+    // nothing.
+    let mut plan = Vec::with_capacity(binned.len());
+    for file in binned {
+        if !file.is_file() {
+            return Err(ArrangeError::Io {
+                doing: "finding a removed file to put back",
+                path: file.clone(),
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            });
+        }
+        let extension = file.extension().and_then(OsStr::to_str).unwrap_or_default();
+        let destination = root.join(format!("{stem}.{extension}"));
+        if destination.exists() || plan.iter().any(|(_, d)| *d == destination) {
+            return Err(ArrangeError::Occupied { path: destination });
+        }
+        plan.push((file.clone(), destination));
+    }
+    for (from, to) in &plan {
+        rename(from, to)?;
+    }
+    move_to(root, &stem, position)
 }
 
 /// Move the scene at `id` so that it ends up in position `to` (1-based).
@@ -558,7 +623,7 @@ fn park_for_removal(root: &Path, scene: &Scene) -> Result<Vec<PathBuf>, ArrangeE
 /// names and carry no record of having been part of this scene, so finishing is
 /// the only reading that leaves the scene whole in one place. Nothing is lost
 /// either way — `removed/` is what the operator drags back from (D-100).
-fn finish_removal(root: &Path, parked: &Path) -> Result<(), ArrangeError> {
+fn finish_removal(root: &Path, parked: &Path) -> Result<PathBuf, ArrangeError> {
     let bin = root.join(REMOVED_DIR);
     fs::create_dir_all(&bin).map_err(|source| ArrangeError::Io {
         doing: "making the removed folder",
@@ -585,7 +650,8 @@ fn finish_removal(root: &Path, parked: &Path) -> Result<(), ArrangeError> {
         destination = bin.join(format!("{stem}-{nth}.{extension}"));
         nth += 1;
     }
-    rename(parked, &destination)
+    rename(parked, &destination)?;
+    Ok(destination)
 }
 
 /// The name a file wears on its way out of the project.
@@ -1126,6 +1192,87 @@ mod tests {
         assert_eq!(kept.len(), 2, "both are kept");
         assert!(kept.contains(&"003.jpeg".to_owned()));
         assert!(kept.contains(&"004.jpeg".to_owned()), "{kept:?}");
+    }
+
+    /// The author's 2026-11-01 sequence (D-213): remove a scene, remove the
+    /// same number again — which after the renumber is the next scene — then
+    /// take both back, newest first. Every photograph returns to its own
+    /// position with its own script, compared by content.
+    #[test]
+    fn two_removals_are_put_back_in_reverse_order_exactly() {
+        let project = Project::new(
+            "restore",
+            &[
+                ("001", &["jpeg", "txt"]),
+                ("002", &["jpeg", "txt"]),
+                ("003", &["jpeg", "txt"]),
+                ("004", &["jpeg", "txt"]),
+            ],
+        );
+        let before = project.listing();
+        let first = remove(project.path(), "002").expect("first");
+        let second = remove(project.path(), "002").expect("second, which was 003");
+        assert_eq!(project.contents(), vec!["001.jpeg", "004.jpeg"]);
+
+        restore(project.path(), &second.binned, second.position).expect("second back");
+        restore(project.path(), &first.binned, first.position).expect("first back");
+
+        assert_eq!(
+            project.contents(),
+            vec!["001.jpeg", "002.jpeg", "003.jpeg", "004.jpeg"]
+        );
+        assert_eq!(
+            project.listing(),
+            before,
+            "every script is beside its still again"
+        );
+        for scene in scenes(project.path()).expect("numbered") {
+            let text = scene
+                .files
+                .iter()
+                .find(|f| f.extension().is_some_and(|e| e == "txt"));
+            let text = fs::read_to_string(text.expect("a script")).expect("readable");
+            assert_eq!(
+                text,
+                format!("{}.txt", scene.id),
+                "scene {} kept its own line",
+                scene.id
+            );
+        }
+        let bin: Vec<_> = fs::read_dir(project.path().join(REMOVED_DIR))
+            .expect("the bin")
+            .flatten()
+            .collect();
+        assert!(bin.is_empty(), "nothing is left in removed/: {bin:?}");
+    }
+
+    /// A removed file that is gone refuses and moves nothing; a scene waiting
+    /// for its picture (D-193) is a scene, and the restore goes around it.
+    #[test]
+    fn a_restore_refuses_a_missing_file_and_respects_a_waiting_scene() {
+        let project = three();
+        let removed = remove(project.path(), "001").expect("removed");
+        let listing = project.listing();
+        let gone = vec![removed.binned[0].with_file_name("not-there.jpeg")];
+        assert!(restore(project.path(), &gone, 1).is_err());
+        assert_eq!(project.listing(), listing, "nothing moved");
+
+        fs::write(
+            project.path().join("003.txt"),
+            "a line waiting for its picture",
+        )
+        .expect("write");
+        restore(project.path(), &removed.binned, removed.position).expect("back");
+        assert_eq!(
+            project.contents(),
+            vec![
+                "001.jpeg",
+                "002.jpeg",
+                "003.jpeg",
+                "a line waiting for its picture"
+            ],
+            "back at the front, and the waiting line still last"
+        );
     }
 
     #[test]

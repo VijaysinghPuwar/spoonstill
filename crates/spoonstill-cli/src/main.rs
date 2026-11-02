@@ -1165,8 +1165,15 @@ fn list_voices(args: &VoicesArgs) -> Result<(), String> {
     }
 
     let wanted = args.filter.as_deref().map(str::to_lowercase);
-    let voices = match provider.voices() {
-        Ok(voices) => voices,
+    // Remembered from the last fetch when the service will not answer (D-213):
+    // a throttled machine can still be shown what it can choose from.
+    let voices = match spoonstill_app::catalogue::voices(provider.as_ref()) {
+        Ok(catalogue) => {
+            if let Some(why) = &catalogue.remembered {
+                println!("  {why}");
+            }
+            catalogue.voices
+        }
         // The same rule as a missing provider above, for the case that comment
         // names and this branch used to miss: a machine whose provider is
         // installed but whose network is down — or which the voice service is
@@ -1628,6 +1635,9 @@ fn render_project(args: RenderArgs) -> Result<(), String> {
         FilmEvent::Failed { id, detail, .. } => {
             eprintln!("  FAILED {id}: {detail}");
         }
+        // The window draws this as a state on its progress line; a terminal
+        // has already printed the throttle warning and carries on (D-213).
+        FilmEvent::VoiceWaiting { .. } => {}
         FilmEvent::Joining { segments } => {
             println!("  joining {segments} segments (stream copy, D-040)");
         }

@@ -356,10 +356,17 @@ async function loadFallbackVoice() {
   }
 
   let catalogue = [];
+  // What to say under the list. "Install the voice service first" used to be
+  // said for every failure, including a throttled machine that has it
+  // installed (D-213) — the remedy for the wrong problem.
+  let why = "";
   try {
-    catalogue = await invoke("voices", { provider: "edge" });
-  } catch {
+    const answer = await invoke("voices", { provider: "edge" });
+    catalogue = answer.voices ?? [];
+    why = answer.remembered ?? "";
+  } catch (error) {
     catalogue = [];
+    why = String(error);
   }
 
   select.innerHTML = "";
@@ -379,7 +386,7 @@ async function loadFallbackVoice() {
   select.value = appDefaultVoice ?? "";
   select.disabled = catalogue.length === 0;
 
-  said.textContent = catalogue.length === 0 ? "Install the voice service first." : "";
+  said.textContent = why || (catalogue.length === 0 ? "Install the voice service first." : "");
 }
 
 async function setFallbackVoice(id) {
@@ -864,14 +871,23 @@ function drawArrange(box, scene, showing) {
 // One arrangement, then a reload — the folder is the truth and it has changed
 // under us, so nothing here edits the model in place.
 async function arrange(command, args, said) {
-  if (rendering) return;
+  // One at a time (D-213): a second click landing while the first renumber is
+  // still running would start another renumber of the same folder, from a
+  // grid that no longer matches it. `pictureBusy` is the same flag the picture
+  // changes and Undo hold, because they rename the same files.
+  if (rendering || pictureBusy) return;
+  pictureBusy = true;
   try {
     setStatus("Rearranging…");
     const answer = await invoke(command, args);
     await load(project.root);
-    setStatus(said ?? String(answer));
+    // A removal can be taken back now, so it says so where it is reported.
+    if (command === "remove_scene") sayWithUndo(said ?? String(answer));
+    else setStatus(said ?? String(answer));
   } catch (error) {
     setStatus(String(error));
+  } finally {
+    pictureBusy = false;
   }
 }
 
@@ -1185,8 +1201,12 @@ async function loadVoices() {
     return;
   }
 
+  let remembered = null;
   try {
-    voices = await invoke("voices", { provider: project.provider });
+    // The saved copy when the service will not answer, and it says so (D-213).
+    const catalogue = await invoke("voices", { provider: project.provider });
+    voices = catalogue.voices ?? [];
+    remembered = catalogue.remembered ?? null;
   } catch (error) {
     voicesLoaded = false;
     state.className = "state missing";
@@ -1216,10 +1236,14 @@ async function loadVoices() {
     voiceName(a).localeCompare(voiceName(b)));
 
   const spoken = count("tts");
-  state.className = "state ready";
-  state.textContent =
-    `${project.provider} is ready — ${voices.length} voices, ` +
-    `${spoken} scene${spoken === 1 ? "" : "s"} will be spoken.`;
+  state.className = remembered ? "state missing" : "state ready";
+  state.textContent = remembered
+    ? `${remembered} ${spoken} scene${spoken === 1 ? "" : "s"} will be spoken once it answers.`
+    : `${project.provider} is ready — ${voices.length} voices, ` +
+      `${spoken} scene${spoken === 1 ? "" : "s"} will be spoken.`;
+  // Asked again the next time this screen opens, so a fresh list replaces the
+  // saved one as soon as the service is back.
+  if (remembered) voicesLoaded = false;
 
   drawLocales();
   drawVoiceChoice();
@@ -1701,7 +1725,28 @@ async function render() {
 
   const progress = new Channel();
   let done = 0;
+  // Seconds the voice service has been turning this machine away, or null
+  // (D-213). Drawn on the progress line itself, because a counter that stops
+  // moving with nothing beside it reads as a frozen window — and on
+  // 2026-11-01 one project's window was closed on it twelve times.
+  let waitingFor = null;
+  const drawLine = () => {
+    let line = `${done} of ${project.scenes.length}`;
+    if (waitingFor !== null) {
+      const minutes = Math.floor(waitingFor / 60);
+      const lasted = minutes < 1 ? "under a minute" : `${minutes} min`;
+      line +=
+        ` \u2014 waiting for Microsoft's voice service (${lasted} so far). ` +
+        "It carries on by itself; stopping loses nothing.";
+    }
+    el("progress-line").textContent = line;
+  };
   progress.onmessage = (event) => {
+    if (event.kind === "voiceWaiting") {
+      waitingFor = event.seconds ?? null;
+      drawLine();
+      return;
+    }
     if (event.kind === "planned") {
       note(`${event.scenes} scenes, ${event.jobs} at a time, ${event.audio_jobs} narrations at a time`);
       // Every render says what encodes it, so "is it using my graphics card"
@@ -1754,7 +1799,7 @@ async function render() {
         reused: event.reused,
       });
       el("bar").style.width = `${(done / project.scenes.length) * 100}%`;
-      el("progress-line").textContent = `${done} of ${project.scenes.length}`;
+      drawLine();
     } else if (event.kind === "failed") {
       live.set(event.index, { ...current, failed: event.detail });
       note(`${event.id} failed — ${event.detail}`, true);

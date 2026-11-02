@@ -523,6 +523,35 @@ pub enum Change {
     },
     /// A picture moved, or two swapped.
     Moved(Moved),
+    /// A whole scene was removed (D-213), and can be put back where it was.
+    SceneRemoved {
+        /// The scene's number when it was removed.
+        scene: String,
+        /// Each file in `removed/`, with content evidence that it is still the
+        /// file that left.
+        binned: Vec<(PathBuf, String)>,
+        /// Where it was in the film, counting from one.
+        position: usize,
+    },
+}
+
+impl Change {
+    /// The undo entry for a scene [`crate::arrange::remove`] just took out.
+    ///
+    /// # Errors
+    ///
+    /// When a removed file cannot be read to record its content.
+    pub fn scene_removed(removed: &crate::arrange::Removed) -> Result<Self, PictureError> {
+        Ok(Self::SceneRemoved {
+            scene: removed.id.clone(),
+            binned: removed
+                .binned
+                .iter()
+                .map(|path| Ok((path.clone(), file_hash(path)?)))
+                .collect::<Result<_, PictureError>>()?,
+            position: removed.position,
+        })
+    }
 }
 
 /// Take back one [`Change`].
@@ -603,7 +632,35 @@ pub fn undo(root: &Path, change: &Change) -> Result<String, PictureError> {
                 moved.from
             ))
         }
+        Change::SceneRemoved {
+            scene,
+            binned,
+            position,
+        } => {
+            for (path, hash) in binned {
+                if !path.is_file() || file_hash(path)? != *hash {
+                    return Err(changed(format!("removed/{}", file_label(path))));
+                }
+            }
+            let paths: Vec<PathBuf> = binned.iter().map(|(path, _)| path.clone()).collect();
+            let back =
+                crate::arrange::restore(root, &paths, *position).map_err(|e| PictureError::Io {
+                    doing: format!("putting scene {scene} back"),
+                    detail: e.to_string(),
+                })?;
+            Ok(format!(
+                "Undone — the scene removed as {scene} is back at position {}.",
+                back.to
+            ))
+        }
     }
+}
+
+fn file_label(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 /// What moving a picture did.

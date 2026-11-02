@@ -266,6 +266,19 @@ pub enum FilmEvent {
         /// What went wrong, already phrased for an operator.
         detail: String,
     },
+    /// Whether the render is waiting on the voice service right now (D-213).
+    ///
+    /// The throttle warning above it is said once per streak, as a sentence;
+    /// this is the *state*, sent when it starts, every
+    /// [`WAITING_REPORT_EVERY`] while it lasts, and once more with `None` when
+    /// it ends. On 2026-11-01 one project was started twelve times and the
+    /// window closed on it twelve times inside four hours, each time while a
+    /// counter that had stopped moving said nothing about why.
+    VoiceWaiting {
+        /// How long the service has been turning this machine away, or `None`
+        /// once it answers again.
+        seconds: Option<u64>,
+    },
     /// Every segment is valid; the join is starting.
     Joining {
         /// How many segments.
@@ -1256,8 +1269,17 @@ fn watch_voice_service(
 ) {
     let gate = spoonstill_tts::pace::Gate::shared();
     let mut told = None;
+    // Which report of the waiting state was sent last: `None` for "not
+    // waiting", otherwise how many `WAITING_REPORT_EVERY` into the streak.
+    let mut reported: Option<u64> = None;
     while !finished.load(std::sync::atomic::Ordering::Acquire) {
         let now = std::time::Instant::now();
+        let waiting = gate.throttle().map(|t| t.for_how_long.as_secs());
+        let step = waiting.map(|s| s / WAITING_REPORT_EVERY.as_secs());
+        if step != reported {
+            reported = step;
+            on_event(FilmEvent::VoiceWaiting { seconds: waiting });
+        }
         if let Some(throttle) = gate.throttle()
             && worth_announcing(told, throttle.episode, now)
         {
@@ -1286,6 +1308,9 @@ fn watch_voice_service(
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
 }
+
+/// How often [`FilmEvent::VoiceWaiting`] says how long the wait has lasted.
+const WAITING_REPORT_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// How often a throttle is announced at most, however many streaks it has.
 const ANNOUNCE_AT_MOST_EVERY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
