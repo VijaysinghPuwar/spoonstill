@@ -30,26 +30,6 @@
 
 [advisories]
 ignore = [
-    # --- The GTK3 stack, and glib's unsoundness with it -----------------------
-    #
-    # Linux only, through Tauri's webview. Verified per target with
-    # `cargo tree --target <triple> -e normal -i <crate>`: absent on both
-    # aarch64-apple-darwin and x86_64-pc-windows-msvc, present only on
-    # x86_64-unknown-linux-gnu. Nothing spoonstill publishes contains them.
-    #
-    # They are gtk-rs's own announcement that the GTK3 bindings are done, not a
-    # defect report. The fix is upstream Tauri moving to GTK4, and there is
-    # nothing to do here in the meantime except not pretend otherwise.
-    "RUSTSEC-2024-0411", # gdkwayland-sys  unmaintained
-    "RUSTSEC-2024-0412", # gdk             unmaintained
-    "RUSTSEC-2024-0413", # atk             unmaintained
-    "RUSTSEC-2024-0414", # gdkx11-sys      unmaintained
-    "RUSTSEC-2024-0415", # gtk             unmaintained
-    "RUSTSEC-2024-0416", # atk-sys         unmaintained
-    "RUSTSEC-2024-0417", # gdkx11          unmaintained
-    "RUSTSEC-2024-0418", # gdk-sys         unmaintained
-    "RUSTSEC-2024-0419", # gtk3-macros     unmaintained
-    "RUSTSEC-2024-0420", # gtk-sys         unmaintained
     # The one *unsound* advisory in the whole report, and it is in this group:
     # `glib::VariantStrIter`'s `Iterator` impl. Same reasoning — absent from
     # every target we publish. If a Linux build is ever added, this is the entry
